@@ -1,0 +1,26 @@
+# Aquifer configuration
+# Set CONFIG_PATH=/path/to/aquifer.yml to load this file.
+#
+# defaults apply to any upstream not explicitly listed.
+# upstreams are matched by hostname.
+#
+# Response headers from the upstream are the final say on pace —
+# they can only reduce below your configured ceiling, never exceed it.
+
+defaults:
+  rps: 2
+  max_concurrent: 1
+
+upstreams:
+  api.openai.com:
+    rps: 10
+    max_concurrent: 3
+  api.anthropic.com:
+    rps: 10
+    max_concurrent: 3
+  api.stripe.com:
+    rps: 20
+    max_concurrent: 5
+  api.github.com:
+    rps: 5
+    max_concurrent: 2

@@ -1,0 +1,5 @@
+aquifer
+aquifer.db
+*.db
+tests/
+.git/

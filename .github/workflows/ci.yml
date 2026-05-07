@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: go build ./...
+
+      - name: Start target server
+        run: |
+          python3 tests/target_server.py &
+          echo "TARGET_PID=$!" >> $GITHUB_ENV
+
+      - name: Start Aquifer
+        run: |
+          ./aquifer &
+          echo "AQUIFER_PID=$!" >> $GITHUB_ENV
+          sleep 1
+
+      - name: Install hurl
+        run: |
+          VERSION=6.0.0
+          curl -LO https://github.com/Orange-OpenSource/hurl/releases/download/${VERSION}/hurl_${VERSION}_amd64.deb
+          sudo dpkg -i hurl_${VERSION}_amd64.deb
+
+      - name: Smoke test
+        run: hurl --test tests/smoke.hurl
+
+      - name: Load test
+        run: hurl --test --repeat 50 --jobs 10 tests/load.hurl
+
+      - name: Cleanup
+        if: always()
+        run: |
+          kill $AQUIFER_PID $TARGET_PID 2>/dev/null || true
+          rm -f aquifer.db
