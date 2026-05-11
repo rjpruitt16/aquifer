@@ -118,6 +118,22 @@ func (s *Store) UpdateStatus(jobID string, status Status) {
 	s.db.Exec(`UPDATE jobs SET status = ?, expires_at = ? WHERE id = ?`, string(status), expiresAt, jobID)
 }
 
+type StoreCounts struct {
+	TotalJobs  int64
+	QueueDepth int64
+}
+
+func (s *Store) Counts() StoreCounts {
+	var c StoreCounts
+	s.db.QueryRow(`
+		SELECT
+			COUNT(*) FILTER (WHERE status IN ('queued','in_flight')),
+			COUNT(*) FILTER (WHERE status = 'queued')
+		FROM jobs WHERE expires_at > ?
+	`, time.Now().UnixMilli()).Scan(&c.TotalJobs, &c.QueueDepth)
+	return c
+}
+
 func (s *Store) GetJob(jobID string) *Job {
 	row := s.db.QueryRow(`
 		SELECT id, user_id, url, method, body, headers, webhook_url, status, created_at

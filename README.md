@@ -175,6 +175,29 @@ With `X-Aquifer-Account-Queue: enabled`, each `(user_id, api_key)` pair gets its
 
 ---
 
+## Autoscaling
+
+Aquifer sends machine load data as headers on every outgoing request to your service:
+
+| Header                    | Value                                              |
+|---------------------------|----------------------------------------------------|
+| `X-Aquifer-Total-Jobs`    | Total jobs on this machine right now               |
+| `X-Aquifer-Queue-Depth`   | Jobs waiting to be dispatched                      |
+| `X-Aquifer-Flow-Rate`     | Current dispatch rate (RPS) for this queue         |
+
+Your service reads these headers and calls your autoscaler when the queue is growing:
+
+```python
+total_jobs = int(request.headers.get("X-Aquifer-Total-Jobs", 0))
+
+if total_jobs > 500:
+    scale_up()  # call Fly.io, AWS ASG, k8s HPA, etc.
+```
+
+This keeps the autoscaling decision in your hands — Aquifer exposes the signal, your service acts on it however fits your infrastructure.
+
+---
+
 ## Reliability
 
 - **Durable queue** — jobs persist to SQLite on every write

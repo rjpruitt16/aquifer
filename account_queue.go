@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -23,10 +24,15 @@ type jobDoneMsg struct {
 }
 
 type AccountQueue struct {
-	key   string
-	cmds  chan *Job
-	done  chan jobDoneMsg
-	store *Store
+	key        string
+	cmds       chan *Job
+	done       chan jobDoneMsg
+	store      *Store
+	currentRPS atomic.Int64 // stored as rps * 100
+}
+
+func (q *AccountQueue) RPS() float64 {
+	return float64(q.currentRPS.Load()) / 100
 }
 
 func NewAccountQueue(key string, rps float64, maxConc int, store *Store, onIdle func(string)) *AccountQueue {
@@ -59,7 +65,6 @@ func (q *AccountQueue) supervise(rps float64, maxConc int, onIdle func(string)) 
 		}()
 
 		if panicked {
-			// reclaim jobs that were in-flight when the goroutine died
 			recovered := q.store.RecoverInFlight(q.key)
 			for _, j := range recovered {
 				log.Printf("[AccountQueue] recovered in_flight job %s after panic", j.ID)
@@ -68,7 +73,6 @@ func (q *AccountQueue) supervise(rps float64, maxConc int, onIdle func(string)) 
 			continue
 		}
 
-		// normal idle exit — nothing left to do
 		if len(q.cmds) == 0 {
 			onIdle(q.key)
 			return
@@ -85,6 +89,7 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int) {
 	lastRequestAt := time.Time{}
 	inFlight := 0
 	queue := make([]*Job, 0, 64)
+	q.currentRPS.Store(int64(rps * 100))
 
 	for {
 		for len(queue) > 0 && inFlight < maxConc {
@@ -103,7 +108,8 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int) {
 
 			q.store.MarkInFlight(job.ID)
 
-			go func(j *Job) {
+			currentRPS := rps
+			go func(j *Job, flowRate float64) {
 				defer func() {
 					if r := recover(); r != nil {
 						log.Printf("[AccountQueue] panic executing job %s: %v", j.ID, r)
@@ -116,8 +122,8 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int) {
 						q.done <- jobDoneMsg{}
 					}
 				}()
-				q.done <- execute(j, q.store)
-			}(job)
+				q.done <- execute(j, q.store, flowRate)
+			}(job, currentRPS)
 		}
 
 		select {
@@ -128,15 +134,14 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int) {
 		case msg := <-q.done:
 			inFlight--
 			if msg.rps != nil {
-				// headers are final say — but cannot exceed what we configured
 				rps = math.Max(math.Min(*msg.rps, configuredRPS), minRPS)
 			} else if rps < configuredRPS {
-				// gradually recover toward configured ceiling when no restriction
 				rps = math.Min(rps*1.05, configuredRPS)
 			}
 			if msg.maxConcurrent != nil && *msg.maxConcurrent > 0 {
 				maxConc = int(math.Min(float64(*msg.maxConcurrent), float64(configuredMaxConc)))
 			}
+			q.currentRPS.Store(int64(rps * 100))
 			idle.Reset(5 * time.Minute)
 
 		case <-idle.C:
@@ -148,7 +153,7 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int) {
 	}
 }
 
-func execute(job *Job, store *Store) jobDoneMsg {
+func execute(job *Job, store *Store, flowRate float64) jobDoneMsg {
 	var resp *http.Response
 	var err error
 
@@ -159,7 +164,8 @@ func execute(job *Job, store *Store) jobDoneMsg {
 			time.Sleep(backoff)
 		}
 
-		resp, err = makeRequest(job)
+		counts := store.Counts()
+		resp, err = makeRequest(job, counts.TotalJobs, counts.QueueDepth, flowRate)
 		if err != nil {
 			continue
 		}
@@ -212,7 +218,7 @@ func execute(job *Job, store *Store) jobDoneMsg {
 	return msg
 }
 
-func makeRequest(job *Job) (*http.Response, error) {
+func makeRequest(job *Job, totalJobs, queueDepth int64, flowRate float64) (*http.Response, error) {
 	var bodyReader io.Reader
 	if job.Body != "" {
 		bodyReader = strings.NewReader(job.Body)
@@ -226,6 +232,10 @@ func makeRequest(job *Job) (*http.Response, error) {
 	for k, v := range job.Headers {
 		req.Header.Set(k, v)
 	}
+
+	req.Header.Set("X-Aquifer-Total-Jobs", fmt.Sprintf("%d", totalJobs))
+	req.Header.Set("X-Aquifer-Queue-Depth", fmt.Sprintf("%d", queueDepth))
+	req.Header.Set("X-Aquifer-Flow-Rate", fmt.Sprintf("%.2f", flowRate))
 
 	client := &http.Client{Timeout: 30 * time.Second}
 	return client.Do(req)

@@ -1,4 +1,6 @@
 aquifer
 aquifer.db
 *.db
+*.db-shm
+*.db-wal
 data/
