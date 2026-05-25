@@ -20,7 +20,8 @@ func main() {
 	cfg := LoadConfig(os.Getenv("CONFIG_PATH"))
 
 	store := NewStore(dbPath)
-	registry := NewRegistry(store, cfg)
+	broker := NewBroker()
+	registry := NewRegistry(store, cfg, broker)
 
 	queued := store.GetQueuedJobs()
 	if len(queued) > 0 {
@@ -30,7 +31,7 @@ func main() {
 		}
 	}
 
-	server := NewServer(store, registry)
+	server := NewServer(store, registry, broker)
 
 	log.Printf("Aquifer listening on :%s (db: %s)", port, dbPath)
 	log.Fatal(http.ListenAndServe(":"+port, server.Routes()))

@@ -10,15 +10,17 @@ type Registry struct {
 	workers    map[string]*URLWorker
 	store      *Store
 	cfg        *Config
+	broker     *Broker
 	totalJobs  atomic.Int64
 	queueDepth atomic.Int64
 }
 
-func NewRegistry(store *Store, cfg *Config) *Registry {
+func NewRegistry(store *Store, cfg *Config, broker *Broker) *Registry {
 	r := &Registry{
 		workers: make(map[string]*URLWorker),
 		store:   store,
 		cfg:     cfg,
+		broker:  broker,
 	}
 	counts := store.Counts()
 	r.totalJobs.Store(counts.TotalJobs)
@@ -37,7 +39,7 @@ func (r *Registry) Enqueue(job *Job) {
 	w, ok := r.workers[key]
 	if !ok {
 		rc := r.cfg.ForURL(job.URL)
-		w = NewURLWorker(key, rc.RPS, rc.MaxConcurrent, r.store, func(k string) {
+		w = NewURLWorker(key, rc.RPS, rc.MaxConcurrent, r.store, r.broker, func(k string) {
 			r.mu.Lock()
 			delete(r.workers, k)
 			r.mu.Unlock()

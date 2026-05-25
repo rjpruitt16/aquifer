@@ -2,21 +2,25 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"time"
 )
 
 type Server struct {
 	store    *Store
 	registry *Registry
+	broker   *Broker
 }
 
-func NewServer(store *Store, registry *Registry) *Server {
-	return &Server{store: store, registry: registry}
+func NewServer(store *Store, registry *Registry, broker *Broker) *Server {
+	return &Server{store: store, registry: registry, broker: broker}
 }
 
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /jobs", s.createJob)
+	mux.HandleFunc("GET /jobs/{id}/stream", s.streamJob)
 	mux.HandleFunc("GET /jobs/{id}", s.getJob)
 	mux.HandleFunc("GET /health", s.health)
 	return mux
@@ -78,6 +82,63 @@ func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func (s *Server) streamJob(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	job := s.store.GetJob(id)
+	if job == nil {
+		jsonError(w, "job not found", http.StatusNotFound)
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		jsonError(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	s.broker.SetDeliveryMode(id, "stream")
+	events, unsubscribe := s.broker.Subscribe(id)
+	defer unsubscribe()
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+
+	// Catchup events for states already passed before client connected
+	writeSSE(w, "queued", map[string]any{"job_id": id, "status": "queued"})
+	if job.Status == StatusInFlight {
+		writeSSE(w, "dispatching", map[string]any{"job_id": id})
+	}
+	flusher.Flush()
+
+	keepalive := time.NewTicker(30 * time.Second)
+	defer keepalive.Stop()
+
+	ctx := r.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			s.broker.SetDeliveryMode(id, "stream_fallback")
+			return
+
+		case event, ok := <-events:
+			if !ok {
+				return
+			}
+			writeSSE(w, event.Event, event.Data)
+			flusher.Flush()
+			if event.Event == "completed" || event.Event == "failed" {
+				return
+			}
+
+		case <-keepalive.C:
+			fmt.Fprintf(w, ": keepalive\n\n")
+			flusher.Flush()
+		}
+	}
 }
 
 func jsonError(w http.ResponseWriter, msg string, code int) {

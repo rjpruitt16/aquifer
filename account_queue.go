@@ -28,6 +28,7 @@ type AccountQueue struct {
 	cmds       chan *Job
 	done       chan jobDoneMsg
 	store      *Store
+	broker     *Broker
 	currentRPS atomic.Int64 // stored as rps * 100
 }
 
@@ -35,12 +36,13 @@ func (q *AccountQueue) RPS() float64 {
 	return float64(q.currentRPS.Load()) / 100
 }
 
-func NewAccountQueue(key string, rps float64, maxConc int, store *Store, onIdle func(string)) *AccountQueue {
+func NewAccountQueue(key string, rps float64, maxConc int, store *Store, broker *Broker, onIdle func(string)) *AccountQueue {
 	q := &AccountQueue{
-		key:   key,
-		cmds:  make(chan *Job, 1000),
-		done:  make(chan jobDoneMsg, 100),
-		store: store,
+		key:    key,
+		cmds:   make(chan *Job, 1000),
+		done:   make(chan jobDoneMsg, 100),
+		store:  store,
+		broker: broker,
 	}
 	go q.supervise(rps, maxConc, onIdle)
 	return q
@@ -84,6 +86,9 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int) {
 	idle := time.NewTimer(5 * time.Minute)
 	defer idle.Stop()
 
+	positionTicker := time.NewTicker(2 * time.Second)
+	defer positionTicker.Stop()
+
 	rps := configuredRPS
 	maxConc := configuredMaxConc
 	lastRequestAt := time.Time{}
@@ -122,7 +127,7 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int) {
 						q.done <- jobDoneMsg{}
 					}
 				}()
-				q.done <- execute(j, q.store, flowRate)
+				q.done <- execute(j, q.store, q.broker, flowRate)
 			}(job, currentRPS)
 		}
 
@@ -144,6 +149,14 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int) {
 			q.currentRPS.Store(int64(rps * 100))
 			idle.Reset(5 * time.Minute)
 
+		case <-positionTicker.C:
+			for i, j := range queue {
+				q.broker.Publish(j.ID, SSEEvent{
+					Event: "position",
+					Data:  map[string]any{"job_id": j.ID, "position": i + 1},
+				})
+			}
+
 		case <-idle.C:
 			if len(queue) == 0 && inFlight == 0 {
 				return
@@ -153,7 +166,12 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int) {
 	}
 }
 
-func execute(job *Job, store *Store, flowRate float64) jobDoneMsg {
+func execute(job *Job, store *Store, broker *Broker, flowRate float64) jobDoneMsg {
+	broker.Publish(job.ID, SSEEvent{
+		Event: "dispatching",
+		Data:  map[string]any{"job_id": job.ID},
+	})
+
 	var resp *http.Response
 	var err error
 
@@ -183,23 +201,39 @@ func execute(job *Job, store *Store, flowRate float64) jobDoneMsg {
 			reason = err.Error()
 		}
 		store.UpdateStatus(job.ID, StatusFailed)
-		deliverWebhook(job.WebhookURL, map[string]any{
-			"job_id": job.ID,
-			"status": "failed",
-			"reason": reason,
+		broker.Publish(job.ID, SSEEvent{
+			Event: "failed",
+			Data:  map[string]any{"job_id": job.ID, "reason": reason},
 		})
+		if broker.GetDeliveryMode(job.ID) != "stream" {
+			deliverWebhook(job.WebhookURL, map[string]any{
+				"job_id": job.ID,
+				"status": "failed",
+				"reason": reason,
+			})
+		}
 		return jobDoneMsg{}
 	}
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
 	store.UpdateStatus(job.ID, StatusCompleted)
-	deliverWebhook(job.WebhookURL, map[string]any{
-		"job_id":          job.ID,
-		"status":          "completed",
-		"response_status": resp.StatusCode,
-		"body":            string(body),
+	broker.Publish(job.ID, SSEEvent{
+		Event: "completed",
+		Data: map[string]any{
+			"job_id":          job.ID,
+			"response_status": resp.StatusCode,
+			"body":            string(body),
+		},
 	})
+	if broker.GetDeliveryMode(job.ID) != "stream" {
+		deliverWebhook(job.WebhookURL, map[string]any{
+			"job_id":          job.ID,
+			"status":          "completed",
+			"response_status": resp.StatusCode,
+			"body":            string(body),
+		})
+	}
 
 	msg := jobDoneMsg{}
 	if val := resp.Header.Get("X-Aquifer-Rps"); val != "" {
