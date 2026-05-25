@@ -128,6 +128,37 @@ Idempotent — duplicate `idempotent_key` per `user_id` returns the existing job
 }
 ```
 
+### GET /jobs/:id/stream
+
+Server-Sent Events stream for live job updates.
+
+```
+event: queued
+data: {"job_id":"a3f9...","status":"queued"}
+
+event: dispatching
+data: {"job_id":"a3f9..."}
+
+event: completed
+data: {"job_id":"a3f9...","response_status":200,"body":"..."}
+```
+
+Or `event: failed` with `{"job_id":"...","reason":"..."}`.
+
+**Position updates** — while the job waits in queue, a position event is broadcast every 2 seconds:
+```
+event: position
+data: {"job_id":"a3f9...","position":4}
+```
+
+```bash
+curl -N http://localhost:8080/jobs/<id>/stream
+```
+
+Connecting late is safe — you'll receive synthetic `queued` and `dispatching` catchup events for states you missed.
+
+**The Aqueduct Protocol** — SSE is the live view. Webhook is the guaranteed delivery. Both always fire regardless of whether the stream was open. Think of it like a phone call with voicemail: stay on the line (SSE) for real-time updates, or hang up and the result goes to voicemail (webhook). You never lose the result.
+
 ### GET /health
 
 ```json
@@ -158,6 +189,43 @@ Idempotent — duplicate `idempotent_key` per `user_id` returns the existing job
 ```
 
 Webhook delivery retries 4 times: 1 s · 2 s · 4 s · 8 s.
+
+---
+
+## L8 Protocol — trustless webhook delivery
+
+Traditional webhook security requires sharing a secret between sender and receiver and storing it in a database on both sides. Aquifer implements **L8 v0.1**, a lightweight challenge-response protocol that eliminates shared secrets entirely.
+
+**The attack surface problem L8 solves:** A shared HMAC secret is something that can be stolen, accidentally logged, forgotten to rotate, or compromised on either side. A stolen secret lets anyone forge webhook deliveries forever. L8 replaces that shared secret with public key cryptography — there is no secret to steal from a database.
+
+**How it works:**
+
+1. The receiver publishes a public key at `GET /.well-known/l8`
+2. Before the first delivery, Aquifer challenges the receiver to prove ownership of the corresponding private key — a one-time handshake
+3. Trust is cached to disk as `l8-trust/{domain}.json` — the handshake never runs again for that domain
+4. Every webhook delivery carries `X-L8-Signature` headers the receiver verifies locally with no database lookup and no round-trip to any authority
+
+**Why this keeps things fast:** Verification is a single local Ed25519 `verify()` call against a cached public key. No database query, no HTTP call, no shared state. Microseconds.
+
+**Key management:**
+
+Set `L8_PRIVATE_KEY` (base64 Ed25519 private key) for a stable identity across restarts. Without it, Aquifer auto-generates a key and saves it to `.l8-key` on first start.
+
+To revoke trust with a domain: delete `l8-trust/{domain}.json`. The handshake re-runs on next delivery.
+
+**Aquifer exposes:**
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /.well-known/l8` | Aquifer's public key and capabilities — receivers discover Aquifer here |
+| `POST /l8/challenge` | Handles incoming challenges from receivers verifying Aquifer's identity |
+| `GET /l8-spec` | The full L8 protocol spec — served on any running Aquifer instance |
+
+**Protocol version:** `0.1`. The version is advertised in `/.well-known/l8` and `GET /health` so agents can detect what capabilities are available. Future versions will add payload encryption (0.2) and formalized key rotation (0.3).
+
+The full protocol spec and verification examples are in [L8-SPEC.md](L8-SPEC.md), also browsable at `GET /l8-spec` on any running instance. The spec documents the receiver-side endpoints any service needs to implement to receive signed webhooks.
+
+See `tests/l8_receiver.py` for a complete reference implementation of the receiver side, and `tests/test_l8.py` for end-to-end tests that verify the handshake, signed delivery, and cryptographic signature validation.
 
 ---
 

@@ -17,7 +17,6 @@ type SSEEvent struct {
 type Broker struct {
 	mu          sync.RWMutex
 	subscribers map[string][]chan SSEEvent
-	delivery    sync.Map // jobID -> "webhook" | "stream" | "stream_fallback"
 }
 
 func NewBroker() *Broker {
@@ -58,17 +57,6 @@ func (b *Broker) Publish(jobID string, event SSEEvent) {
 		default: // never block if the subscriber is slow
 		}
 	}
-}
-
-func (b *Broker) SetDeliveryMode(jobID, mode string) {
-	b.delivery.Store(jobID, mode)
-}
-
-func (b *Broker) GetDeliveryMode(jobID string) string {
-	if v, ok := b.delivery.Load(jobID); ok {
-		return v.(string)
-	}
-	return "webhook"
 }
 
 func writeSSE(w http.ResponseWriter, event string, data map[string]any) error {

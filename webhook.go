@@ -11,23 +11,40 @@ import (
 
 const webhookMaxRetries = 4
 
-func deliverWebhook(url string, payload map[string]any) {
-	deliverWithRetry(url, payload, 0)
+func deliverWebhook(url string, payload map[string]any, l8 *L8Registry) {
+	deliverWithRetry(url, payload, 0, l8)
 }
 
-func deliverWithRetry(url string, payload map[string]any, attempt int) {
+func deliverWithRetry(rawURL string, payload map[string]any, attempt int, l8 *L8Registry) {
 	body, _ := json.Marshal(payload)
 
-	resp, err := http.Post(url, "application/json", bytes.NewReader(body))
+	if l8 != nil {
+		l8.EnsureTrust(rawURL)
+	}
+
+	req, err := http.NewRequest("POST", rawURL, bytes.NewReader(body))
+	if err != nil {
+		log.Printf("[Webhook] invalid URL %s: %v", rawURL, err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	if l8 != nil && l8.IsTrusted(rawURL) {
+		for k, v := range l8.SignHeaders(body) {
+			req.Header.Set(k, v)
+		}
+	}
+
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
 	if err != nil {
 		if attempt < webhookMaxRetries {
 			backoff := time.Duration(math.Pow(2, float64(attempt))) * time.Second
-			log.Printf("[Webhook] error delivering to %s, retry %d/%d in %s: %v", url, attempt+1, webhookMaxRetries, backoff, err)
+			log.Printf("[Webhook] error delivering to %s, retry %d/%d in %s: %v", rawURL, attempt+1, webhookMaxRetries, backoff, err)
 			time.Sleep(backoff)
-			deliverWithRetry(url, payload, attempt+1)
+			deliverWithRetry(rawURL, payload, attempt+1, l8)
 			return
 		}
-		log.Printf("[Webhook] giving up after %d retries for %s: %v", webhookMaxRetries, url, err)
+		log.Printf("[Webhook] giving up after %d retries for %s: %v", webhookMaxRetries, rawURL, err)
 		return
 	}
 	defer resp.Body.Close()
@@ -35,11 +52,11 @@ func deliverWithRetry(url string, payload map[string]any, attempt int) {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		if attempt < webhookMaxRetries {
 			backoff := time.Duration(math.Pow(2, float64(attempt))) * time.Second
-			log.Printf("[Webhook] %d from %s, retry %d/%d in %s", resp.StatusCode, url, attempt+1, webhookMaxRetries, backoff, )
+			log.Printf("[Webhook] %d from %s, retry %d/%d in %s", resp.StatusCode, rawURL, attempt+1, webhookMaxRetries, backoff)
 			time.Sleep(backoff)
-			deliverWithRetry(url, payload, attempt+1)
+			deliverWithRetry(rawURL, payload, attempt+1, l8)
 			return
 		}
-		log.Printf("[Webhook] giving up after %d retries, last status %d for %s", webhookMaxRetries, resp.StatusCode, url)
+		log.Printf("[Webhook] giving up after %d retries, last status %d for %s", webhookMaxRetries, resp.StatusCode, rawURL)
 	}
 }

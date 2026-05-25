@@ -11,10 +11,11 @@ type Server struct {
 	store    *Store
 	registry *Registry
 	broker   *Broker
+	l8       *L8Registry
 }
 
-func NewServer(store *Store, registry *Registry, broker *Broker) *Server {
-	return &Server{store: store, registry: registry, broker: broker}
+func NewServer(store *Store, registry *Registry, broker *Broker, l8 *L8Registry) *Server {
+	return &Server{store: store, registry: registry, broker: broker, l8: l8}
 }
 
 func (s *Server) Routes() http.Handler {
@@ -23,6 +24,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /jobs/{id}/stream", s.streamJob)
 	mux.HandleFunc("GET /jobs/{id}", s.getJob)
 	mux.HandleFunc("GET /health", s.health)
+	mux.HandleFunc("GET /.well-known/l8", s.wellKnownL8)
+	mux.HandleFunc("POST /l8/challenge", s.l8Challenge)
+	mux.HandleFunc("GET /l8-spec", s.l8Spec)
 	return mux
 }
 
@@ -81,7 +85,40 @@ func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	json.NewEncoder(w).Encode(map[string]any{
+		"status":       "ok",
+		"l8_protocol":  "0.1",
+		"l8_public_key": s.l8.PubB64,
+	})
+}
+
+func (s *Server) wellKnownL8(w http.ResponseWriter, r *http.Request) {
+	host := r.Host
+	if host == "" {
+		host = "localhost"
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(s.l8.Meta(host))
+}
+
+func (s *Server) l8Challenge(w http.ResponseWriter, r *http.Request) {
+	var req L8ChallengeReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	resp, err := s.l8.HandleChallenge(req)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+func (s *Server) l8Spec(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+	w.Write([]byte(l8SpecDocument))
 }
 
 func (s *Server) streamJob(w http.ResponseWriter, r *http.Request) {
@@ -98,7 +135,6 @@ func (s *Server) streamJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.broker.SetDeliveryMode(id, "stream")
 	events, unsubscribe := s.broker.Subscribe(id)
 	defer unsubscribe()
 
@@ -121,7 +157,6 @@ func (s *Server) streamJob(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-ctx.Done():
-			s.broker.SetDeliveryMode(id, "stream_fallback")
 			return
 
 		case event, ok := <-events:

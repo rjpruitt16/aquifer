@@ -60,7 +60,7 @@ func (s *Store) migrate() {
 }
 
 func (s *Store) CheckOrInsert(job *Job) (string, bool) {
-	hashed := hashKey(job.IdempotentKey)
+	hashed := hashKey(job.UserID + ":" + job.IdempotentKey)
 	headers, _ := json.Marshal(job.Headers)
 	expiresAt := time.Now().Add(ttlQueued).UnixMilli()
 

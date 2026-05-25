@@ -17,10 +17,11 @@ type URLWorker struct {
 	queues           map[string]*AccountQueue
 	store            *Store
 	broker           *Broker
+	l8               *L8Registry
 	onIdle           func(string)
 }
 
-func NewURLWorker(domain string, rps float64, maxConc int, store *Store, broker *Broker, onIdle func(string)) *URLWorker {
+func NewURLWorker(domain string, rps float64, maxConc int, store *Store, broker *Broker, l8 *L8Registry, onIdle func(string)) *URLWorker {
 	return &URLWorker{
 		domain:  domain,
 		rps:     rps,
@@ -28,6 +29,7 @@ func NewURLWorker(domain string, rps float64, maxConc int, store *Store, broker 
 		queues:  make(map[string]*AccountQueue),
 		store:   store,
 		broker:  broker,
+		l8:      l8,
 		onIdle:  onIdle,
 	}
 }
@@ -43,7 +45,7 @@ func (w *URLWorker) Enqueue(job *Job) {
 
 	q, ok := w.queues[key]
 	if !ok {
-		q = NewAccountQueue(key, w.rps, w.maxConc, w.store, w.broker, func(k string) {
+		q = NewAccountQueue(key, w.rps, w.maxConc, w.store, w.broker, w.l8, func(k string) {
 			w.mu.Lock()
 			delete(w.queues, k)
 			w.mu.Unlock()

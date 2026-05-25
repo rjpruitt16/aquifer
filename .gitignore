@@ -4,3 +4,7 @@ aquifer.db
 *.db-shm
 *.db-wal
 data/
+
+# L8 protocol — generated keys and trust cache
+.l8-key
+l8-trust/

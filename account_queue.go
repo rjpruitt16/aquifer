@@ -29,6 +29,7 @@ type AccountQueue struct {
 	done       chan jobDoneMsg
 	store      *Store
 	broker     *Broker
+	l8         *L8Registry
 	currentRPS atomic.Int64 // stored as rps * 100
 }
 
@@ -36,13 +37,14 @@ func (q *AccountQueue) RPS() float64 {
 	return float64(q.currentRPS.Load()) / 100
 }
 
-func NewAccountQueue(key string, rps float64, maxConc int, store *Store, broker *Broker, onIdle func(string)) *AccountQueue {
+func NewAccountQueue(key string, rps float64, maxConc int, store *Store, broker *Broker, l8 *L8Registry, onIdle func(string)) *AccountQueue {
 	q := &AccountQueue{
 		key:    key,
 		cmds:   make(chan *Job, 1000),
 		done:   make(chan jobDoneMsg, 100),
 		store:  store,
 		broker: broker,
+		l8:     l8,
 	}
 	go q.supervise(rps, maxConc, onIdle)
 	return q
@@ -123,11 +125,11 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int) {
 							"job_id": j.ID,
 							"status": "failed",
 							"reason": "internal panic",
-						})
+						}, q.l8)
 						q.done <- jobDoneMsg{}
 					}
 				}()
-				q.done <- execute(j, q.store, q.broker, flowRate)
+				q.done <- execute(j, q.store, q.broker, q.l8, flowRate)
 			}(job, currentRPS)
 		}
 
@@ -166,7 +168,7 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int) {
 	}
 }
 
-func execute(job *Job, store *Store, broker *Broker, flowRate float64) jobDoneMsg {
+func execute(job *Job, store *Store, broker *Broker, l8 *L8Registry, flowRate float64) jobDoneMsg {
 	broker.Publish(job.ID, SSEEvent{
 		Event: "dispatching",
 		Data:  map[string]any{"job_id": job.ID},
@@ -205,13 +207,11 @@ func execute(job *Job, store *Store, broker *Broker, flowRate float64) jobDoneMs
 			Event: "failed",
 			Data:  map[string]any{"job_id": job.ID, "reason": reason},
 		})
-		if broker.GetDeliveryMode(job.ID) != "stream" {
-			deliverWebhook(job.WebhookURL, map[string]any{
-				"job_id": job.ID,
-				"status": "failed",
-				"reason": reason,
-			})
-		}
+		deliverWebhook(job.WebhookURL, map[string]any{
+			"job_id": job.ID,
+			"status": "failed",
+			"reason": reason,
+		}, l8)
 		return jobDoneMsg{}
 	}
 	defer resp.Body.Close()
@@ -226,14 +226,12 @@ func execute(job *Job, store *Store, broker *Broker, flowRate float64) jobDoneMs
 			"body":            string(body),
 		},
 	})
-	if broker.GetDeliveryMode(job.ID) != "stream" {
-		deliverWebhook(job.WebhookURL, map[string]any{
-			"job_id":          job.ID,
-			"status":          "completed",
-			"response_status": resp.StatusCode,
-			"body":            string(body),
-		})
-	}
+	deliverWebhook(job.WebhookURL, map[string]any{
+		"job_id":          job.ID,
+		"status":          "completed",
+		"response_status": resp.StatusCode,
+		"body":            string(body),
+	}, l8)
 
 	msg := jobDoneMsg{}
 	if val := resp.Header.Get("X-Aquifer-Rps"); val != "" {
