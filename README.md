@@ -96,6 +96,28 @@ upstreams:
 
 ---
 
+## Metrics adapter
+
+Aquifer emits lifecycle events through a pluggable metrics adapter. Implement
+`MetricsAdapter` and pass it into `NewRegistry`:
+
+```go
+type MetricsAdapter interface {
+    JobQueued(userID, upstream string)
+    JobDispatched(userID, upstream string)
+    JobCompleted(userID, upstream string, durationMs int64)
+    JobFailed(userID, upstream string, reason string)
+    WebhookDelivered(url string, attempt int)
+    WebhookFailed(url string, attempts int)
+    QueueDepth(upstream string, depth int)
+    FlowRate(upstream string, rps float64)
+}
+```
+
+Aquifer ships with `NoopMetricsAdapter`, so existing deployments do not change.
+
+---
+
 ## API
 
 ### POST /jobs

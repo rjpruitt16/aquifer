@@ -27,7 +27,8 @@ func main() {
 
 	store := NewStore(dbPath)
 	broker := NewBroker()
-	registry := NewRegistry(store, cfg, broker, l8)
+	metrics := NoopMetricsAdapter{}
+	registry := NewRegistry(store, cfg, broker, l8, metrics)
 
 	queued := store.GetQueuedJobs()
 	if len(queued) > 0 {

@@ -12,17 +12,19 @@ type Registry struct {
 	cfg        *Config
 	broker     *Broker
 	l8         *L8Registry
+	metrics    MetricsAdapter
 	totalJobs  atomic.Int64
 	queueDepth atomic.Int64
 }
 
-func NewRegistry(store *Store, cfg *Config, broker *Broker, l8 *L8Registry) *Registry {
+func NewRegistry(store *Store, cfg *Config, broker *Broker, l8 *L8Registry, metrics MetricsAdapter) *Registry {
 	r := &Registry{
 		workers: make(map[string]*URLWorker),
 		store:   store,
 		cfg:     cfg,
 		broker:  broker,
 		l8:      l8,
+		metrics: ensureMetrics(metrics),
 	}
 	counts := store.Counts()
 	r.totalJobs.Store(counts.TotalJobs)
@@ -38,10 +40,11 @@ func (r *Registry) Enqueue(job *Job) {
 	r.queueDepth.Add(1)
 
 	key := domainKey(job.URL)
+	r.metrics.JobQueued(job.UserID, key)
 	w, ok := r.workers[key]
 	if !ok {
 		rc := r.cfg.ForURL(job.URL)
-		w = NewURLWorker(key, rc.RPS, rc.MaxConcurrent, r.store, r.broker, r.l8, func(k string) {
+		w = NewURLWorker(key, rc.RPS, rc.MaxConcurrent, r.store, r.broker, r.l8, r.metrics, func(k string) {
 			r.mu.Lock()
 			delete(r.workers, k)
 			r.mu.Unlock()
@@ -50,6 +53,7 @@ func (r *Registry) Enqueue(job *Job) {
 	}
 
 	w.Enqueue(job)
+	r.metrics.QueueDepth(key, int(r.queueDepth.Load()))
 }
 
 func (r *Registry) JobDispatched() {

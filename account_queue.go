@@ -25,11 +25,13 @@ type jobDoneMsg struct {
 
 type AccountQueue struct {
 	key        string
+	upstream   string
 	cmds       chan *Job
 	done       chan jobDoneMsg
 	store      *Store
 	broker     *Broker
 	l8         *L8Registry
+	metrics    MetricsAdapter
 	currentRPS atomic.Int64 // stored as rps * 100
 }
 
@@ -37,14 +39,16 @@ func (q *AccountQueue) RPS() float64 {
 	return float64(q.currentRPS.Load()) / 100
 }
 
-func NewAccountQueue(key string, rps float64, maxConc int, store *Store, broker *Broker, l8 *L8Registry, onIdle func(string)) *AccountQueue {
+func NewAccountQueue(key, upstream string, rps float64, maxConc int, store *Store, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, onIdle func(string)) *AccountQueue {
 	q := &AccountQueue{
-		key:    key,
-		cmds:   make(chan *Job, 1000),
-		done:   make(chan jobDoneMsg, 100),
-		store:  store,
-		broker: broker,
-		l8:     l8,
+		key:      key,
+		upstream: upstream,
+		cmds:     make(chan *Job, 1000),
+		done:     make(chan jobDoneMsg, 100),
+		store:    store,
+		broker:   broker,
+		l8:       l8,
+		metrics:  ensureMetrics(metrics),
 	}
 	go q.supervise(rps, maxConc, onIdle)
 	return q
@@ -110,10 +114,12 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int) {
 
 			job := queue[0]
 			queue = queue[1:]
+			q.metrics.QueueDepth(q.upstream, len(queue))
 			inFlight++
 			lastRequestAt = time.Now()
 
 			q.store.MarkInFlight(job.ID)
+			q.metrics.JobDispatched(job.UserID, q.upstream)
 
 			currentRPS := rps
 			go func(j *Job, flowRate float64) {
@@ -121,25 +127,28 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int) {
 					if r := recover(); r != nil {
 						log.Printf("[AccountQueue] panic executing job %s: %v", j.ID, r)
 						q.store.UpdateStatus(j.ID, StatusFailed)
+						q.metrics.JobFailed(j.UserID, q.upstream, "internal panic")
 						deliverWebhook(j.WebhookURL, map[string]any{
 							"job_id": j.ID,
 							"status": "failed",
 							"reason": "internal panic",
-						}, q.l8)
+						}, q.l8, q.metrics)
 						q.done <- jobDoneMsg{}
 					}
 				}()
-				q.done <- execute(j, q.store, q.broker, q.l8, flowRate)
+				q.done <- execute(j, q.upstream, q.store, q.broker, q.l8, q.metrics, flowRate)
 			}(job, currentRPS)
 		}
 
 		select {
 		case job := <-q.cmds:
 			queue = append(queue, job)
+			q.metrics.QueueDepth(q.upstream, len(queue))
 			idle.Reset(5 * time.Minute)
 
 		case msg := <-q.done:
 			inFlight--
+			prevRPS := rps
 			if msg.rps != nil {
 				rps = math.Max(math.Min(*msg.rps, configuredRPS), minRPS)
 			} else if rps < configuredRPS {
@@ -149,6 +158,9 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int) {
 				maxConc = int(math.Min(float64(*msg.maxConcurrent), float64(configuredMaxConc)))
 			}
 			q.currentRPS.Store(int64(rps * 100))
+			if rps != prevRPS {
+				q.metrics.FlowRate(q.upstream, rps)
+			}
 			idle.Reset(5 * time.Minute)
 
 		case <-positionTicker.C:
@@ -168,7 +180,10 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int) {
 	}
 }
 
-func execute(job *Job, store *Store, broker *Broker, l8 *L8Registry, flowRate float64) jobDoneMsg {
+func execute(job *Job, upstream string, store *Store, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, flowRate float64) jobDoneMsg {
+	metrics = ensureMetrics(metrics)
+	startedAt := time.Now()
+
 	broker.Publish(job.ID, SSEEvent{
 		Event: "dispatching",
 		Data:  map[string]any{"job_id": job.ID},
@@ -207,11 +222,12 @@ func execute(job *Job, store *Store, broker *Broker, l8 *L8Registry, flowRate fl
 			Event: "failed",
 			Data:  map[string]any{"job_id": job.ID, "reason": reason},
 		})
+		metrics.JobFailed(job.UserID, upstream, reason)
 		deliverWebhook(job.WebhookURL, map[string]any{
 			"job_id": job.ID,
 			"status": "failed",
 			"reason": reason,
-		}, l8)
+		}, l8, metrics)
 		return jobDoneMsg{}
 	}
 	defer resp.Body.Close()
@@ -226,12 +242,13 @@ func execute(job *Job, store *Store, broker *Broker, l8 *L8Registry, flowRate fl
 			"body":            string(body),
 		},
 	})
+	metrics.JobCompleted(job.UserID, upstream, time.Since(startedAt).Milliseconds())
 	deliverWebhook(job.WebhookURL, map[string]any{
 		"job_id":          job.ID,
 		"status":          "completed",
 		"response_status": resp.StatusCode,
 		"body":            string(body),
-	}, l8)
+	}, l8, metrics)
 
 	msg := jobDoneMsg{}
 	if val := resp.Header.Get("X-Aquifer-Rps"); val != "" {
