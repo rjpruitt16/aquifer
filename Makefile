@@ -1,7 +1,7 @@
 .PHONY: build test integration-test load-test start stop clean release
 
 build:
-	go build -o aquifer .
+	go build -o aquifer ./cmd/aquifer
 
 test: build start-servers
 	@echo "Running smoke tests..."

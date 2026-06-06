@@ -1,5 +1,5 @@
-aquifer
-aquifer.db
+/aquifer
+/aquifer.db
 *.db
 *.db-shm
 *.db-wal

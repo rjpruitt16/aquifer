@@ -4,6 +4,8 @@ import (
 	"context"
 	"log"
 	"os"
+
+	"github.com/rjpruitt16/aquifer"
 )
 
 func main() {
@@ -25,26 +27,9 @@ func main() {
 		dbPath = "aquifer.db"
 	}
 
-	cfg := LoadConfig(os.Getenv("CONFIG_PATH"))
-
 	l8KeyPath := os.Getenv("L8_KEY_PATH")
 	if l8KeyPath == "" {
 		l8KeyPath = ".l8-key"
-	}
-	l8 := NewL8Registry(l8KeyPath, "l8-trust")
-
-	store := NewStore(dbPath)
-	broker := NewBroker()
-	metrics := NoopMetricsAdapter{}
-	registry := NewRegistry(store, cfg, broker, l8, metrics)
-	aquifer := NewAquifer(store, registry, broker, l8)
-
-	queued := store.GetQueuedJobs()
-	if len(queued) > 0 {
-		log.Printf("recovering %d queued jobs from %s", len(queued), dbPath)
-		for _, job := range queued {
-			registry.Enqueue(job)
-		}
 	}
 
 	adapter := buildAdapter(adapterName, port)
@@ -57,17 +42,23 @@ func main() {
 	} else {
 		log.Printf("Aquifer running %s (db: %s)", adapter.Name(), dbPath)
 	}
-	if err := adapter.Start(context.Background(), aquifer); err != nil {
+
+	if err := aquifer.RunAdapter(context.Background(), adapter, aquifer.RuntimeOptions{
+		DBPath:     dbPath,
+		ConfigPath: os.Getenv("CONFIG_PATH"),
+		L8KeyPath:  l8KeyPath,
+		Metrics:    aquifer.NoopMetricsAdapter{},
+	}); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func buildAdapter(name, port string) FrameworkAdapter {
+func buildAdapter(name, port string) aquifer.FrameworkAdapter {
 	switch name {
 	case "http":
-		return NewHTTPAdapter(":" + port)
+		return aquifer.NewHTTPAdapter(":" + port)
 	case "mcp-stdio":
-		return NewMCPStdioAdapter(os.Stdin, os.Stdout)
+		return aquifer.NewMCPStdioAdapter(os.Stdin, os.Stdout)
 	default:
 		return nil
 	}

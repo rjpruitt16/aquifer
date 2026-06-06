@@ -1,4 +1,4 @@
-package main
+package aquifer
 
 import (
 	"crypto/sha256"
@@ -19,7 +19,8 @@ const (
 )
 
 type Store struct {
-	db *sql.DB
+	db   *sql.DB
+	path string
 }
 
 func NewStore(path string) *Store {
@@ -32,10 +33,14 @@ func NewStore(path string) *Store {
 	db.Exec("PRAGMA journal_mode=WAL")
 	db.Exec("PRAGMA synchronous=NORMAL")
 
-	s := &Store{db: db}
+	s := &Store{db: db, path: path}
 	s.migrate()
 	go s.cleanupLoop()
 	return s
+}
+
+func (s *Store) Path() string {
+	return s.path
 }
 
 func (s *Store) migrate() {

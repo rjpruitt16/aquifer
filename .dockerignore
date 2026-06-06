@@ -1,5 +1,7 @@
-aquifer
-aquifer.db
+/aquifer
+/aquifer.db
 *.db
 tests/
 .git/
+.gocache/
+.gomodcache/
