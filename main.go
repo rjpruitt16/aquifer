@@ -1,12 +1,20 @@
 package main
 
 import (
+	"context"
 	"log"
-	"net/http"
 	"os"
 )
 
 func main() {
+	adapterName := os.Getenv("AQUIFER_ADAPTER")
+	if adapterName == "" {
+		adapterName = "http"
+	}
+	if adapterName == "mcp-stdio" {
+		log.SetOutput(os.Stderr)
+	}
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
@@ -29,6 +37,7 @@ func main() {
 	broker := NewBroker()
 	metrics := NoopMetricsAdapter{}
 	registry := NewRegistry(store, cfg, broker, l8, metrics)
+	aquifer := NewAquifer(store, registry, broker, l8)
 
 	queued := store.GetQueuedJobs()
 	if len(queued) > 0 {
@@ -38,8 +47,28 @@ func main() {
 		}
 	}
 
-	server := NewServer(store, registry, broker, l8)
+	adapter := buildAdapter(adapterName, port)
+	if adapter == nil {
+		log.Fatalf("unknown AQUIFER_ADAPTER %q (expected http or mcp-stdio)", adapterName)
+	}
 
-	log.Printf("Aquifer listening on :%s (db: %s)", port, dbPath)
-	log.Fatal(http.ListenAndServe(":"+port, server.Routes()))
+	if adapter.Name() == "http" {
+		log.Printf("Aquifer listening on :%s (db: %s)", port, dbPath)
+	} else {
+		log.Printf("Aquifer running %s (db: %s)", adapter.Name(), dbPath)
+	}
+	if err := adapter.Start(context.Background(), aquifer); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func buildAdapter(name, port string) FrameworkAdapter {
+	switch name {
+	case "http":
+		return NewHTTPAdapter(":" + port)
+	case "mcp-stdio":
+		return NewMCPStdioAdapter(os.Stdin, os.Stdout)
+	default:
+		return nil
+	}
 }

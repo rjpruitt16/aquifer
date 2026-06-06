@@ -4,6 +4,8 @@ aquifer.db
 *.db-shm
 *.db-wal
 data/
+.gocache/
+.gomodcache/
 
 # L8 protocol — generated keys and trust cache
 .l8-key

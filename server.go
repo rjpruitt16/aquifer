@@ -1,21 +1,50 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
 )
 
 type Server struct {
-	store    *Store
-	registry *Registry
-	broker   *Broker
-	l8       *L8Registry
+	aquifer *Aquifer
 }
 
-func NewServer(store *Store, registry *Registry, broker *Broker, l8 *L8Registry) *Server {
-	return &Server{store: store, registry: registry, broker: broker, l8: l8}
+func NewServer(aquifer *Aquifer) *Server {
+	return &Server{aquifer: aquifer}
+}
+
+type HTTPAdapter struct {
+	addr string
+}
+
+func NewHTTPAdapter(addr string) *HTTPAdapter {
+	return &HTTPAdapter{addr: addr}
+}
+
+func (a *HTTPAdapter) Name() string {
+	return "http"
+}
+
+func (a *HTTPAdapter) Start(ctx context.Context, aquifer *Aquifer) error {
+	server := &http.Server{
+		Addr:    a.addr,
+		Handler: NewServer(aquifer).Routes(),
+	}
+
+	go func() {
+		<-ctx.Done()
+		server.Shutdown(context.Background())
+	}()
+
+	err := server.ListenAndServe()
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
 }
 
 func (s *Server) Routes() http.Handler {
@@ -37,38 +66,25 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if msg := req.Validate(); msg != "" {
-		jsonError(w, msg, http.StatusBadRequest)
+	result, err := s.aquifer.Enqueue(req)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-
-	job := NewJob(&req)
-
-	if existingID, isDuplicate := s.store.CheckOrInsert(job); isDuplicate {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]any{
-			"job_id":    existingID,
-			"status":    "queued",
-			"duplicate": true,
-		})
-		return
-	}
-
-	s.registry.Enqueue(job)
 
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]any{
-		"job_id": job.ID,
-		"status": "queued",
-	})
+	if result.Duplicate {
+		w.WriteHeader(http.StatusOK)
+	} else {
+		w.WriteHeader(http.StatusCreated)
+	}
+	json.NewEncoder(w).Encode(result)
 }
 
 func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	job := s.store.GetJob(id)
-	if job == nil {
+	job, err := s.aquifer.GetJob(id)
+	if err != nil {
 		jsonError(w, "job not found", http.StatusNotFound)
 		return
 	}
@@ -85,20 +101,12 @@ func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
-		"status":       "ok",
-		"l8_protocol":  "0.1",
-		"l8_public_key": s.l8.PubB64,
-	})
+	json.NewEncoder(w).Encode(s.aquifer.Health())
 }
 
 func (s *Server) wellKnownL8(w http.ResponseWriter, r *http.Request) {
-	host := r.Host
-	if host == "" {
-		host = "localhost"
-	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(s.l8.Meta(host))
+	json.NewEncoder(w).Encode(s.aquifer.L8Metadata(r.Host))
 }
 
 func (s *Server) l8Challenge(w http.ResponseWriter, r *http.Request) {
@@ -107,7 +115,7 @@ func (s *Server) l8Challenge(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "invalid json", http.StatusBadRequest)
 		return
 	}
-	resp, err := s.l8.HandleChallenge(req)
+	resp, err := s.aquifer.HandleL8Challenge(req)
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
@@ -123,8 +131,8 @@ func (s *Server) l8Spec(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) streamJob(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	job := s.store.GetJob(id)
-	if job == nil {
+	job, events, unsubscribe, err := s.aquifer.SubscribeJob(id)
+	if err != nil {
 		jsonError(w, "job not found", http.StatusNotFound)
 		return
 	}
@@ -135,7 +143,6 @@ func (s *Server) streamJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	events, unsubscribe := s.broker.Subscribe(id)
 	defer unsubscribe()
 
 	w.Header().Set("Content-Type", "text/event-stream")

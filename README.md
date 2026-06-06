@@ -1,24 +1,30 @@
-# Aquifer — API Aqueduct
+# Aquifer — MCP Traffic Framework
 
-**Self-hosted API request queue. Controls the pace of inbound and outbound traffic so partial outages don't cascade.**
+**Self-hosted MCP server framework for coordinating HTTP traffic from distributed agents. Aquifer queues requests durably, controls dispatch pace, and exposes the same traffic core through pluggable adapters.**
 
 ---
 
 ## The problem
 
-APIs get hit in bursts — by agents, schedulers, or high-volume clients. Your backend gets overwhelmed on inbound. Your app gets 429s on outbound. One slow dependency takes everything else down with it.
+Distributed agents call tools and APIs in bursts. Your backend gets overwhelmed on inbound. Your app gets 429s on outbound. One slow dependency takes everything else down with it.
 
-Aquifer absorbs the burst, queues requests durably to SQLite, and releases them at the rate you configure. Your backend decides the pace. The upstream decides the pace. Whoever needs to slow things down — wins.
+Aquifer gives those agents a coordination layer. It absorbs the burst, queues requests durably to SQLite, and releases them at the rate you configure. Your backend decides the pace. The upstream decides the pace. Whoever needs to slow things down — wins.
 
 ---
 
 ## Two ways to use it
 
-**Inbound — protect your API**
+**MCP tools — coordinate distributed agents**
+```
+agents / MCP clients  →  aquifer_enqueue_job  →  Aquifer queue  →  target API
+```
+Agents call Aquifer as an MCP server instead of racing each other directly against the same backend or external API. Aquifer returns a job id immediately, dispatches the request at a controlled rate, and delivers the result to your webhook.
+
+**HTTP API — protect your API**
 ```
 agents / clients  →  POST /jobs to Aquifer  →  your backend (at controlled RPS)
 ```
-Agents hammering your API? Aquifer queues their requests and drains them to your backend at a pace it can handle. Your backend returns `X-Aquifer-Rps` headers to signal how fast it wants traffic in real time.
+Agents hammering your API over HTTP? Aquifer queues their requests and drains them to your backend at a pace it can handle. Your backend returns `X-Aquifer-Rps` headers to signal how fast it wants traffic in real time.
 
 **Outbound — respect external APIs**
 ```
@@ -32,7 +38,7 @@ In both cases — **the upstream response headers are the final say on pace.** Y
 
 ## How it works
 
-1. Client POSTs a job (target URL, method, headers, body, webhook URL) and moves on
+1. Client submits a job through an adapter (MCP tool or HTTP endpoint) and moves on
 2. Aquifer persists it to SQLite — survives crashes, re-dispatches on restart
 3. A per-upstream worker dispatches at your configured RPS with jitter
 4. On completion Aquifer POSTs your webhook with the response body and status
@@ -90,9 +96,54 @@ upstreams:
 
 | Env var       | Default      | Description                    |
 |---------------|--------------|--------------------------------|
+| `AQUIFER_ADAPTER` | `http`   | Runtime adapter: `http` or `mcp-stdio` |
 | `PORT`        | `8080`       | HTTP listen port               |
 | `DB_PATH`     | `aquifer.db` | SQLite database path           |
 | `CONFIG_PATH` | _(none)_     | Path to rate limit config YAML |
+
+---
+
+## Framework adapters
+
+Aquifer has a framework-neutral core and adapter front doors. The core owns idempotency, persistence, rate control, dispatch, SSE events, L8 signing, and webhook delivery. Adapters translate framework-specific calls into that core.
+
+```go
+type FrameworkAdapter interface {
+    Name() string
+    Start(ctx context.Context, aquifer *Aquifer) error
+}
+```
+
+Current adapters:
+
+| Adapter | Env | Purpose |
+|---------|-----|---------|
+| HTTP | `AQUIFER_ADAPTER=http` | Existing REST/SSE API on `PORT` |
+| MCP stdio | `AQUIFER_ADAPTER=mcp-stdio` | MCP server exposing Aquifer tools over stdio |
+
+Run as an MCP stdio server:
+
+```bash
+AQUIFER_ADAPTER=mcp-stdio aquifer
+```
+
+MCP tools:
+
+| Tool | Purpose |
+|------|---------|
+| `aquifer_enqueue_job` | Queue an HTTP request for durable, rate-controlled dispatch |
+| `aquifer_get_job` | Fetch job status and metadata |
+| `aquifer_health` | Return health and protocol metadata |
+| `aquifer_l8_metadata` | Return L8 public key metadata |
+| `aquifer_l8_challenge` | Answer an L8 challenge |
+
+MCP resources:
+
+| Resource | Purpose |
+|----------|---------|
+| `aquifer://jobs/{job_id}` | Read current job status and metadata as JSON |
+
+The HTTP adapter remains the default so existing deployments do not change.
 
 ---
 
