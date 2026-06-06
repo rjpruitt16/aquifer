@@ -10,4 +10,5 @@ RUN apk add --no-cache ca-certificates
 WORKDIR /app
 COPY --from=builder /app/aquifer .
 EXPOSE 8080
+ENV AQUIFER_ADAPTER=mcp-stdio
 CMD ["./aquifer"]

@@ -57,6 +57,7 @@ aquifer
 **Docker**
 ```bash
 docker run -p 8080:8080 -v $(pwd)/data:/data \
+  -e AQUIFER_ADAPTER=http \
   -e DB_PATH=/data/aquifer.db \
   ghcr.io/rjpruitt16/aquifer
 ```
@@ -96,7 +97,7 @@ upstreams:
 
 | Env var       | Default      | Description                    |
 |---------------|--------------|--------------------------------|
-| `AQUIFER_ADAPTER` | `http`   | Runtime adapter: `http` or `mcp-stdio` |
+| `AQUIFER_ADAPTER` | `http` for binary, `mcp-stdio` in Docker image | Runtime adapter: `http` or `mcp-stdio` |
 | `PORT`        | `8080`       | HTTP listen port               |
 | `DB_PATH`     | `aquifer.db` | SQLite database path           |
 | `CONFIG_PATH` | _(none)_     | Path to rate limit config YAML |
@@ -126,6 +127,8 @@ Run as an MCP stdio server:
 ```bash
 AQUIFER_ADAPTER=mcp-stdio aquifer
 ```
+
+The published Docker image defaults to `AQUIFER_ADAPTER=mcp-stdio` so MCP directories such as Glama can start and introspect it directly. Set `AQUIFER_ADAPTER=http` when running Aquifer as an HTTP queue service.
 
 MCP tools:
 

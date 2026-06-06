@@ -4,6 +4,7 @@ primary_region = "iad"
 [build]
 
 [env]
+  AQUIFER_ADAPTER = "http"
   PORT = "8080"
   DB_PATH = "/data/aquifer.db"
 
