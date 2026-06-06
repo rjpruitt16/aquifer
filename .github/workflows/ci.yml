@@ -18,7 +18,9 @@ jobs:
           go-version-file: go.mod
 
       - name: Build
-        run: go build ./...
+        run: |
+          go build ./...
+          go build -o aquifer ./cmd/aquifer
 
       - name: Start target server
         run: |
