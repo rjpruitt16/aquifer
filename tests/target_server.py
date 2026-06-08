@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Upstream target + webhook receiver for Aquifer tests.
-Returns X-Aquifer-* headers to drive faster pacing.
+Returns X-Aqueduct-* headers to drive faster pacing.
 Tracks webhook deliveries by job_id for stream fallback tests.
 Implements the L8 receiver protocol for signed-delivery tests.
 """
@@ -143,8 +143,8 @@ class Handler(BaseHTTPRequestHandler):
 
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
-        self.send_header("X-Aquifer-Rps", str(RPS))
-        self.send_header("X-Aquifer-Max-Concurrent", str(MAX_CONCURRENT))
+        self.send_header("X-Aqueduct-Rps", str(RPS))
+        self.send_header("X-Aqueduct-Max-Concurrent", str(MAX_CONCURRENT))
         self.end_headers()
         self.wfile.write(json.dumps({"request": n}).encode())
 

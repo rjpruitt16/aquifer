@@ -251,20 +251,27 @@ func execute(job *Job, upstream string, store *Store, broker *Broker, l8 *L8Regi
 	}, l8, metrics)
 
 	msg := jobDoneMsg{}
-	if val := resp.Header.Get("X-Aquifer-Rps"); val != "" {
+	if val := pacingHeader(resp.Header, "Rps"); val != "" {
 		var rps float64
 		fmt.Sscanf(val, "%f", &rps)
 		msg.rps = &rps
 	}
-	if val := resp.Header.Get("X-Aquifer-Max-Concurrent"); val != "" {
+	if val := pacingHeader(resp.Header, "Max-Concurrent"); val != "" {
 		var max int
 		fmt.Sscanf(val, "%d", &max)
 		msg.maxConcurrent = &max
 	}
-	if val := resp.Header.Get("X-Aquifer-Account-Queue"); val != "" {
+	if val := pacingHeader(resp.Header, "Account-Queue"); val != "" {
 		msg.accountQueue = &val
 	}
 	return msg
+}
+
+func pacingHeader(headers http.Header, name string) string {
+	if val := headers.Get("X-Aqueduct-" + name); val != "" {
+		return val
+	}
+	return headers.Get("X-Aquifer-" + name)
 }
 
 func makeRequest(job *Job, totalJobs, queueDepth int64, flowRate float64) (*http.Response, error) {
@@ -282,10 +289,15 @@ func makeRequest(job *Job, totalJobs, queueDepth int64, flowRate float64) (*http
 		req.Header.Set(k, v)
 	}
 
-	req.Header.Set("X-Aquifer-Total-Jobs", fmt.Sprintf("%d", totalJobs))
-	req.Header.Set("X-Aquifer-Queue-Depth", fmt.Sprintf("%d", queueDepth))
-	req.Header.Set("X-Aquifer-Flow-Rate", fmt.Sprintf("%.2f", flowRate))
+	setLoadHeader(req.Header, "Total-Jobs", fmt.Sprintf("%d", totalJobs))
+	setLoadHeader(req.Header, "Queue-Depth", fmt.Sprintf("%d", queueDepth))
+	setLoadHeader(req.Header, "Flow-Rate", fmt.Sprintf("%.2f", flowRate))
 
 	client := &http.Client{Timeout: 30 * time.Second}
 	return client.Do(req)
+}
+
+func setLoadHeader(headers http.Header, name, value string) {
+	headers.Set("X-Aqueduct-"+name, value)
+	headers.Set("X-Aquifer-"+name, value)
 }

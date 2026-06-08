@@ -24,7 +24,7 @@ Agents call Aquifer as an MCP server instead of racing each other directly again
 ```
 agents / clients  →  POST /jobs to Aquifer  →  your backend (at controlled RPS)
 ```
-Agents hammering your API over HTTP? Aquifer queues their requests and drains them to your backend at a pace it can handle. Your backend returns `X-Aquifer-Rps` headers to signal how fast it wants traffic in real time.
+Agents hammering your API over HTTP? Aquifer queues their requests and drains them to your backend at a pace it can handle. Your backend returns `X-Aqueduct-Rps` headers to signal how fast it wants traffic in real time.
 
 **Outbound — respect external APIs**
 ```
@@ -34,6 +34,8 @@ Calling a rate-limited upstream? Aquifer queues the calls and dispatches them at
 
 In both cases — **the upstream response headers are the final say on pace.** Your config sets the ceiling. Headers can only reduce below it, never exceed it. When pressure clears, the rate recovers gradually back to your ceiling.
 
+This is not only rate limiting after something breaks. It is dynamic pacing before the failure. Services you control can tell agent traffic to slow down while they keep serving requests, giving autoscalers time to add capacity instead of forcing clients into retries, 429 storms, or cascading outages. If many tools, agents, and services speak the same pacing headers, traffic across the internet can coordinate more gracefully instead of every client guessing alone.
+
 ---
 
 ## How it works
@@ -42,7 +44,7 @@ In both cases — **the upstream response headers are the final say on pace.** Y
 2. Aquifer persists it to SQLite — survives crashes, re-dispatches on restart
 3. A per-upstream worker dispatches at your configured RPS with jitter
 4. On completion Aquifer POSTs your webhook with the response body and status
-5. The upstream can adjust the rate live via `X-Aquifer-*` response headers
+5. The upstream can adjust the rate live via `X-Aqueduct-*` response headers
 
 ---
 
@@ -371,34 +373,44 @@ See `tests/l8_receiver.py` for a complete reference implementation of the receiv
 
 ---
 
-## Dynamic rate control
+## Dynamic Pacing
 
-The upstream controls pace at runtime via response headers:
+The upstream controls pace at runtime via response headers. `X-Aqueduct-*` is the protocol namespace; `X-Aquifer-*` remains supported as a backward-compatible product alias.
 
 | Header                      | Effect                                       |
 |-----------------------------|----------------------------------------------|
-| `X-Aquifer-Rps`             | Reduce dispatch rate to this value           |
-| `X-Aquifer-Max-Concurrent`  | Reduce max in-flight requests                |
-| `X-Aquifer-Account-Queue`   | `enabled` — isolate each tenant's queue      |
+| `X-Aqueduct-Rps`            | Reduce dispatch rate to this value           |
+| `X-Aqueduct-Max-Concurrent` | Reduce max in-flight requests                |
+| `X-Aqueduct-Account-Queue`  | `enabled` — isolate each tenant's queue      |
 
-With `X-Aquifer-Account-Queue: enabled`, each `(user_id, api_key)` pair gets its own independently paced queue. One tenant's burst can't slow down another.
+With `X-Aqueduct-Account-Queue: enabled`, each `(user_id, api_key)` pair gets its own independently paced queue. One tenant's burst can't slow down another.
+
+Aquifer reads both namespaces, preferring `X-Aqueduct-*` when both are present:
+
+| Preferred | Compatibility alias |
+|-----------|---------------------|
+| `X-Aqueduct-Rps` | `X-Aquifer-Rps` |
+| `X-Aqueduct-Max-Concurrent` | `X-Aquifer-Max-Concurrent` |
+| `X-Aqueduct-Account-Queue` | `X-Aquifer-Account-Queue` |
+
+Dynamic pacing is useful for your own servers because it lets them shed pressure gradually while still making progress. A backend can lower RPS when CPU, queue depth, database latency, or downstream dependency pressure rises; Aquifer will honor that lower pace immediately, and then recover gradually toward the configured ceiling when pressure clears.
 
 ---
 
 ## Autoscaling
 
-Aquifer sends machine load data as headers on every outgoing request to your service:
+Aquifer sends machine load data as headers on every outgoing request to your service. It sends both `X-Aqueduct-*` and `X-Aquifer-*` names for compatibility.
 
 | Header                    | Value                                              |
 |---------------------------|----------------------------------------------------|
-| `X-Aquifer-Total-Jobs`    | Total jobs on this machine right now               |
-| `X-Aquifer-Queue-Depth`   | Jobs waiting to be dispatched                      |
-| `X-Aquifer-Flow-Rate`     | Current dispatch rate (RPS) for this queue         |
+| `X-Aqueduct-Total-Jobs`   | Total jobs on this machine right now               |
+| `X-Aqueduct-Queue-Depth`  | Jobs waiting to be dispatched                      |
+| `X-Aqueduct-Flow-Rate`    | Current dispatch rate (RPS) for this queue         |
 
 Your service reads these headers and calls your autoscaler when the queue is growing:
 
 ```python
-total_jobs = int(request.headers.get("X-Aquifer-Total-Jobs", 0))
+total_jobs = int(request.headers.get("X-Aqueduct-Total-Jobs", 0))
 
 if total_jobs > 500:
     scale_up()  # call Fly.io, AWS ASG, k8s HPA, etc.
