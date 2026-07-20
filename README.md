@@ -2,6 +2,8 @@
 
 **Self-hosted MCP server framework for coordinating HTTP traffic from distributed agents. Aquifer queues requests durably, controls dispatch pace, and exposes the same traffic core through pluggable adapters.**
 
+Built by [Rahmi Pruitt](https://rahmipruitt.me) — open to AI infra consulting, founding engineer, and contract work.
+
 ---
 
 ## The problem
