@@ -1,6 +1,6 @@
 # Aquifer — MCP Traffic Framework
 
-**Self-hosted MCP server framework for coordinating HTTP traffic from distributed agents. Aquifer queues requests durably, controls dispatch pace, and exposes the same traffic core through pluggable adapters.**
+**Self-hosted MCP server framework for coordinating HTTP traffic from distributed agents. Aquifer absorbs retry storms before they turn into a bigger LLM bill — durable queuing, controlled dispatch pace, and cryptographic agent identity via the L8 protocol, exposed through pluggable adapters.**
 
 Built by [Rahmi Pruitt](https://rahmipruitt.me) — open to AI infra consulting, founding engineer, and contract work.
 
