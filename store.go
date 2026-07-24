@@ -88,6 +88,14 @@ func (s *Store) SetQueueKey(jobID, queueKey string) {
 	s.db.Exec(`UPDATE jobs SET queue_key = ? WHERE id = ?`, queueKey, jobID)
 }
 
+// DeleteJob removes a job row outright. Used when a freshly-inserted,
+// non-duplicate job is rejected by admission control — CheckOrInsert already
+// wrote the row before duplicate status was known, so a rejected job must be
+// deleted here or it would sit as a ghost "queued" row that never dispatches.
+func (s *Store) DeleteJob(jobID string) {
+	s.db.Exec(`DELETE FROM jobs WHERE id = ?`, jobID)
+}
+
 func (s *Store) MarkInFlight(jobID string) {
 	s.db.Exec(`UPDATE jobs SET status = 'in_flight' WHERE id = ?`, jobID)
 }

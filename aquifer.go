@@ -11,14 +11,15 @@ type EnqueueResult struct {
 }
 
 type Aquifer struct {
-	store    *Store
-	registry *Registry
-	broker   *Broker
-	l8       *L8Registry
+	store     *Store
+	registry  *Registry
+	broker    *Broker
+	l8        *L8Registry
+	admission *AdmissionController
 }
 
-func NewAquifer(store *Store, registry *Registry, broker *Broker, l8 *L8Registry) *Aquifer {
-	return &Aquifer{store: store, registry: registry, broker: broker, l8: l8}
+func NewAquifer(store *Store, registry *Registry, broker *Broker, l8 *L8Registry, admission *AdmissionController) *Aquifer {
+	return &Aquifer{store: store, registry: registry, broker: broker, l8: l8, admission: admission}
 }
 
 func (a *Aquifer) Enqueue(req JobRequest) (EnqueueResult, error) {
@@ -27,6 +28,9 @@ func (a *Aquifer) Enqueue(req JobRequest) (EnqueueResult, error) {
 	}
 
 	job := NewJob(&req)
+
+	// Idempotency check comes first: a retried job that already exists must
+	// still succeed even while the system is over an admission limit.
 	if existingID, isDuplicate := a.store.CheckOrInsert(job); isDuplicate {
 		return EnqueueResult{
 			JobID:     existingID,
@@ -35,8 +39,47 @@ func (a *Aquifer) Enqueue(req JobRequest) (EnqueueResult, error) {
 		}, nil
 	}
 
-	a.registry.Enqueue(job)
+	// CheckOrInsert already wrote this job's row since it wasn't a duplicate.
+	// If admission rejects it now, that row must be deleted or it becomes a
+	// ghost "queued" entry that never dispatches.
+	if a.admission != nil {
+		if decision := a.admission.Check(); !decision.Allowed {
+			a.store.DeleteJob(job.ID)
+			return EnqueueResult{}, &AdmissionRejectedError{Decision: decision}
+		}
+	}
+
+	a.registry.Enqueue(job, req.AccountQueueMode)
 	return EnqueueResult{JobID: job.ID, Status: StatusQueued}, nil
+}
+
+// AdmissionSnapshot reports current admission pressure for /health. Returns
+// enabled:false if admission control isn't configured.
+func (a *Aquifer) AdmissionSnapshot() map[string]any {
+	if a.admission == nil {
+		return map[string]any{"enabled": false}
+	}
+	snap := a.admission.Snapshot()
+	snap["enabled"] = a.admission.AnyLimitConfigured()
+	return snap
+}
+
+// MaxBodyBytes returns the configured request body ceiling, or 0 if
+// unconfigured (unlimited).
+func (a *Aquifer) MaxBodyBytes() int64 {
+	if a.admission == nil {
+		return 0
+	}
+	return a.admission.MaxBodyBytes()
+}
+
+// RetryAfterSeconds returns the configured Retry-After value for 429
+// responses, defaulting to 5 seconds if admission control isn't configured.
+func (a *Aquifer) RetryAfterSeconds() int {
+	if a.admission == nil {
+		return 5
+	}
+	return a.admission.RetryAfterSeconds()
 }
 
 func (a *Aquifer) GetJob(id string) (*Job, error) {
@@ -62,6 +105,7 @@ func (a *Aquifer) Health() map[string]any {
 		"status":        "ok",
 		"l8_protocol":   "0.1",
 		"l8_public_key": a.l8.PubB64,
+		"admission":     a.AdmissionSnapshot(),
 	}
 }
 

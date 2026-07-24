@@ -6,21 +6,23 @@ import (
 )
 
 type RuntimeOptions struct {
-	DBPath     string
-	ConfigPath string
-	Config     *Config
-	L8KeyPath  string
-	L8TrustDir string
-	Metrics    MetricsAdapter
+	DBPath          string
+	ConfigPath      string
+	Config          *Config
+	L8KeyPath       string
+	L8TrustDir      string
+	Metrics         MetricsAdapter
+	AdmissionLimits *AdmissionLimits
 }
 
 type Runtime struct {
-	Aquifer  *Aquifer
-	Store    *Store
-	Broker   *Broker
-	Registry *Registry
-	L8       *L8Registry
-	Config   *Config
+	Aquifer   *Aquifer
+	Store     *Store
+	Broker    *Broker
+	Registry  *Registry
+	L8        *L8Registry
+	Config    *Config
+	Admission *AdmissionController
 }
 
 func NewRuntime(opts RuntimeOptions) *Runtime {
@@ -44,20 +46,28 @@ func NewRuntime(opts RuntimeOptions) *Runtime {
 		l8TrustDir = "l8-trust"
 	}
 
+	admissionLimits := opts.AdmissionLimits
+	if admissionLimits == nil {
+		loaded := LoadAdmissionLimits()
+		admissionLimits = &loaded
+	}
+
 	l8 := NewL8Registry(l8KeyPath, l8TrustDir)
 	store := NewStore(dbPath)
 	broker := NewBroker()
 	metrics := ensureMetrics(opts.Metrics)
 	registry := NewRegistry(store, cfg, broker, l8, metrics)
-	app := NewAquifer(store, registry, broker, l8)
+	admission := NewAdmissionController(*admissionLimits, dbPath)
+	app := NewAquifer(store, registry, broker, l8, admission)
 
 	return &Runtime{
-		Aquifer:  app,
-		Store:    store,
-		Broker:   broker,
-		Registry: registry,
-		L8:       l8,
-		Config:   cfg,
+		Aquifer:   app,
+		Store:     store,
+		Broker:    broker,
+		Registry:  registry,
+		L8:        l8,
+		Config:    cfg,
+		Admission: admission,
 	}
 }
 
@@ -69,7 +79,9 @@ func (r *Runtime) RecoverQueuedJobs(dbPath string) {
 
 	log.Printf("recovering %d queued jobs from %s", len(queued), dbPath)
 	for _, job := range queued {
-		r.Registry.Enqueue(job)
+		// No live HTTP request behind a recovered job, so no account-queue
+		// opinion — "" leaves each upstream's mode exactly as it was.
+		r.Registry.Enqueue(job, "")
 	}
 }
 

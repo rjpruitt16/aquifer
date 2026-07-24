@@ -60,14 +60,43 @@ func (s *Server) Routes() http.Handler {
 }
 
 func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
+	body := r.Body
+	if maxBytes := s.aquifer.MaxBodyBytes(); maxBytes > 0 {
+		body = http.MaxBytesReader(w, r.Body, maxBytes)
+	}
+
 	var req JobRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(body).Decode(&req); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			jsonErrorFields(w, "request body too large", http.StatusRequestEntityTooLarge, map[string]any{
+				"limit_bytes": maxErr.Limit,
+			})
+			return
+		}
 		jsonError(w, "invalid json", http.StatusBadRequest)
 		return
 	}
 
+	// Account-queue mode is a request header, never part of the JSON body —
+	// same X-Aqueduct-*/X-Aquifer-* precedence used for pacing headers
+	// elsewhere. Empty means "no opinion," leaving the upstream's current
+	// mode unchanged rather than forcing it off for every request that
+	// doesn't happen to set this.
+	req.AccountQueueMode = pacingHeader(r.Header, "Account-Queue")
+
 	result, err := s.aquifer.Enqueue(req)
 	if err != nil {
+		var admissionErr *AdmissionRejectedError
+		if errors.As(err, &admissionErr) {
+			w.Header().Set("Retry-After", fmt.Sprintf("%d", s.aquifer.RetryAfterSeconds()))
+			jsonErrorFields(w, err.Error(), http.StatusTooManyRequests, map[string]any{
+				"limit_reason": admissionErr.Decision.Reason,
+				"limit":        admissionErr.Decision.Limit,
+				"current":      admissionErr.Decision.Current,
+			})
+			return
+		}
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -187,4 +216,17 @@ func jsonError(w http.ResponseWriter, msg string, code int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+// jsonErrorFields writes an error body that also identifies which limit was
+// hit, so a caller (or an operator reading logs) knows exactly why a request
+// was rejected rather than just that it was.
+func jsonErrorFields(w http.ResponseWriter, msg string, code int, fields map[string]any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	body := map[string]any{"error": msg}
+	for k, v := range fields {
+		body[k] = v
+	}
+	json.NewEncoder(w).Encode(body)
 }

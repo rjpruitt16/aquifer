@@ -12,6 +12,8 @@ Distributed agents call tools and APIs in bursts. Your backend gets overwhelmed 
 
 Aquifer gives those agents a coordination layer. It absorbs the burst, queues requests durably to SQLite, and releases them at the rate you configure. Your backend decides the pace. The upstream decides the pace. Whoever needs to slow things down — wins.
 
+Real numbers on burst absorption, admission shedding, crash recovery, and multi-tenant fairness are in [benchmark.md](benchmark.md).
+
 ---
 
 ## Two ways to use it
@@ -105,6 +107,16 @@ upstreams:
 | `PORT`        | `8080`       | HTTP listen port               |
 | `DB_PATH`     | `aquifer.db` | SQLite database path           |
 | `CONFIG_PATH` | _(none)_     | Path to rate limit config YAML |
+| `AQUIFER_MEMORY_LIMIT_MB` | _(none, disabled)_ | Reject new jobs with `429` once process memory exceeds this many MB |
+| `AQUIFER_MAX_BODY_BYTES` | _(none, disabled)_ | Reject oversized request bodies with `413` |
+| `AQUIFER_DB_MAX_BYTES` | _(none, disabled)_ | Reject new jobs with `429` once the SQLite file exceeds this size |
+| `AQUIFER_RETRY_AFTER_SECONDS` | `5` | `Retry-After` header value sent on `429` admission rejections |
+
+Admission control is opt-in — leave these unset and Aquifer accepts everything, same as before.
+Set any one of them to start shedding load with clean `429`/`413` responses instead of degrading
+under memory or disk pressure. See [benchmark.md](benchmark.md) for real numbers, including what
+happens under sustained load, a 10x burst, a memory ceiling, a mid-flight crash, and multi-tenant
+fairness.
 
 ---
 
@@ -308,8 +320,24 @@ Connecting late is safe — you'll receive synthetic `queued` and `dispatching` 
 ### GET /health
 
 ```json
-{ "status": "ok" }
+{
+  "status": "ok",
+  "l8_protocol": "0.1",
+  "l8_public_key": "...",
+  "admission": {
+    "enabled": true,
+    "memory_mb": 42,
+    "memory_limit_mb": 400,
+    "max_body_bytes": 1048576,
+    "db_bytes": 81920,
+    "db_max_bytes": 104857600,
+    "retry_after_seconds": 5
+  }
+}
 ```
+
+`admission.enabled` is `false` (with only that key present) when none of the
+`AQUIFER_*` admission env vars are set.
 
 ---
 

@@ -1,0 +1,34 @@
+app = "aquifer-bench"
+primary_region = "iad"
+
+[build]
+
+[env]
+  AQUIFER_ADAPTER = "http"
+  PORT = "8080"
+  DB_PATH = "/data/aquifer.db"
+  AQUIFER_MEMORY_LIMIT_MB = "400"
+  AQUIFER_MAX_BODY_BYTES = "1048576"
+  AQUIFER_DB_MAX_BYTES = "104857600"
+  AQUIFER_RETRY_AFTER_SECONDS = "5"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 200
+    hard_limit = 250
+
+[[mounts]]
+  source = "aquifer_data"
+  destination = "/data"
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1

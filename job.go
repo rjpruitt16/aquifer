@@ -37,6 +37,12 @@ type JobRequest struct {
 	Headers       map[string]string `json:"headers,omitempty"`
 	Body          string            `json:"body,omitempty"`
 	WebhookURL    string            `json:"webhook_url"`
+
+	// AccountQueueMode is never read from the request body — it's set by the
+	// HTTP adapter from the X-Aqueduct-Account-Queue / X-Aquifer-Account-Queue
+	// request header, the only source of truth for this setting. Empty means
+	// "no opinion, leave the upstream's current mode unchanged."
+	AccountQueueMode string `json:"-"`
 }
 
 func (r *JobRequest) Validate() string {

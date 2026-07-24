@@ -32,7 +32,15 @@ func NewRegistry(store *Store, cfg *Config, broker *Broker, l8 *L8Registry, metr
 	return r
 }
 
-func (r *Registry) Enqueue(job *Job) {
+// Enqueue queues a job on the URLWorker for its upstream domain.
+// accountQueueHeader is the raw X-Aqueduct-Account-Queue/X-Aquifer-Account-Queue
+// value from the originating HTTP request, or "" if this job has no live
+// request behind it (e.g. recovered from disk at startup). An empty value
+// leaves the worker's current account-queue mode unchanged rather than
+// forcing it off — the mode is shared per upstream domain, so one request
+// that doesn't care about it shouldn't be able to flip it off for every
+// other concurrent tenant relying on it being on.
+func (r *Registry) Enqueue(job *Job, accountQueueHeader string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -50,6 +58,10 @@ func (r *Registry) Enqueue(job *Job) {
 			r.mu.Unlock()
 		})
 		r.workers[key] = w
+	}
+
+	if accountQueueHeader != "" {
+		w.handleAccountQueueHeader(accountQueueHeader)
 	}
 
 	w.Enqueue(job)

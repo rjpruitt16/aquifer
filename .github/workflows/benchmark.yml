@@ -1,0 +1,106 @@
+name: Benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      throughput_rate:
+        description: "Sustained throughput rate (req/s)"
+        default: "50"
+      burst_rate:
+        description: "Burst phase rate (req/s)"
+        default: "100"
+      admission_rate:
+        description: "Admission-pressure test rate (req/s)"
+        default: "150"
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Install vegeta
+        run: |
+          curl -sL https://github.com/tsenart/vegeta/releases/download/v12.11.1/vegeta_12.11.1_linux_amd64.tar.gz \
+            | tar -xz vegeta
+          sudo mv vegeta /usr/local/bin/vegeta
+
+      - name: Deploy fresh aquifer-bench (clean slate)
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          MACHINE_ID=$(fly machine list --app aquifer-bench --json | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0]['id'] if d else '')")
+          if [ -n "$MACHINE_ID" ]; then
+            fly machine destroy "$MACHINE_ID" --app aquifer-bench --force || true
+          fi
+          VOLUME_ID=$(fly volumes list --app aquifer-bench --json | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0]['id'] if d else '')")
+          if [ -n "$VOLUME_ID" ]; then
+            fly volumes destroy "$VOLUME_ID" --app aquifer-bench --yes || true
+          fi
+          fly volumes create aquifer_data --app aquifer-bench --region iad --size 1 --yes
+          fly deploy --app aquifer-bench --config fly.bench.toml
+
+      - name: Wait for health
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf https://aquifer-bench.fly.dev/health > /dev/null; then
+              echo "healthy after ~${i}s"
+              break
+            fi
+            sleep 1
+          done
+
+      - name: Run throughput benchmark
+        run: |
+          chmod +x benchmark/*.sh
+          ./benchmark/throughput.sh https://aquifer-bench.fly.dev "${{ inputs.throughput_rate }}" 30s \
+            | tee /tmp/throughput.txt
+
+      - name: Run burst benchmark
+        run: |
+          ./benchmark/burst.sh https://aquifer-bench.fly.dev 10 "${{ inputs.burst_rate }}" \
+            | tee /tmp/burst.txt
+
+      - name: Run crash recovery benchmark (in isolation)
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          ./benchmark/crash_recovery.sh https://aquifer-bench.fly.dev aquifer-bench 30 \
+            | tee /tmp/crash_recovery.txt
+
+      - name: Run fairness benchmark
+        run: |
+          ./benchmark/fairness.sh https://aquifer-bench.fly.dev 100 \
+            | tee /tmp/fairness.txt
+
+      - name: Provoke admission shedding (low ceiling)
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          fly deploy --app aquifer-bench --config fly.bench.toml -e AQUIFER_MEMORY_LIMIT_MB=15
+          ./benchmark/admission_degradation.sh https://aquifer-bench.fly.dev 30 20s \
+            | tee /tmp/admission_provoked.txt
+          fly deploy --app aquifer-bench --config fly.bench.toml
+
+      - name: Generate benchmark.md
+        run: |
+          python3 benchmark/generate_report.py \
+            --throughput /tmp/throughput.txt \
+            --burst /tmp/burst.txt \
+            --crash-recovery /tmp/crash_recovery.txt \
+            --fairness /tmp/fairness.txt \
+            --admission-provoked /tmp/admission_provoked.txt \
+            --out benchmark.md
+
+      - name: Commit updated benchmark.md
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add benchmark.md
+          git diff --cached --quiet && echo "no changes" || git commit -m "Update benchmark.md from automated run"
+          git push
