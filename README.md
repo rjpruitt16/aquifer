@@ -10,9 +10,9 @@ Built by [Rahmi Pruitt](https://rahmipruitt.me) — open to AI infra consulting,
 
 Distributed agents call tools and APIs in bursts. Your backend gets overwhelmed on inbound. Your app gets 429s on outbound. One slow dependency takes everything else down with it.
 
-Aquifer gives those agents a coordination layer. It absorbs the burst, queues requests durably to SQLite, and releases them at the rate you configure. Your backend decides the pace. The upstream decides the pace. Whoever needs to slow things down — wins.
+Aquifer gives those agents a coordination layer. It absorbs the burst, queues requests durably (SQLite by default, or Pebble — see below), and releases them at the rate you configure. Your backend decides the pace. The upstream decides the pace. Whoever needs to slow things down — wins.
 
-Real numbers on burst absorption, admission shedding, crash recovery, multi-tenant fairness, and capacity by machine size are in [benchmark.md](benchmark.md).
+**What the numbers actually say** (all in [benchmark.md](benchmark.md), same `shared-cpu-1x`/512MB Fly.io tier throughout): a 10x traffic spike gets absorbed with zero failures; 30/30 jobs survive a `kill -9` mid-drain; admission control sheds load with clean `429`s instead of falling over. The SQLite backend's real throughput ceiling is ~200-400 req/s on a single instance — found by chasing down a hardcoded single-connection bug, not assumed. Switching to the optional Pebble backend (`AQUIFER_STORE_BACKEND=pebble`) roughly doubles that ceiling to ~400-600 req/s, though more CPU cores don't move it further — the storage engine's own write path, not available compute, is what's actually serialized at that point.
 
 ---
 
