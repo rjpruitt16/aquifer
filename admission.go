@@ -6,7 +6,10 @@ import (
 	"os"
 	"runtime"
 	"strconv"
+	"sync/atomic"
 )
+
+const maxRetryAfterSeconds = 60
 
 // AdmissionLimits are operator-configured ceilings that protect Aquifer itself
 // from the traffic it's meant to be absorbing. All limits are opt-in: a zero
@@ -69,6 +72,13 @@ func (e *AdmissionRejectedError) Error() string {
 type AdmissionController struct {
 	limits AdmissionLimits
 	dbPath string
+
+	// rejectStreak counts consecutive rejections with no allowed request in
+	// between. Retry-After grows exponentially with it (capped) so clients
+	// that keep retrying into sustained overload back off harder over time
+	// instead of hammering the same 5s ceiling forever — that hammering is
+	// exactly what stops an overloaded instance from ever catching up.
+	rejectStreak atomic.Int64
 }
 
 func NewAdmissionController(limits AdmissionLimits, dbPath string) *AdmissionController {
@@ -82,6 +92,7 @@ func (c *AdmissionController) Check() AdmissionDecision {
 		currentMB := int64(m.Sys / (1024 * 1024))
 		if currentMB > c.limits.MemoryLimitMB {
 			log.Printf("admission: rejecting job — memory %dMB exceeds limit %dMB", currentMB, c.limits.MemoryLimitMB)
+			c.rejectStreak.Add(1)
 			return AdmissionDecision{Allowed: false, Reason: "memory", Limit: c.limits.MemoryLimitMB, Current: currentMB}
 		}
 	}
@@ -90,11 +101,13 @@ func (c *AdmissionController) Check() AdmissionDecision {
 		if info, err := os.Stat(c.dbPath); err == nil {
 			if info.Size() > c.limits.DBMaxBytes {
 				log.Printf("admission: rejecting job — db size %d bytes exceeds limit %d bytes", info.Size(), c.limits.DBMaxBytes)
+				c.rejectStreak.Add(1)
 				return AdmissionDecision{Allowed: false, Reason: "db_size", Limit: c.limits.DBMaxBytes, Current: info.Size()}
 			}
 		}
 	}
 
+	c.rejectStreak.Store(0)
 	return AdmissionDecision{Allowed: true}
 }
 
@@ -122,11 +135,28 @@ func (c *AdmissionController) Snapshot() map[string]any {
 	}
 }
 
+// RetryAfterSeconds returns the configured base value on the first rejection,
+// then doubles for each additional consecutive rejection (capped at
+// maxRetryAfterSeconds), resetting the moment a request is allowed again.
 func (c *AdmissionController) RetryAfterSeconds() int {
-	if c.limits.RetryAfterSeconds <= 0 {
-		return 5
+	base := c.limits.RetryAfterSeconds
+	if base <= 0 {
+		base = 5
 	}
-	return c.limits.RetryAfterSeconds
+
+	streak := c.rejectStreak.Load()
+	if streak <= 1 {
+		return base
+	}
+
+	backoff := base
+	for i := int64(1); i < streak && backoff < maxRetryAfterSeconds; i++ {
+		backoff *= 2
+	}
+	if backoff > maxRetryAfterSeconds {
+		backoff = maxRetryAfterSeconds
+	}
+	return backoff
 }
 
 func (c *AdmissionController) MaxBodyBytes() int64 {

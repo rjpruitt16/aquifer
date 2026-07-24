@@ -170,3 +170,51 @@ func TestAdmissionSnapshotReportsEnabledWhenConfigured(t *testing.T) {
 		t.Fatalf("expected enabled=true with a memory limit set, got %v", snap["enabled"])
 	}
 }
+
+func TestRetryAfterDoublesOnConsecutiveRejections(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "aquifer.db")
+	// 1MB is far below any running process's actual footprint, so every
+	// Check() below deterministically rejects.
+	c := NewAdmissionController(AdmissionLimits{MemoryLimitMB: 1, RetryAfterSeconds: 5}, dbPath)
+
+	want := []int{5, 10, 20, 40, 60, 60, 60}
+	for i, w := range want {
+		c.Check()
+		if got := c.RetryAfterSeconds(); got != w {
+			t.Fatalf("rejection #%d: expected Retry-After=%d, got %d", i+1, w, got)
+		}
+	}
+}
+
+func TestRetryAfterResetsAfterAllowedRequest(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "aquifer.db")
+	c := NewAdmissionController(AdmissionLimits{MemoryLimitMB: 1, RetryAfterSeconds: 5}, dbPath)
+
+	c.Check()
+	c.Check()
+	c.Check()
+	if got := c.RetryAfterSeconds(); got != 20 {
+		t.Fatalf("expected backoff to have grown to 20 after 3 rejections, got %d", got)
+	}
+
+	// Raise the limit so the next Check() is allowed, then drop it back down.
+	c.limits.MemoryLimitMB = 1_000_000
+	c.Check()
+	c.limits.MemoryLimitMB = 1
+
+	if got := c.RetryAfterSeconds(); got != 5 {
+		t.Fatalf("expected Retry-After to reset to base 5 after an allowed request, got %d", got)
+	}
+}
+
+func TestRetryAfterDefaultsWhenUnconfigured(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "aquifer.db")
+	c := NewAdmissionController(AdmissionLimits{MemoryLimitMB: 1}, dbPath)
+
+	if got := c.RetryAfterSeconds(); got != 5 {
+		t.Fatalf("expected default base Retry-After=5 with no rejections yet, got %d", got)
+	}
+}

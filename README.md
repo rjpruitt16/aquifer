@@ -12,7 +12,7 @@ Distributed agents call tools and APIs in bursts. Your backend gets overwhelmed 
 
 Aquifer gives those agents a coordination layer. It absorbs the burst, queues requests durably to SQLite, and releases them at the rate you configure. Your backend decides the pace. The upstream decides the pace. Whoever needs to slow things down — wins.
 
-Real numbers on burst absorption, admission shedding, crash recovery, and multi-tenant fairness are in [benchmark.md](benchmark.md).
+Real numbers on burst absorption, admission shedding, crash recovery, multi-tenant fairness, and capacity by machine size are in [benchmark.md](benchmark.md).
 
 ---
 
@@ -110,13 +110,20 @@ upstreams:
 | `AQUIFER_MEMORY_LIMIT_MB` | _(none, disabled)_ | Reject new jobs with `429` once process memory exceeds this many MB |
 | `AQUIFER_MAX_BODY_BYTES` | _(none, disabled)_ | Reject oversized request bodies with `413` |
 | `AQUIFER_DB_MAX_BYTES` | _(none, disabled)_ | Reject new jobs with `429` once the SQLite file exceeds this size |
-| `AQUIFER_RETRY_AFTER_SECONDS` | `5` | `Retry-After` header value sent on `429` admission rejections |
+| `AQUIFER_RETRY_AFTER_SECONDS` | `5` | Base `Retry-After` value sent on `429` admission rejections |
 
 Admission control is opt-in — leave these unset and Aquifer accepts everything, same as before.
 Set any one of them to start shedding load with clean `429`/`413` responses instead of degrading
 under memory or disk pressure. See [benchmark.md](benchmark.md) for real numbers, including what
-happens under sustained load, a 10x burst, a memory ceiling, a mid-flight crash, and multi-tenant
-fairness.
+happens under sustained load, a 10x burst, a memory ceiling, a mid-flight crash, multi-tenant
+fairness, and capacity/drain time by machine size.
+
+**Retry-After backs off exponentially under sustained pressure.** A single rejection returns
+your configured base value (default 5s). Each additional *consecutive* rejection — with no
+allowed request in between — doubles it: 5s → 10s → 20s → 40s → capped at 60s. The moment a
+request is allowed again, it resets to the base. This exists so that clients retrying into a
+sustained overload spread out over time instead of all hammering the same fixed 5-second ceiling
+forever, which is exactly the pattern that keeps an overloaded instance from ever catching up.
 
 ---
 
@@ -475,6 +482,20 @@ This keeps the autoscaling decision in your hands — Aquifer exposes the signal
 Aquifer is designed as a **sidecar on a single machine**. One instance per app server, SQLite on a local persistent volume — no external database, no coordination overhead.
 
 Running multiple instances against the same upstream without partitioning will multiply your request rate. If you scale horizontally, partition by upstream domain or tenant so each instance owns a distinct key space.
+
+---
+
+## Choosing a machine size
+
+Real measurements (not vendor specs) from [benchmark.md](benchmark.md#7-capacity-and-drain-time-by-machine-size): on Fly.io's `shared-cpu-1x` tier, 256MB, 512MB, and 1024MB instances all hit the identical ceiling — around 100-150 req/s sustained ingest, breaking down at 200 req/s with connection-level failures around 107-111MB of actual memory use. **The bottleneck was the single shared vCPU, not RAM** — giving Aquifer more memory alone didn't move the ceiling at all.
+
+Checklist for picking a size:
+
+- [ ] **Traffic sustains under ~100 req/s?** Any size works, including 256MB — there's no throughput reason to pay for more RAM.
+- [ ] **Traffic sustains above ~150 req/s?** You need more CPU (`shared-cpu-2x`/`4x`+), not more memory. Re-run `benchmark/capacity_by_size.sh` against your actual instance type to confirm your real ceiling before committing.
+- [ ] **Bursts happen but are followed by quiet periods?** A 500-job burst at a 50 RPS dispatch pace drains in about 75-77s on any size tested — scale that linearly against your own `CONFIG_PATH` rate to estimate your own catch-up time.
+- [ ] **Set `AQUIFER_MEMORY_LIMIT_MB` below where connection failures start, not just below total RAM.** An 80%-of-RAM ceiling never tripped in this test because the box became unresponsive from CPU/connection saturation first — the memory-based admission control only protects you if it can actually engage before something else breaks.
+- [ ] **Need genuine per-tenant fairness under a shared upstream?** Set `X-Aqueduct-Account-Queue: enabled` — see [Dynamic Pacing](#dynamic-pacing) above.
 
 ---
 

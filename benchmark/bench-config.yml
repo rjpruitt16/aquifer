@@ -1,0 +1,10 @@
+# Used only by the benchmark deployment (fly.bench.toml / Dockerfile.bench).
+# Default pacing (2 rps / 1 concurrent) is intentionally conservative for
+# production, but it would bottleneck dispatch at 2 req/s regardless of
+# machine size — making it impossible to see any difference in drain
+# throughput between a 256MB and a 1GB machine. This raises the ceiling so
+# capacity benchmarks measure what the machine can actually do, not the
+# default rate limit.
+defaults:
+  rps: 50
+  max_concurrent: 20

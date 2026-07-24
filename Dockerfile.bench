@@ -1,0 +1,16 @@
+FROM golang:1.25-alpine AS builder
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN go build -o aquifer ./cmd/aquifer
+
+FROM alpine:3.22
+RUN apk add --no-cache ca-certificates
+WORKDIR /app
+COPY --from=builder /app/aquifer .
+COPY benchmark/bench-config.yml ./bench-config.yml
+EXPOSE 8080
+ENV AQUIFER_ADAPTER=http
+ENV CONFIG_PATH=/app/bench-config.yml
+CMD ["./aquifer"]

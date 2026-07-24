@@ -1,0 +1,45 @@
+# Deployment config for the capacity/drain-time benchmark only (see
+# benchmark/capacity_by_size.sh). Uses Dockerfile.bench to raise per-domain
+# dispatch pacing well above the 2 RPS out-of-the-box default, so that drain
+# throughput reflects the machine's actual CPU/memory capacity rather than
+# the default rate ceiling. AQUIFER_MEMORY_LIMIT_MB and [[vm]] memory are
+# overridden per run via `fly deploy -e` / this file being rewritten per
+# machine size — see the benchmark script.
+app = "aquifer-bench"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile.bench"
+
+[env]
+  AQUIFER_ADAPTER = "http"
+  PORT = "8080"
+  DB_PATH = "/data/aquifer.db"
+  AQUIFER_MEMORY_LIMIT_MB = "400"
+  AQUIFER_MAX_BODY_BYTES = "1048576"
+  AQUIFER_DB_MAX_BYTES = "104857600"
+  AQUIFER_RETRY_AFTER_SECONDS = "5"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  # High enough that Fly's own proxy concurrency limit is never the
+  # bottleneck being measured — this benchmark is about the machine's real
+  # CPU/memory capacity, not an arbitrary proxy queue depth.
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 5000
+    hard_limit = 10000
+
+[[mounts]]
+  source = "aquifer_data"
+  destination = "/data"
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1

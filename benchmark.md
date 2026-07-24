@@ -2,7 +2,7 @@
 
 Real runs against a live deployment, not simulated numbers. Target: `aquifer-bench.fly.dev`, a single `shared-cpu-1x` / 512MB Fly.io machine in `iad`, `AQUIFER_MEMORY_LIMIT_MB=400`, default pacing config (2 RPS / 1 concurrent per upstream domain — no `CONFIG_PATH` set). Load generated with [vegeta](https://github.com/tsenart/vegeta); scripts are in [`benchmark/`](benchmark/).
 
-**A note on the default pacing config:** every scenario below dispatches to the same dummy upstream (`postman-echo.com`), and the out-of-the-box default is a conservative 2 requests/sec per upstream domain — intentional, since Aquifer's whole job is to protect upstreams that haven't told it otherwise. That means a large batch of jobs against one domain will queue for a while before fully draining; it's not a bottleneck in Aquifer itself, it's the configured ceiling doing exactly what it's supposed to. Production deployments set real per-domain rates via `CONFIG_PATH` (see the README's Configuration section).
+**A note on the default pacing config:** scenarios 1-6 below dispatch to the same dummy upstream (`postman-echo.com`) at the out-of-the-box default of 2 requests/sec per upstream domain — intentional, since Aquifer's whole job is to protect upstreams that haven't told it otherwise. That means a large batch of jobs against one domain will queue for a while before fully draining; it's not a bottleneck in Aquifer itself, it's the configured ceiling doing exactly what it's supposed to. Production deployments set real per-domain rates via `CONFIG_PATH` (see the README's Configuration section). Scenario 7 (capacity by machine size) is the exception — it deliberately raises the pacing ceiling so machine size, not the default rate limit, is what's being measured; see that section for details.
 
 ---
 
@@ -127,6 +127,53 @@ The quiet tenant's jobs complete on their own schedule — a few seconds each �
 
 ---
 
+## 6. Retry-After backs off exponentially under sustained pressure
+
+A single `429` returns the configured base `Retry-After` (default 5s). Consecutive rejections — no allowed request in between — double it, capped at 60s. The moment a request is allowed again, it resets. Verified against a live instance deliberately held over its memory ceiling, five requests in a row:
+
+```
+attempt 1: retry-after=5
+attempt 2: retry-after=10
+attempt 3: retry-after=20
+attempt 4: retry-after=40
+attempt 5: retry-after=60
+```
+
+The point is to stop clients from hammering a fixed 5-second ceiling forever once an instance is genuinely overloaded — that hammering pattern is exactly what prevents an overloaded instance from ever catching up. Spreading retries out over time gives it room to drain.
+
+---
+
+## 7. Capacity and drain time by machine size
+
+The question this answers: **given a traffic shape, what machine size actually fits it, and if a burst exceeds that, how long until the queue is caught up again?**
+
+Methodology: `aquifer-bench` redeployed at `shared-cpu-1x` with `--vm-memory` set to 256, 512, and 1024MB in turn — CPU was deliberately held constant at **1 shared vCPU across all three sizes** (only memory was varied), so any difference in the results isolates the effect of RAM alone. Per-domain dispatch pacing was raised to 50 RPS / 20 concurrent via a dedicated `Dockerfile.bench` + `bench-config.yml` (see `fly.capacity.toml`) — the standard 2 RPS default would otherwise cap drain speed identically regardless of machine size, making it impossible to see anything. The admission memory ceiling was set to 80% of each box's total RAM.
+
+**Ingest ramp** (sustained rate held for 15s per step, each size tested on a freshly deployed instance):
+
+| Rate | 256MB | 512MB | 1024MB |
+|------|-------|-------|--------|
+| 25/s | 100% success, mem 7→13MB | 100% success, mem 7→13MB | 100% success, mem 7→13MB |
+| 50/s | 100% success, mem 13MB | 100% success, mem 13MB | 100% success, mem 13MB |
+| 100/s | 100% success, mem 13MB | 100% success, mem 13MB | 100% success, mem 13MB |
+| 200/s | **69.6%** success, mem 13→111MB | **72.7%** success, mem 13→111MB | **68.0%** success, mem 13→107MB |
+
+**All three sizes broke at the identical point** — 200 req/s, roughly 70% success, memory only 107-111MB (nowhere near even the smallest box's 204MB admission ceiling). The failures at that rate are connection-level (`vegeta` status code `0` — connection refused/timeout, not a `429`), meaning the instance became unresponsive before its own memory-based admission control ever got a chance to shed load cleanly. Since CPU was held constant across all three configurations, this is strong evidence that **on `shared-cpu-1x`, the real ceiling is the single shared vCPU, not RAM.** Giving Aquifer more memory alone does not raise this ceiling — it needs more CPU (`shared-cpu-2x`/`4x`), and/or `AQUIFER_MEMORY_LIMIT_MB` set low enough to shed load with clean `429`s before hitting the CPU wall, not just before hitting an unreachable memory number.
+
+**Drain time** (fire 500 jobs as fast as possible against a freshly deployed, otherwise idle instance, then time until every job reaches `completed`):
+
+| Size | Drained | Time |
+|------|---------|------|
+| 256MB | 500/500 | 75s |
+| 512MB | 500/500 | 76s |
+| 1024MB | 500/500 | 77s |
+
+Also identical across all three sizes (within noise) — consistent with the ramp finding: drain throughput is bound by the same single shared vCPU regardless of how much RAM sits behind it. A 500-job burst against a domain paced at 50 RPS / 20 concurrent takes just over a minute to fully clear on any of these three configurations.
+
+**Practical takeaway:** for this workload shape (small JSON jobs, external HTTP dispatch), machine memory size alone doesn't move the ceiling — CPU does. If your traffic sustains under ~100-150 req/s, any of these sizes (even 256MB) handles it identically; there's no reason to pay for more RAM on this axis alone. If you need higher sustained ingest, the fix is more shared CPU, not more RAM. Regardless of size, a burst of 500 queued jobs clears in about a minute and 15 seconds at a 50 RPS dispatch pace — scale that linearly for your own `CONFIG_PATH` rate to estimate your own catch-up time after a spike.
+
+---
+
 ## Reproducing these results
 
 ```bash
@@ -136,6 +183,10 @@ cd benchmark
 ./admission_degradation.sh <target-url> 150 45s
 ./crash_recovery.sh <target-url> <fly-app-name> 30
 ./fairness.sh <target-url> 100
+
+# Capacity/drain by machine size — much slower (multiple full redeploys),
+# run separately, not part of the GitHub Action's regular pass:
+./capacity_by_size.sh <target-url> <fly-app-name> "256 512 1024" 500
 ```
 
 Each script is self-contained bash + vegeta + a little Python for JSON shaping. See [`benchmark/`](benchmark/) for source.
