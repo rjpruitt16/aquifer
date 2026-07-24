@@ -487,14 +487,14 @@ Running multiple instances against the same upstream without partitioning will m
 
 ## Choosing a machine size
 
-Real measurements (not vendor specs) from [benchmark.md](benchmark.md#7-capacity-and-drain-time-by-machine-size): on Fly.io's `shared-cpu-1x` tier, 256MB, 512MB, and 1024MB instances all hit the identical ceiling — around 100-150 req/s sustained ingest, breaking down at 200 req/s with connection-level failures around 107-111MB of actual memory use. **The bottleneck was the single shared vCPU, not RAM** — giving Aquifer more memory alone didn't move the ceiling at all.
+Real measurements from [benchmark.md](benchmark.md#7-capacity-and-drain-time--and-a-real-bug-this-test-found): testing across 256MB/512MB/1024MB *and* separately across 1/2/4 shared vCPUs on Fly.io, every configuration broke at the identical ~200 req/s point. That turned out **not** to be a hardware ceiling at all — it was a single hardcoded SQLite connection (`SetMaxOpenConns(1)`) serializing every request through one handle regardless of machine size, plus a related bug where SQLite pragmas were silently not applied to any connection beyond the first. Both are fixed now (see benchmark.md for the full story), and 200 req/s went from a hard, repeatable failure to a usually-clean, occasionally-marginal rate. 400 req/s is a real ceiling post-fix (memory climbs genuinely, not just connection-pool noise).
 
 Checklist for picking a size:
 
-- [ ] **Traffic sustains under ~100 req/s?** Any size works, including 256MB — there's no throughput reason to pay for more RAM.
-- [ ] **Traffic sustains above ~150 req/s?** You need more CPU (`shared-cpu-2x`/`4x`+), not more memory. Re-run `benchmark/capacity_by_size.sh` against your actual instance type to confirm your real ceiling before committing.
-- [ ] **Bursts happen but are followed by quiet periods?** A 500-job burst at a 50 RPS dispatch pace drains in about 75-77s on any size tested — scale that linearly against your own `CONFIG_PATH` rate to estimate your own catch-up time.
-- [ ] **Set `AQUIFER_MEMORY_LIMIT_MB` below where connection failures start, not just below total RAM.** An 80%-of-RAM ceiling never tripped in this test because the box became unresponsive from CPU/connection saturation first — the memory-based admission control only protects you if it can actually engage before something else breaks.
+- [ ] **Traffic sustains under ~200 req/s?** Any size works, including 256MB — this workload's bottleneck wasn't CPU or RAM at that range.
+- [ ] **Traffic sustains above ~200-300 req/s?** Re-run `benchmark/capacity_by_size.sh` against your own traffic shape and instance type before assuming a bigger box fixes it — verify the ceiling is actually hardware-bound first, not a code-level one, the way this one turned out to be.
+- [ ] **Bursts happen but are followed by quiet periods?** A 500-job burst drains in about 75-79s at a 50 RPS dispatch pace, regardless of machine size — scale that linearly against your own `CONFIG_PATH` rate to estimate your own catch-up time.
+- [ ] **A capacity ceiling looks identical no matter what you scale?** That's a strong signal it's not the resource you're scaling — treat it as a code-path question, not a bigger-machine question.
 - [ ] **Need genuine per-tenant fairness under a shared upstream?** Set `X-Aqueduct-Account-Queue: enabled` — see [Dynamic Pacing](#dynamic-pacing) above.
 
 ---

@@ -96,6 +96,7 @@ func testAquifer(t *testing.T) *Aquifer {
 
 	dir := t.TempDir()
 	store := NewStore(filepath.Join(dir, "aquifer.db"))
+	t.Cleanup(func() { store.Close() })
 	broker := NewBroker()
 	l8 := NewL8Registry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"))
 	cfg := &Config{Defaults: RateConfig{RPS: 100, MaxConcurrent: 1}}

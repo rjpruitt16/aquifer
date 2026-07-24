@@ -12,6 +12,7 @@ func testAquiferWithLimits(t *testing.T, limits AdmissionLimits) (*Aquifer, *Sto
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "aquifer.db")
 	store := NewStore(dbPath)
+	t.Cleanup(func() { store.Close() })
 	broker := NewBroker()
 	l8 := NewL8Registry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"))
 	cfg := &Config{Defaults: RateConfig{RPS: 100, MaxConcurrent: 1}}
@@ -93,6 +94,7 @@ func TestAdmissionDuplicateStillSucceedsUnderPressure(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "aquifer.db")
 	store := NewStore(dbPath)
+	t.Cleanup(func() { store.Close() })
 	broker := NewBroker()
 	l8 := NewL8Registry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"))
 	cfg := &Config{Defaults: RateConfig{RPS: 100, MaxConcurrent: 1}}
@@ -134,6 +136,7 @@ func TestAdmissionRejectsOverDBSizeLimit(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "aquifer.db")
 	store := NewStore(dbPath)
+	t.Cleanup(func() { store.Close() })
 
 	// The DB file already has a schema on disk after migration; a 1-byte
 	// ceiling guarantees it reads as over-limit without needing to insert

@@ -3,6 +3,7 @@ package aquifer
 import (
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func testRegistry(t *testing.T) *Registry {
@@ -11,6 +12,17 @@ func testRegistry(t *testing.T) *Registry {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "aquifer.db")
 	store := NewStore(dbPath)
+	t.Cleanup(func() {
+		store.Close()
+		// Enqueue starts a real background dispatch goroutine that can
+		// still be mid-flight (holding a WAL file handle) the instant this
+		// test function returns — Close() waits for in-flight queries, but
+		// modernc.org/sqlite's own file release can trail Close() returning
+		// by a beat. Without this, t.TempDir()'s cleanup (registered before
+		// this one, so it runs right after) occasionally races it with a
+		// "directory not empty" error.
+		time.Sleep(20 * time.Millisecond)
+	})
 	broker := NewBroker()
 	l8 := NewL8Registry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"))
 	cfg := &Config{Defaults: RateConfig{RPS: 100, MaxConcurrent: 1}}
@@ -19,12 +31,18 @@ func testRegistry(t *testing.T) *Registry {
 
 func jobFor(userID, apiKey string) *Job {
 	return &Job{
-		ID:         generateID(),
-		UserID:     userID,
-		URL:        "https://example.com/webhook",
+		ID:     generateID(),
+		UserID: userID,
+		// postman-echo.com/post always returns a fast 200 for both the
+		// dispatch and the webhook delivery — example.com's 405 on POST
+		// made deliverWebhook retry 4x with exponential backoff (up to 15s),
+		// leaving a background goroutine alive long after the test function
+		// returns and racing t.TempDir()'s cleanup against the still-open
+		// store.
+		URL:        "https://postman-echo.com/post",
 		Method:     "POST",
 		Headers:    map[string]string{"Authorization": apiKey},
-		WebhookURL: "https://example.com/callback",
+		WebhookURL: "https://postman-echo.com/post",
 		Status:     StatusQueued,
 	}
 }

@@ -1,26 +1,30 @@
 #!/usr/bin/env bash
-# Capacity and drain-time by machine size. Answers two questions an operator
+# Capacity and drain-time by machine tier. Answers two questions an operator
 # actually needs before picking a box: (1) how much sustained ingest rate can
-# this machine size take before it starts shedding, and (2) if it takes a
-# burst bigger than that, how long until it's fully caught up again. Uses
+# this tier take before it starts shedding, and (2) if it takes a burst
+# bigger than that, how long until it's fully caught up again. Uses
 # Dockerfile.bench / fly.capacity.toml, which raises per-domain dispatch
 # pacing to 50 rps / 20 concurrent — the out-of-the-box 2 rps default would
-# otherwise bottleneck drain time identically regardless of machine size.
+# otherwise bottleneck drain time identically regardless of machine tier.
+#
+# Tiers are given as "cpus:mem_mb" (e.g. "2:512"), or a bare mem_mb (e.g.
+# "512") which defaults to cpus=1 for backward compatibility with the
+# memory-only sweep this script started as.
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$DIR/.." && pwd)"
 
 TARGET_URL="${1:-https://aquifer-bench.fly.dev}"
 FLY_APP="${2:-aquifer-bench}"
-SIZES="${3:-256 512 1024}"
+TIERS="${3:-1:256 1:512 1:1024}"
 BURST_N="${4:-500}"
 
 RAMP_RATES="25 50 100 200 400"
 RAMP_DURATION="15s"
 
 clean_deploy() {
-  local mem_mb="$1" admission_mb="$2"
-  echo "## Clean deploy: vm=${mem_mb}mb admission_limit=${admission_mb}mb"
+  local cpus="$1" mem_mb="$2" admission_mb="$3"
+  echo "## Clean deploy: vm=${cpus}cpu/${mem_mb}mb admission_limit=${admission_mb}mb"
   (
     cd "$ROOT"
     MACHINE_ID=$(fly machine list --app "$FLY_APP" --json 2>/dev/null | python3 -c "import json,sys
@@ -37,7 +41,7 @@ print(d[0]['id'] if d else '')")
     fi
     fly volumes create aquifer_data --app "$FLY_APP" --region iad --size 1 --yes
     fly deploy --app "$FLY_APP" --config fly.capacity.toml \
-      --vm-memory "${mem_mb}" -e "AQUIFER_MEMORY_LIMIT_MB=${admission_mb}"
+      --vm-cpus "${cpus}" --vm-memory "${mem_mb}" -e "AQUIFER_MEMORY_LIMIT_MB=${admission_mb}"
   )
   for i in $(seq 1 30); do
     if curl -sf --max-time 3 "${TARGET_URL}/health" > /dev/null; then
@@ -55,38 +59,38 @@ mem_of() {
 }
 
 ramp() {
-  local size_mb="$1"
+  local label="$1"
   echo ""
-  echo "### Ingest ramp @ ${size_mb}mb"
+  echo "### Ingest ramp @ ${label}"
   for rate in $RAMP_RATES; do
     local n=$(( ${RAMP_DURATION%s} * rate + 100 ))
-    python3 "$DIR/gen_targets.py" "$n" "capacity-${size_mb}-${rate}-$(date +%s)" "$TARGET_URL" > "/tmp/vegeta_capacity_${size_mb}_${rate}.json"
+    python3 "$DIR/gen_targets.py" "$n" "capacity-${label}-${rate}-$(date +%s)" "$TARGET_URL" > "/tmp/vegeta_capacity_${label}_${rate}.json"
     local before_mem
     before_mem=$(mem_of)
-    vegeta attack -format=json -targets="/tmp/vegeta_capacity_${size_mb}_${rate}.json" -rate="${rate}/1s" -duration="${RAMP_DURATION}" \
-      > "/tmp/vegeta_capacity_${size_mb}_${rate}_results.bin"
+    vegeta attack -format=json -targets="/tmp/vegeta_capacity_${label}_${rate}.json" -rate="${rate}/1s" -duration="${RAMP_DURATION}" \
+      > "/tmp/vegeta_capacity_${label}_${rate}_results.bin"
     local after_mem
     after_mem=$(mem_of)
     local success
-    success=$(vegeta report < "/tmp/vegeta_capacity_${size_mb}_${rate}_results.bin" | grep "Success" | awk '{print $3}')
+    success=$(vegeta report < "/tmp/vegeta_capacity_${label}_${rate}_results.bin" | grep "Success" | awk '{print $3}')
     local codes
-    codes=$(vegeta report -type=json < "/tmp/vegeta_capacity_${size_mb}_${rate}_results.bin" | python3 -c "import json,sys; print(json.load(sys.stdin).get('status_codes',{}))")
+    codes=$(vegeta report -type=json < "/tmp/vegeta_capacity_${label}_${rate}_results.bin" | python3 -c "import json,sys; print(json.load(sys.stdin).get('status_codes',{}))")
     echo "  rate=${rate}/s success=${success} memory_mb: ${before_mem} -> ${after_mem} codes=${codes}"
     if [[ "$success" != "100.00%" ]]; then
-      echo "  (non-100% success at rate=${rate}/s — stopping ramp for this size; check codes= above for 429 vs transient)"
+      echo "  (non-100% success at rate=${rate}/s — stopping ramp for this tier; check codes= above for 429 vs transient)"
       break
     fi
   done
 }
 
 drain_test() {
-  local size_mb="$1"
+  local label="$1"
   echo ""
-  echo "### Burst + drain @ ${size_mb}mb (N=${BURST_N})"
+  echo "### Burst + drain @ ${label} (N=${BURST_N})"
 
   local stamp
   stamp=$(date +%s)
-  local id_file="/tmp/drain_${size_mb}_ids.txt"
+  local id_file="/tmp/drain_${label}_ids.txt"
   : > "$id_file"
 
   echo "  firing ${BURST_N} jobs as fast as possible..."
@@ -95,8 +99,8 @@ drain_test() {
       body=$(python3 -c "
 import json
 print(json.dumps({
-    'user_id': 'drain-${size_mb}',
-    'idempotent_key': 'drain-${size_mb}-${stamp}-${i}',
+    'user_id': 'drain-${label}',
+    'idempotent_key': 'drain-${label}-${stamp}-${i}',
     'url': 'https://postman-echo.com/post',
     'method': 'POST',
     'webhook_url': 'https://postman-echo.com/post',
@@ -125,7 +129,7 @@ print(json.dumps({
       if [ "$status" = "completed" ] || [ "$status" = "failed" ]; then
         completed=$((completed+1))
       fi
-    done < "/tmp/drain_${size_mb}_ids.txt"
+    done < "/tmp/drain_${label}_ids.txt"
     if [ "$completed" -ge "$total" ]; then
       break
     fi
@@ -138,19 +142,27 @@ print(json.dumps({
   echo "  drained ${completed}/${total} jobs in ${elapsed}s"
 }
 
-echo "# Capacity by machine size: sizes=[${SIZES}] app=${FLY_APP} burst_n=${BURST_N}"
+echo "# Capacity by machine tier: tiers=[${TIERS}] app=${FLY_APP} burst_n=${BURST_N}"
 
-for size in $SIZES; do
-  admission_mb=$(( size * 80 / 100 ))
+for tier in $TIERS; do
+  if [[ "$tier" == *:* ]]; then
+    cpus="${tier%%:*}"
+    mem="${tier##*:}"
+  else
+    cpus=1
+    mem="$tier"
+  fi
+  admission_mb=$(( mem * 80 / 100 ))
+  label="${cpus}cpu_${mem}mb"
   echo ""
   echo "=================================================="
-  echo "SIZE: ${size}mb (admission ceiling: ${admission_mb}mb)"
+  echo "TIER: ${cpus} shared vCPU / ${mem}mb (admission ceiling: ${admission_mb}mb)"
   echo "=================================================="
-  clean_deploy "$size" "$admission_mb"
-  ramp "$size"
+  clean_deploy "$cpus" "$mem" "$admission_mb"
+  ramp "$label"
   # Ramp leaves a backlog in the shared per-domain queue (postman-echo.com);
   # redeploy clean again so drain time measures N fresh jobs on an otherwise
   # idle instance, not N jobs queued behind whatever the ramp didn't finish.
-  clean_deploy "$size" "$admission_mb"
-  drain_test "$size"
+  clean_deploy "$cpus" "$mem" "$admission_mb"
+  drain_test "$label"
 done

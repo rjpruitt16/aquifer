@@ -143,34 +143,39 @@ The point is to stop clients from hammering a fixed 5-second ceiling forever onc
 
 ---
 
-## 7. Capacity and drain time by machine size
+## 7. Capacity and drain time — and a real bug this test found
 
-The question this answers: **given a traffic shape, what machine size actually fits it, and if a burst exceeds that, how long until the queue is caught up again?**
+The question this started out answering: **given a traffic shape, what machine size actually fits it, and if a burst exceeds that, how long until the queue is caught up again?** It ended up finding something more important than a capacity number: a real correctness/scaling bug in the SQLite layer, unrelated to machine size at all.
 
-Methodology: `aquifer-bench` redeployed at `shared-cpu-1x` with `--vm-memory` set to 256, 512, and 1024MB in turn — CPU was deliberately held constant at **1 shared vCPU across all three sizes** (only memory was varied), so any difference in the results isolates the effect of RAM alone. Per-domain dispatch pacing was raised to 50 RPS / 20 concurrent via a dedicated `Dockerfile.bench` + `bench-config.yml` (see `fly.capacity.toml`) — the standard 2 RPS default would otherwise cap drain speed identically regardless of machine size, making it impossible to see anything. The admission memory ceiling was set to 80% of each box's total RAM.
+### What the first pass showed
 
-**Ingest ramp** (sustained rate held for 15s per step, each size tested on a freshly deployed instance):
+`aquifer-bench` was redeployed at `shared-cpu-1x` with `--vm-memory` set to 256, 512, and 1024MB — CPU held constant at 1 shared vCPU across all three so any difference would isolate RAM. All three broke at the **identical point**: 100% success through 100 req/s, then ~68-73% success at 200 req/s, with connection-level failures (`vegeta` code `0`, not a clean `429`) at only ~107-111MB of actual memory use — nowhere near even the smallest box's admission ceiling. A follow-up sweep varying real Fly.io CPU tiers instead (1 vCPU/256MB, 2 vCPU/512MB, 4 vCPU/1024MB — each the official paired memory for that tier) broke at the **same exact point too**: 68.3%, 68.3%, and 69.5% respectively. Quadrupling the CPU allocation changed nothing.
 
-| Rate | 256MB | 512MB | 1024MB |
-|------|-------|-------|--------|
-| 25/s | 100% success, mem 7→13MB | 100% success, mem 7→13MB | 100% success, mem 7→13MB |
-| 50/s | 100% success, mem 13MB | 100% success, mem 13MB | 100% success, mem 13MB |
-| 100/s | 100% success, mem 13MB | 100% success, mem 13MB | 100% success, mem 13MB |
-| 200/s | **69.6%** success, mem 13→111MB | **72.7%** success, mem 13→111MB | **68.0%** success, mem 13→107MB |
+That ruled out both memory *and* CPU as the bottleneck. Something else was capping every configuration at the same place.
 
-**All three sizes broke at the identical point** — 200 req/s, roughly 70% success, memory only 107-111MB (nowhere near even the smallest box's 204MB admission ceiling). The failures at that rate are connection-level (`vegeta` status code `0` — connection refused/timeout, not a `429`), meaning the instance became unresponsive before its own memory-based admission control ever got a chance to shed load cleanly. Since CPU was held constant across all three configurations, this is strong evidence that **on `shared-cpu-1x`, the real ceiling is the single shared vCPU, not RAM.** Giving Aquifer more memory alone does not raise this ceiling — it needs more CPU (`shared-cpu-2x`/`4x`), and/or `AQUIFER_MEMORY_LIMIT_MB` set low enough to shed load with clean `429`s before hitting the CPU wall, not just before hitting an unreachable memory number.
+### The real cause: one SQLite connection for the whole process
 
-**Drain time** (fire 500 jobs as fast as possible against a freshly deployed, otherwise idle instance, then time until every job reaches `completed`):
+`store.go` had `db.SetMaxOpenConns(1)` — every HTTP request that touches the database (which is every request) queued behind a single connection, regardless of how much CPU or memory the box had. That's a code-level ceiling, not a hardware one, and it explains why five different machine configurations all broke at the same rate.
 
-| Size | Drained | Time |
-|------|---------|------|
-| 256MB | 500/500 | 75s |
-| 512MB | 500/500 | 76s |
-| 1024MB | 500/500 | 77s |
+Raising the pool size on its own didn't fully fix it: SQLite pragmas (`journal_mode=WAL`, `busy_timeout`) were being set via `db.Exec()` right after `sql.Open()`, which only configures whichever single connection happens to service that call. With `MaxOpenConns(1)` there was only ever one connection to configure, so this worked by accident. The moment the pool can open more than one, every additional connection silently runs with SQLite's defaults — no WAL, no busy_timeout — and fails instantly with `SQLITE_BUSY` under any real concurrency. The fix moves the pragmas into the connection DSN itself (`file:path?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)`), so every connection the pool ever opens gets them.
 
-Also identical across all three sizes (within noise) — consistent with the ramp finding: drain throughput is bound by the same single shared vCPU regardless of how much RAM sits behind it. A 500-job burst against a domain paced at 50 RPS / 20 concurrent takes just over a minute to fully clear on any of these three configurations.
+Fixing *that* surfaced a third, more serious issue: `CheckOrInsert` decided "is this a duplicate?" by running `INSERT OR IGNORE` and then a separate `SELECT` to see what got written — two non-atomic statements. Under genuine concurrency (only possible once the pool was more than one connection), if the `INSERT` raced or transiently failed, the follow-up `SELECT` could find nothing, and the function would report a **brand-new job as a duplicate with an empty job ID** — silently discarding it. This had been latent in the code the whole time; it just could never trigger while every request was serialized through one connection. The fix reads the `INSERT`'s own `RowsAffected()` as the source of truth (atomic, race-free) instead of trusting a read-after-write that can race. Covered by `TestStoreHandlesConcurrentInserts`, which fires 50 concurrent inserts with unique keys and asserts none are misreported as duplicates.
 
-**Practical takeaway:** for this workload shape (small JSON jobs, external HTTP dispatch), machine memory size alone doesn't move the ceiling — CPU does. If your traffic sustains under ~100-150 req/s, any of these sizes (even 256MB) handles it identically; there's no reason to pay for more RAM on this axis alone. If you need higher sustained ingest, the fix is more shared CPU, not more RAM. Regardless of size, a burst of 500 queued jobs clears in about a minute and 15 seconds at a 50 RPS dispatch pace — scale that linearly for your own `CONFIG_PATH` rate to estimate your own catch-up time after a spike.
+### What changed after the fix
+
+Same 1 vCPU / 512MB instance, same ramp sequence, post-fix:
+
+| Rate | Before fix | After fix |
+|------|-----------|-----------|
+| 25-100/s | 100% success | 100% success |
+| 200/s | ~68-73% success, connection refused | 74-100% success (run-to-run variance), no more connection refusals — failures that remain are slow responses, not refused ones |
+| 400/s | *(not tested before — was already broken at 200)* | 15.4% success, mean latency 28.6s, memory 107→264MB — a real, load-driven ceiling |
+
+200 req/s went from a **hard, repeatable failure** (every single one of five separate machine configurations hit ~68-73% and never higher) to a **usually-clean, occasionally-marginal** rate — a substantial reliability improvement, though not a guarantee at that exact rate. 400 req/s is unambiguously over a real capacity edge post-fix: memory climbs meaningfully (107→264MB, genuine backlog, not a connection-pool artifact) and latency saturates vegeta's 30s timeout. That's what an actual hardware/throughput ceiling looks like, as opposed to what a single-connection bug looks like (identical failure point regardless of machine size).
+
+**Drain time** (fire 500 jobs as fast as possible against a freshly deployed, otherwise idle instance) was identical across every machine/CPU configuration tested, before and after the fix — 75-79 seconds regardless of size. This makes sense once the ceiling is understood: drain throughput here is governed by the configured dispatch pace (50 RPS / 20 concurrent in this test's `bench-config.yml`), not by how much CPU or RAM sits behind it. Scale that pace linearly against your own `CONFIG_PATH` rate to estimate your own catch-up time after a burst.
+
+**Practical takeaway:** don't reach for a bigger machine to fix a throughput ceiling before checking whether it's actually a resource limit. This one looked exactly like "needs more CPU" — identical breakdown point across 256MB/512MB/1024MB *and* across 1/2/4 shared vCPUs — and was actually a single hardcoded database connection. The lesson generalizes: a ceiling that doesn't move when you change the resource you'd expect to relieve it is a signal to look at the code path, not the instance size.
 
 ---
 

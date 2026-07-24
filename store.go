@@ -24,14 +24,29 @@ type Store struct {
 }
 
 func NewStore(path string) *Store {
-	db, err := sql.Open("sqlite", path)
+	// Pragmas belong in the DSN, not a one-off db.Exec after Open. SQLite
+	// pragmas are per-connection, and Go's database/sql pool opens new
+	// physical connections on demand — an Exec() only configures whichever
+	// single connection happens to service that call. With MaxOpenConns(1)
+	// this went unnoticed for a long time, since there was only ever one
+	// connection to configure. The moment the pool can open more than one,
+	// every connection opened after the first would silently run with
+	// SQLite's defaults (rollback journal, busy_timeout=0 — i.e. fail
+	// instantly on any lock contention instead of retrying), which is
+	// exactly what caused "database is locked" errors under concurrent
+	// writes even with the Exec-based pragmas already in place.
+	dsn := "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		log.Fatalf("open db: %v", err)
 	}
 
-	db.SetMaxOpenConns(1)
-	db.Exec("PRAGMA journal_mode=WAL")
-	db.Exec("PRAGMA synchronous=NORMAL")
+	// WAL mode lets readers and writers proceed concurrently (only
+	// writer-vs-writer serializes) — but that only matters if more than one
+	// connection is ever open. A single shared connection would force every
+	// request, including plain reads, to queue behind one handle regardless
+	// of WAL.
+	db.SetMaxOpenConns(25)
 
 	s := &Store{db: db, path: path}
 	s.migrate()
@@ -41,6 +56,15 @@ func NewStore(path string) *Store {
 
 func (s *Store) Path() string {
 	return s.path
+}
+
+// Close releases the underlying connection pool. In WAL mode, SQLite keeps
+// -wal/-shm files alongside the main database file for as long as any
+// connection is open; callers that manage a Store's lifetime explicitly
+// (tests especially, cleaning up a t.TempDir()) should call this before
+// their directory is removed.
+func (s *Store) Close() error {
+	return s.db.Close()
 }
 
 func (s *Store) migrate() {
@@ -64,24 +88,43 @@ func (s *Store) migrate() {
 	s.db.Exec(`ALTER TABLE jobs ADD COLUMN queue_key TEXT NOT NULL DEFAULT ''`)
 }
 
+// CheckOrInsert inserts job unless its (user_id, idempotent_key) pair
+// already exists, in which case it reports the existing job's ID as a
+// duplicate. The duplicate/fresh decision is read directly off the INSERT's
+// own RowsAffected, not a follow-up SELECT — a SELECT-after-INSERT here
+// would race under real concurrency (multiple open connections): if the
+// INSERT is still in flight relative to another goroutine's read, or a
+// transient busy-retry delays it, the SELECT can find nothing and this
+// would misreport a brand-new job as an empty-ID "duplicate," silently
+// losing it. RowsAffected==1 is authoritative and atomic: it's exactly the
+// row this call just wrote, no read-your-own-write race possible.
 func (s *Store) CheckOrInsert(job *Job) (string, bool) {
 	hashed := hashKey(job.UserID + ":" + job.IdempotentKey)
 	headers, _ := json.Marshal(job.Headers)
 	expiresAt := time.Now().Add(ttlQueued).UnixMilli()
 
-	s.db.Exec(`
+	res, err := s.db.Exec(`
 		INSERT OR IGNORE INTO jobs
 			(id, user_id, idempotent_key_hash, url, method, body, headers, webhook_url, status, created_at, expires_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)
 	`, job.ID, job.UserID, hashed, job.URL, job.Method, job.Body, string(headers), job.WebhookURL, job.CreatedAt, expiresAt)
 
-	var existingID string
-	s.db.QueryRow(`SELECT id FROM jobs WHERE idempotent_key_hash = ?`, hashed).Scan(&existingID)
-
-	if existingID != job.ID {
-		return existingID, true
+	if err == nil {
+		if n, _ := res.RowsAffected(); n == 1 {
+			return "", false
+		}
 	}
-	return "", false
+
+	// Either the UNIQUE constraint ignored this insert (a genuine
+	// duplicate), or the Exec itself failed — either way the source of
+	// truth for "what job actually owns this idempotent key" is now this
+	// SELECT, which reads whatever a previous successful insert wrote.
+	var existingID string
+	if scanErr := s.db.QueryRow(`SELECT id FROM jobs WHERE idempotent_key_hash = ?`, hashed).Scan(&existingID); scanErr != nil {
+		log.Printf("store: CheckOrInsert for job %s could not confirm insert or find an existing row (insert err: %v, select err: %v)", job.ID, err, scanErr)
+		return "", false
+	}
+	return existingID, true
 }
 
 func (s *Store) SetQueueKey(jobID, queueKey string) {
