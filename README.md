@@ -105,8 +105,10 @@ upstreams:
 |---------------|--------------|--------------------------------|
 | `AQUIFER_ADAPTER` | `http` for binary, `mcp-stdio` in Docker image | Runtime adapter: `http` or `mcp-stdio` |
 | `PORT`        | `8080`       | HTTP listen port               |
-| `DB_PATH`     | `aquifer.db` | SQLite database path           |
+| `DB_PATH`     | `aquifer.db` | Storage path — a SQLite file, or a directory if `AQUIFER_STORE_BACKEND=pebble` |
 | `CONFIG_PATH` | _(none)_     | Path to rate limit config YAML |
+| `AQUIFER_STORE_BACKEND` | `sqlite` | Storage engine: `sqlite` or `pebble` (opt-in, pure-Go LSM store — see [benchmark.md](benchmark.md) for why you might want it) |
+| `AQUIFER_PEBBLE_WAL_SYNC_INTERVAL_MS` | `5` | Pebble only — batches concurrent durable writes into fewer real fsyncs under load (Pebble's own group-commit); each caller still blocks until its own write is actually durable |
 | `AQUIFER_MEMORY_LIMIT_MB` | _(none, disabled)_ | Reject new jobs with `429` once process memory exceeds this many MB |
 | `AQUIFER_MAX_BODY_BYTES` | _(none, disabled)_ | Reject oversized request bodies with `413` |
 | `AQUIFER_DB_MAX_BYTES` | _(none, disabled)_ | Reject new jobs with `429` once the SQLite file exceeds this size |

@@ -28,7 +28,7 @@ type AccountQueue struct {
 	upstream   string
 	cmds       chan *Job
 	done       chan jobDoneMsg
-	store      *Store
+	store      JobStore
 	broker     *Broker
 	l8         *L8Registry
 	metrics    MetricsAdapter
@@ -39,7 +39,7 @@ func (q *AccountQueue) RPS() float64 {
 	return float64(q.currentRPS.Load()) / 100
 }
 
-func NewAccountQueue(key, upstream string, rps float64, maxConc int, store *Store, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, onIdle func(string)) *AccountQueue {
+func NewAccountQueue(key, upstream string, rps float64, maxConc int, store JobStore, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, onIdle func(string)) *AccountQueue {
 	q := &AccountQueue{
 		key:      key,
 		upstream: upstream,
@@ -180,7 +180,7 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int) {
 	}
 }
 
-func execute(job *Job, upstream string, store *Store, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, flowRate float64) jobDoneMsg {
+func execute(job *Job, upstream string, store JobStore, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, flowRate float64) jobDoneMsg {
 	metrics = ensureMetrics(metrics)
 	startedAt := time.Now()
 

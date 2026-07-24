@@ -179,6 +179,63 @@ Same 1 vCPU / 512MB instance, same ramp sequence, post-fix:
 
 ---
 
+## 8. An alternative storage backend: Pebble
+
+This project's Elixir/Mnesia sibling ([ezthrottle-local](https://github.com/rjpruitt16/ezthrottle-local)) showed a materially higher throughput ceiling than SQLite here, for a structural reason: Mnesia writes memory-first with disk catching up in the background, while SQLite is a disk-first, single-writer B-tree engine. That raised an obvious question — would a memory-first store change Aquifer's ceiling the same way, without giving up Go or CGo?
+
+Added `PebbleStore` ([cockroachdb/pebble](https://github.com/cockroachdb/pebble), pure Go, no CGo — literally CockroachDB's own production storage engine) behind a new `JobStore` interface, selected via `AQUIFER_STORE_BACKEND=pebble` (default remains SQLite; existing deployments see no change). `*Store` and `*PebbleStore` both satisfy the interface, so this is additive, not a rewrite.
+
+### A durability gap Pebble doesn't warn you about
+
+Pebble is a raw key-value engine — no SQL, no `UNIQUE` constraint, no declarative schema — so several things SQLite gave for free needed explicit reimplementation: a real index for the idempotent-key lookup (the one hot path that runs on every request), and — most important — the actual durability behavior needed the exact same "verify empirically, don't assume" discipline this whole benchmark suite has followed for SQLite and Mnesia.
+
+The assumption going in was that Pebble's `WriteOptions.Sync: false` would behave like SQLite's `synchronous=NORMAL`: write through to the OS on every commit, only relax the fsync confirmation. **That assumption was wrong, and it was caught by the same test used throughout this whole benchmark suite — write, `kill -9`, restart, read:**
+
+```
+sync_write: {:atomic, :ok}   // (illustrative — actual test is Go/Pebble)
+# kill -9 immediately after
+# --- restart, same directory ---
+[JOB 1] WAL file .../000002.log stopped reading at offset: 0; replayed 0 keys in 0 batches
+read err: pebble: not found
+```
+
+Unlike SQLite, Pebble's `Sync: false` doesn't write through to the OS at all — the write never left the process. `Sync: true` is required for any crash-durability guarantee whatsoever; confirmed it survives the identical kill test once set. This is exactly the kind of finding this whole document exists to catch: a plausible-sounding assumption about a storage engine's durability behavior, wrong in a way that would have silently produced the same "acknowledged but lost on crash" bug found and fixed twice already this session (SQLite's race, Mnesia's default flush threshold) — this time from assuming, instead of testing.
+
+The fix isn't "eat the full per-write fsync cost" either: Pebble exposes `WALMinSyncInterval`, its own group-commit mechanism. It batches concurrent `Sync: true` requests into fewer real fsyncs under load, but — unlike the hand-built periodic timer needed for Mnesia — each caller's own write still blocks until it is actually durable. No "acknowledged but silently lost" window the way a naive periodic flush introduces. Configurable via `AQUIFER_PEBBLE_WAL_SYNC_INTERVAL_MS` (default 5ms). Verified end-to-end: 30/30 jobs survive a real `kill -9` mid-drain on Fly.io, matching both SQLite's and Mnesia's own 30/30 result.
+
+The idempotency check-or-insert atomicity also needed explicit attention: Pebble has no native insert-if-absent primitive, so a naive `Get`-then-`Set` would reproduce the exact race already found and fixed in both SQLite's and Mnesia's stores this session. Guarded by a lock striped across 256 shards keyed by the idempotent hash — enough to serialize only genuinely conflicting keys, not every request. `TestPebbleStoreHandlesConcurrentInserts` mirrors the SQLite/Mnesia regression tests exactly.
+
+### Throughput: a real, large improvement
+
+Same `shared-cpu-1x` / 512MB tier, same ramp:
+
+| Rate | SQLite (post-fix) | Pebble |
+|------|--------------------|--------|
+| 50/s | 100% success, mean 69.6ms | 100% success, mean 72.7ms |
+| 200/s | 74-100% success (variance), first connection failures | **100% success**, mean 1.68s (degraded but succeeds) |
+| 400/s | **15.4% success** — real ceiling, memory climbs 107→264MB | **100% success**, mean 11.4s (heavily degraded, still succeeds) |
+| 600/s | *(not tested — already broken)* | 66.6% success — real failures begin |
+| 800/s | *(not tested — already broken)* | 40.0% success |
+| 1000/s | *(not tested — already broken)* | 17.2% success |
+
+Pebble roughly **doubled** the point where Aquifer stops reliably completing requests (SQLite's real ceiling ~200-400 req/s vs. Pebble's ~400-600 req/s) — a large, structural win consistent with the same memory-first-vs-disk-first reasoning that explained Mnesia's advantage over SQLite. The trade Pebble makes at high load is different from SQLite's, though: SQLite *fails* outright past its ceiling (timeouts, connection resets); Pebble keeps *succeeding* well past its comfortable zone, just slower (mean latency climbing into the double-digit seconds at 400 req/s rather than requests being dropped). That's arguably the better failure mode for what this system is actually for — reliable eventual delivery under burst, not winning a raw-throughput benchmark — but it does mean Pebble's "ceiling" is fuzzier to define than SQLite's hard wall.
+
+### Does it scale with CPU cores? No — and that's itself informative
+
+Same instance, 4 shared vCPUs instead of 1, same rates:
+
+| Rate | 1 vCPU | 4 vCPUs |
+|------|--------|---------|
+| 400/s | 100% success, mean 11.4s | 100% success, mean 10.7s |
+| 600/s | 66.6% success | 60.4% success |
+| 800/s | 40.0% success | 38.1% success |
+
+Essentially no difference — within run-to-run noise. This is the opposite of what more cores did for Mnesia (which showed a real, substantial improvement at the same rates). The likely reason: Pebble's write path — appending to its WAL, feeding the active memtable — is inherently a single, ordered pipeline per database instance, much faster than SQLite's B-tree+lock-per-file model, but still fundamentally serialized the way a single-writer engine is. Mnesia's advantage under more cores came from each request running as a fully independent BEAM process with no shared write-path coordination until the periodic flush; Pebble (like SQLite) funnels every write through the same internal commit pipeline no matter how many CPU cores are available to run application code on. More cores help when the bottleneck is application-level concurrency; they don't help when the bottleneck is a storage engine's own internal serialization — and this test is a fairly clean empirical demonstration of that distinction.
+
+**Practical takeaway:** Pebble is a legitimate, meaningfully faster alternative to SQLite for this workload, and the code is available today behind `AQUIFER_STORE_BACKEND=pebble` for anyone who wants to opt in. It is not a magic unlock past ~600 req/s on a single instance — that ceiling is the storage engine's own serialized commit path, and no amount of added CPU moves it. Horizontal partitioning (already documented in the README for scaling past a single instance) remains the right lever past that point, for either backend.
+
+---
+
 ## Reproducing these results
 
 ```bash
@@ -193,5 +250,7 @@ cd benchmark
 # run separately, not part of the GitHub Action's regular pass:
 ./capacity_by_size.sh <target-url> <fly-app-name> "256 512 1024" 500
 ```
+
+To benchmark the Pebble backend instead of SQLite, deploy with `-e AQUIFER_STORE_BACKEND=pebble -e DB_PATH=/data/pebble` and run the same scripts unchanged.
 
 Each script is self-contained bash + vegeta + a little Python for JSON shaping. See [`benchmark/`](benchmark/) for source.

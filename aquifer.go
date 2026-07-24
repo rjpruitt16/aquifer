@@ -11,14 +11,14 @@ type EnqueueResult struct {
 }
 
 type Aquifer struct {
-	store     *Store
+	store     JobStore
 	registry  *Registry
 	broker    *Broker
 	l8        *L8Registry
 	admission *AdmissionController
 }
 
-func NewAquifer(store *Store, registry *Registry, broker *Broker, l8 *L8Registry, admission *AdmissionController) *Aquifer {
+func NewAquifer(store JobStore, registry *Registry, broker *Broker, l8 *L8Registry, admission *AdmissionController) *Aquifer {
 	return &Aquifer{store: store, registry: registry, broker: broker, l8: l8, admission: admission}
 }
 

@@ -17,7 +17,7 @@ type RuntimeOptions struct {
 
 type Runtime struct {
 	Aquifer   *Aquifer
-	Store     *Store
+	Store     JobStore
 	Broker    *Broker
 	Registry  *Registry
 	L8        *L8Registry
@@ -53,7 +53,7 @@ func NewRuntime(opts RuntimeOptions) *Runtime {
 	}
 
 	l8 := NewL8Registry(l8KeyPath, l8TrustDir)
-	store := NewStore(dbPath)
+	store := NewJobStore(dbPath)
 	broker := NewBroker()
 	metrics := ensureMetrics(opts.Metrics)
 	registry := NewRegistry(store, cfg, broker, l8, metrics)

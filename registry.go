@@ -8,7 +8,7 @@ import (
 type Registry struct {
 	mu         sync.Mutex
 	workers    map[string]*URLWorker
-	store      *Store
+	store      JobStore
 	cfg        *Config
 	broker     *Broker
 	l8         *L8Registry
@@ -17,7 +17,7 @@ type Registry struct {
 	queueDepth atomic.Int64
 }
 
-func NewRegistry(store *Store, cfg *Config, broker *Broker, l8 *L8Registry, metrics MetricsAdapter) *Registry {
+func NewRegistry(store JobStore, cfg *Config, broker *Broker, l8 *L8Registry, metrics MetricsAdapter) *Registry {
 	r := &Registry{
 		workers: make(map[string]*URLWorker),
 		store:   store,

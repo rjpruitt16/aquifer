@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"sync/atomic"
@@ -98,12 +99,10 @@ func (c *AdmissionController) Check() AdmissionDecision {
 	}
 
 	if c.limits.DBMaxBytes > 0 && c.dbPath != "" {
-		if info, err := os.Stat(c.dbPath); err == nil {
-			if info.Size() > c.limits.DBMaxBytes {
-				log.Printf("admission: rejecting job — db size %d bytes exceeds limit %d bytes", info.Size(), c.limits.DBMaxBytes)
-				c.rejectStreak.Add(1)
-				return AdmissionDecision{Allowed: false, Reason: "db_size", Limit: c.limits.DBMaxBytes, Current: info.Size()}
-			}
+		if size := dbSizeBytes(c.dbPath); size > c.limits.DBMaxBytes {
+			log.Printf("admission: rejecting job — db size %d bytes exceeds limit %d bytes", size, c.limits.DBMaxBytes)
+			c.rejectStreak.Add(1)
+			return AdmissionDecision{Allowed: false, Reason: "db_size", Limit: c.limits.DBMaxBytes, Current: size}
 		}
 	}
 
@@ -120,9 +119,7 @@ func (c *AdmissionController) Snapshot() map[string]any {
 
 	var dbBytes int64
 	if c.dbPath != "" {
-		if info, err := os.Stat(c.dbPath); err == nil {
-			dbBytes = info.Size()
-		}
+		dbBytes = dbSizeBytes(c.dbPath)
 	}
 
 	return map[string]any{
@@ -161,6 +158,31 @@ func (c *AdmissionController) RetryAfterSeconds() int {
 
 func (c *AdmissionController) MaxBodyBytes() int64 {
 	return c.limits.MaxBodyBytes
+}
+
+// dbSizeBytes handles both storage backends: SQLite's dbPath is a single
+// file, so os.Stat's size is exact. Pebble's dbPath is a directory of SST
+// and log files — stat-ing the directory entry itself would return a
+// near-constant small size regardless of actual data (the same trap
+// avoided for Mnesia's directory-based storage on the Elixir side), so a
+// directory is summed recursively instead.
+func dbSizeBytes(path string) int64 {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	if !info.IsDir() {
+		return info.Size()
+	}
+
+	var total int64
+	filepath.Walk(path, func(_ string, fi os.FileInfo, err error) error {
+		if err == nil && !fi.IsDir() {
+			total += fi.Size()
+		}
+		return nil
+	})
+	return total
 }
 
 // AnyLimitConfigured reports whether at least one admission limit is

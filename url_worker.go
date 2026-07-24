@@ -15,14 +15,14 @@ type URLWorker struct {
 	maxConc          int
 	accountQueueMode bool
 	queues           map[string]*AccountQueue
-	store            *Store
+	store            JobStore
 	broker           *Broker
 	l8               *L8Registry
 	metrics          MetricsAdapter
 	onIdle           func(string)
 }
 
-func NewURLWorker(domain string, rps float64, maxConc int, store *Store, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, onIdle func(string)) *URLWorker {
+func NewURLWorker(domain string, rps float64, maxConc int, store JobStore, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, onIdle func(string)) *URLWorker {
 	return &URLWorker{
 		domain:  domain,
 		rps:     rps,
