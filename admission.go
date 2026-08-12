@@ -12,10 +12,24 @@ import (
 
 const maxRetryAfterSeconds = 60
 
+// Defaults for LoadAdmissionLimits. Body and DB-size ceilings default on,
+// sized off the infrastructure this project is actually benchmarked
+// against (a single 512MB Fly.io instance with a 1GB volume — see
+// benchmark.md): defaultDBMaxBytes leaves 20% headroom on that volume.
+// defaultMaxBodyBytes wasn't itself load-tested — it's a conservative,
+// standard API-payload ceiling, not a benchmark-derived number. Memory is
+// deliberately left disabled by default (see LoadAdmissionLimits) since a
+// safe ceiling depends on the deployment's own memory budget, not just
+// its disk.
+const (
+	defaultMaxBodyBytes = 1 * 1024 * 1024
+	defaultDBMaxBytes   = 800 * 1024 * 1024
+)
+
 // AdmissionLimits are operator-configured ceilings that protect Aquifer itself
-// from the traffic it's meant to be absorbing. All limits are opt-in: a zero
-// value disables that particular check, preserving today's unbounded behavior
-// for anyone who hasn't configured them.
+// from the traffic it's meant to be absorbing. A zero value disables that
+// particular check. Memory is opt-in (LoadAdmissionLimits defaults it to
+// disabled); body size and DB size default on — see LoadAdmissionLimits.
 type AdmissionLimits struct {
 	MemoryLimitMB     int64 // AQUIFER_MEMORY_LIMIT_MB
 	MaxBodyBytes      int64 // AQUIFER_MAX_BODY_BYTES
@@ -23,16 +37,26 @@ type AdmissionLimits struct {
 	RetryAfterSeconds int   // AQUIFER_RETRY_AFTER_SECONDS
 }
 
-// LoadAdmissionLimits reads the AQUIFER_* admission env vars. Missing or
-// unparsable values fall back to disabled (0) for the size limits and 5
-// seconds for retry-after.
+// LoadAdmissionLimits reads the AQUIFER_* admission env vars. Body size and
+// DB size fall back to sane, non-zero defaults when unset (see the
+// default* constants above) rather than being disabled — Aquifer's whole
+// purpose is protecting the process from the traffic it absorbs, so it
+// protects itself by default rather than requiring that to be opted into.
+// An explicit "0" still disables a given check. Memory has no safe
+// one-size-fits-all default (it depends on the deployment's own memory
+// budget, not Aquifer's benchmarked disk usage), so it stays disabled
+// unless set explicitly — LoadAdmissionLimits logs a warning when it is.
 func LoadAdmissionLimits() AdmissionLimits {
-	return AdmissionLimits{
+	limits := AdmissionLimits{
 		MemoryLimitMB:     envInt64("AQUIFER_MEMORY_LIMIT_MB", 0),
-		MaxBodyBytes:      envInt64("AQUIFER_MAX_BODY_BYTES", 0),
-		DBMaxBytes:        envInt64("AQUIFER_DB_MAX_BYTES", 0),
+		MaxBodyBytes:      envInt64("AQUIFER_MAX_BODY_BYTES", defaultMaxBodyBytes),
+		DBMaxBytes:        envInt64("AQUIFER_DB_MAX_BYTES", defaultDBMaxBytes),
 		RetryAfterSeconds: int(envInt64("AQUIFER_RETRY_AFTER_SECONDS", 5)),
 	}
+	if limits.MemoryLimitMB == 0 {
+		log.Printf("admission: AQUIFER_MEMORY_LIMIT_MB is not set — process memory is unbounded. Benchmarked safe at 400MB on a 512MB instance; set it to protect against OOM under burst load.")
+	}
+	return limits
 }
 
 func envInt64(key string, def int64) int64 {

@@ -2,6 +2,7 @@ package aquifer
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -28,6 +29,46 @@ func sampleJobRequest(userID, idempotentKey string) JobRequest {
 		URL:           "https://example.com/webhook",
 		Method:        "POST",
 		WebhookURL:    "https://example.com/callback",
+	}
+}
+
+func TestLoadAdmissionLimitsDefaultsOnForSizeChecksOffForMemory(t *testing.T) {
+	for _, key := range []string{"AQUIFER_MEMORY_LIMIT_MB", "AQUIFER_MAX_BODY_BYTES", "AQUIFER_DB_MAX_BYTES", "AQUIFER_RETRY_AFTER_SECONDS"} {
+		old, had := os.LookupEnv(key)
+		os.Unsetenv(key)
+		if had {
+			t.Cleanup(func() { os.Setenv(key, old) })
+		}
+	}
+
+	limits := LoadAdmissionLimits()
+
+	if limits.MemoryLimitMB != 0 {
+		t.Fatalf("expected memory limit to stay disabled by default, got %d", limits.MemoryLimitMB)
+	}
+	if limits.MaxBodyBytes != defaultMaxBodyBytes {
+		t.Fatalf("expected default max body bytes %d, got %d", defaultMaxBodyBytes, limits.MaxBodyBytes)
+	}
+	if limits.DBMaxBytes != defaultDBMaxBytes {
+		t.Fatalf("expected default db max bytes %d, got %d", defaultDBMaxBytes, limits.DBMaxBytes)
+	}
+}
+
+func TestLoadAdmissionLimitsExplicitZeroStillDisables(t *testing.T) {
+	os.Setenv("AQUIFER_MAX_BODY_BYTES", "0")
+	os.Setenv("AQUIFER_DB_MAX_BYTES", "0")
+	t.Cleanup(func() {
+		os.Unsetenv("AQUIFER_MAX_BODY_BYTES")
+		os.Unsetenv("AQUIFER_DB_MAX_BYTES")
+	})
+
+	limits := LoadAdmissionLimits()
+
+	if limits.MaxBodyBytes != 0 {
+		t.Fatalf("expected explicit AQUIFER_MAX_BODY_BYTES=0 to disable the check, got %d", limits.MaxBodyBytes)
+	}
+	if limits.DBMaxBytes != 0 {
+		t.Fatalf("expected explicit AQUIFER_DB_MAX_BYTES=0 to disable the check, got %d", limits.DBMaxBytes)
 	}
 }
 

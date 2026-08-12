@@ -10,7 +10,7 @@ Built by [Rahmi Pruitt](https://rahmipruitt.me) — open to AI infra consulting,
 
 Distributed agents call tools and APIs in bursts. Your backend gets overwhelmed on inbound. Your app gets 429s on outbound. One slow dependency takes everything else down with it.
 
-Aquifer gives those agents a coordination layer. It absorbs the burst, queues requests durably (SQLite by default, or Pebble — see below), and releases them at the rate you configure. Your backend decides the pace. The upstream decides the pace. Whoever needs to slow things down — wins.
+Aquifer gives those agents a coordination layer. It absorbs the burst, queues requests durably (SQLite by default, or Pebble — see below), and releases them at the rate you configure. Either your backend or the upstream can ask for a slower pace, and Aquifer honors whichever one is asking for less.
 
 **What the numbers actually say** (all in [benchmark.md](benchmark.md), same `shared-cpu-1x`/512MB Fly.io tier throughout): a 10x traffic spike gets absorbed with zero failures; 30/30 jobs survive a `kill -9` mid-drain; admission control sheds load with clean `429`s instead of falling over. The SQLite backend's real throughput ceiling is ~200-400 req/s on a single instance — found by chasing down a hardcoded single-connection bug, not assumed. Switching to the optional Pebble backend (`AQUIFER_STORE_BACKEND=pebble`) roughly doubles that ceiling to ~400-600 req/s, though more CPU cores don't move it further — the storage engine's own write path, not available compute, is what's actually serialized at that point.
 
@@ -36,9 +36,9 @@ your app  →  POST /jobs to Aquifer  →  OpenAI / Stripe / any API (at control
 ```
 Calling a rate-limited upstream? Aquifer queues the calls and dispatches them at your configured rate. If the upstream signals a slowdown via headers, Aquifer backs off automatically.
 
-In both cases — **the upstream response headers are the final say on pace.** Your config sets the ceiling. Headers can only reduce below it, never exceed it. When pressure clears, the rate recovers gradually back to your ceiling.
+In both cases, **the upstream's response headers have the final say on pace.** Your config sets the ceiling; headers can only reduce below it, never exceed it. When pressure clears, the rate recovers gradually back to your ceiling.
 
-This is not only rate limiting after something breaks. It is dynamic pacing before the failure. Services you control can tell agent traffic to slow down while they keep serving requests, giving autoscalers time to add capacity instead of forcing clients into retries, 429 storms, or cascading outages. If many tools, agents, and services speak the same pacing headers, traffic across the internet can coordinate more gracefully instead of every client guessing alone.
+Services you control can signal slower traffic while they're still under pressure, before they're overwhelmed enough to start returning errors — that gives autoscalers time to add capacity instead of forcing clients into retries, 429 storms, or cascading outages. If more tools, agents, and services speak the same pacing headers, traffic across the internet can coordinate instead of every client guessing alone.
 
 ---
 
@@ -110,15 +110,20 @@ upstreams:
 | `AQUIFER_STORE_BACKEND` | `sqlite` | Storage engine: `sqlite` or `pebble` (opt-in, pure-Go LSM store — see [benchmark.md](benchmark.md) for why you might want it) |
 | `AQUIFER_PEBBLE_WAL_SYNC_INTERVAL_MS` | `5` | Pebble only — batches concurrent durable writes into fewer real fsyncs under load (Pebble's own group-commit); each caller still blocks until its own write is actually durable |
 | `AQUIFER_MEMORY_LIMIT_MB` | _(none, disabled)_ | Reject new jobs with `429` once process memory exceeds this many MB |
-| `AQUIFER_MAX_BODY_BYTES` | _(none, disabled)_ | Reject oversized request bodies with `413` |
-| `AQUIFER_DB_MAX_BYTES` | _(none, disabled)_ | Reject new jobs with `429` once the SQLite file exceeds this size |
+| `AQUIFER_MAX_BODY_BYTES` | `1048576` (1MB) | Reject oversized request bodies with `413` |
+| `AQUIFER_DB_MAX_BYTES` | `838860800` (800MB) | Reject new jobs with `429` once the SQLite file exceeds this size |
 | `AQUIFER_RETRY_AFTER_SECONDS` | `5` | Base `Retry-After` value sent on `429` admission rejections |
 
-Admission control is opt-in — leave these unset and Aquifer accepts everything, same as before.
-Set any one of them to start shedding load with clean `429`/`413` responses instead of degrading
-under memory or disk pressure. See [benchmark.md](benchmark.md) for real numbers, including what
-happens under sustained load, a 10x burst, a memory ceiling, a mid-flight crash, multi-tenant
-fairness, and capacity/drain time by machine size.
+Body-size and DB-size admission are **on by default** — Aquifer protects itself from the traffic
+it's meant to be absorbing without needing to be told to. The defaults are sized off the
+infrastructure this project is actually benchmarked against (a single 512MB Fly.io instance with a
+1GB volume — see [benchmark.md](benchmark.md)); set an explicit `0` to disable a check entirely, or
+raise it for a bigger deployment. Memory is the exception: there's no safe one-size-fits-all
+default since it depends on your own deployment's memory budget, not Aquifer's disk usage, so it
+stays disabled until you set it — Aquifer logs a warning on startup if you haven't (benchmarked
+safe at 400MB on a 512MB instance, as a starting point). See [benchmark.md](benchmark.md) for real
+numbers, including what happens under sustained load, a 10x burst, a memory ceiling, a mid-flight
+crash, multi-tenant fairness, and capacity/drain time by machine size.
 
 **Retry-After backs off exponentially under sustained pressure.** A single rejection returns
 your configured base value (default 5s). Each additional *consecutive* rejection — with no
@@ -324,7 +329,7 @@ curl -N http://localhost:8080/jobs/<id>/stream
 
 Connecting late is safe — you'll receive synthetic `queued` and `dispatching` catchup events for states you missed.
 
-**The Aqueduct Protocol** — SSE is the live view. Webhook is the guaranteed delivery. Both always fire regardless of whether the stream was open. Think of it like a phone call with voicemail: stay on the line (SSE) for real-time updates, or hang up and the result goes to voicemail (webhook). You never lose the result.
+**The Aqueduct Protocol:** SSE gives you live updates while you're connected; the webhook fires regardless, whether or not the stream was open. Stay connected for real-time progress, or don't — either way the result reaches you.
 
 ### GET /health
 
@@ -388,7 +393,7 @@ Traditional webhook security requires sharing a secret between sender and receiv
 3. Trust is cached to disk as `l8-trust/{domain}.json` — the handshake never runs again for that domain
 4. Every webhook delivery carries `X-L8-Signature` headers the receiver verifies locally with no database lookup and no round-trip to any authority
 
-**Why this keeps things fast:** Verification is a single local Ed25519 `verify()` call against a cached public key. No database query, no HTTP call, no shared state. Microseconds.
+**Why this keeps things fast:** verification is a single local Ed25519 `verify()` call against a cached public key, with no database query, HTTP call, or shared state involved — it takes microseconds.
 
 **Key management:**
 
@@ -481,9 +486,11 @@ This keeps the autoscaling decision in your hands — Aquifer exposes the signal
 
 ## Deployment model
 
-Aquifer is designed as a **sidecar on a single machine**. One instance per app server, SQLite on a local persistent volume — no external database, no coordination overhead.
+Aquifer runs three ways: as a **sidecar** alongside your app on the same machine, as a **standalone service** on its own machine or container that multiple services point to, or **embedded directly as a Go library** in your own process (see [Framework adapters](#framework-adapters) above — `FrameworkAdapter` and `aquifer.RunAdapter` are built for exactly this). Each instance persists to its own SQLite volume, so there's no external database or coordination service to run.
 
-Running multiple instances against the same upstream without partitioning will multiply your request rate. If you scale horizontally, partition by upstream domain or tenant so each instance owns a distinct key space.
+A single instance's throughput isn't a hard ceiling on the system — it's the unit you scale by adding more of them. Run one instance per upstream domain or tenant, each owning a distinct key space, and total throughput scales with instance count. Running multiple instances against the *same* upstream without partitioning will multiply your request rate against it instead, which is the one setup to avoid.
+
+People run Aquifer in front of things like: internal coding platforms (GitLab, Forgejo), CI runners, database read replicas, and MCP servers — anywhere a burst of agent or service traffic needs to hit something that has its own capacity limit.
 
 **Do not expose Aquifer directly to untrusted callers.** `POST /jobs` takes a `url` field and dispatches a real HTTP request to it — if an arbitrary or untrusted party can set that field, Aquifer becomes an open relay/SSRF vector: it can be pointed at your internal network, cloud metadata endpoints (`169.254.169.254`), or anything else the machine Aquifer runs on can reach, using Aquifer's own network position and identity. The intended caller is **your own trusted backend or gateway code**, dispatching to a specific microservice or third-party API it already knows about — not an agent, end user, or any other untrusted party choosing the destination itself. Run Aquifer on a private network or internal service mesh, not bound to a public address, and if agents need to reach it, put your own authorization and destination allow-listing in front rather than letting them call Aquifer's raw API directly.
 
