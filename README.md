@@ -2,9 +2,9 @@
 
 **Increase your rate limit without DDoSing your backend.**
 
-A dedicated service absorbs the burst, paces dispatch to your backend, and — with agent-native load balancing — spreads it across a pool of registered instances, giving your autoscaler time to catch up before it ever sees the flood. That's what makes raising your rate limit safe — and your own clients see fewer 429s, so they retry less too.
+Aquifer is a self-hosted traffic coordination layer for agent workloads. It absorbs bursts into a durable queue, dispatches at a controlled rate, and — with agent-native load balancing — spreads traffic across a pool of registered backend instances. Upstreams can dynamically slow Aquifer down with `X-Aqueduct-*` response headers, so an overloaded service can shed pressure before it starts returning 429s, and your own clients retry less as a result.
 
-**Self-hosted MCP server framework for coordinating HTTP traffic from distributed agents. Aquifer absorbs retry storms before they turn into a bigger LLM bill — durable queuing, controlled dispatch pace, agent-native load balancing across pools of registered backends, and cryptographic agent identity via the L8 protocol, exposed through pluggable adapters.**
+Exposed through pluggable adapters — an MCP server for agent tool-calling, or a plain HTTP API — with cryptographic agent identity via the L8 protocol for trustless webhook delivery.
 
 Built by [Rahmi Pruitt](https://rahmipruitt.me) — open to AI infra consulting, founding engineer, and contract work.
 
@@ -16,11 +16,11 @@ Distributed agents call tools and APIs in bursts. Your backend gets overwhelmed 
 
 Aquifer gives those agents a coordination layer. It absorbs the burst, queues requests durably (SQLite by default, or Pebble — see below), and releases them at the rate you configure. Either your backend or the upstream can ask for a slower pace, and Aquifer honors whichever one is asking for less.
 
-**What the numbers actually say** (all in [benchmark.md](benchmark.md), same `shared-cpu-1x`/512MB Fly.io tier throughout): a 10x traffic spike gets absorbed with zero failures; 30/30 jobs survive a `kill -9` mid-drain; admission control sheds load with clean `429`s instead of falling over. The SQLite backend's real throughput ceiling is ~200-400 req/s on a single instance — found by chasing down a hardcoded single-connection bug, not assumed. Switching to the optional Pebble backend (`AQUIFER_STORE_BACKEND=pebble`) roughly doubles that ceiling to ~400-600 req/s, though more CPU cores don't move it further — the storage engine's own write path, not available compute, is what's actually serialized at that point.
+**What the numbers actually say** (all in [benchmark.md](benchmark.md), same `shared-cpu-1x`/512MB Fly.io tier throughout): a 10x traffic spike absorbed with zero failures, 30/30 jobs surviving a `kill -9` mid-drain, admission control shedding load with clean `429`s instead of falling over. The SQLite backend's real ceiling is ~200-400 req/s on a single instance; the optional Pebble backend (`AQUIFER_STORE_BACKEND=pebble`) roughly doubles that to ~400-600 req/s, capped by the storage engine's write path rather than available CPU.
 
 ---
 
-## Two ways to use it
+## Use cases
 
 **MCP tools — coordinate distributed agents**
 ```
@@ -40,11 +40,9 @@ your app  →  POST /jobs to Aquifer  →  OpenAI / Stripe / any API (at control
 ```
 Calling a rate-limited upstream? Aquifer queues the calls and dispatches them at your configured rate. If the upstream signals a slowdown via headers, Aquifer backs off automatically.
 
-In both cases, **the upstream's response headers have the final say on pace.** Your config sets the ceiling; headers can only reduce below it, never exceed it. When pressure clears, the rate recovers gradually back to your ceiling.
+In all three, the upstream's response headers have the final say on pace — see [Dynamic Pacing](#dynamic-pacing) for how the ceiling, backoff, and recovery actually work.
 
-Services you control can signal slower traffic while they're still under pressure, before they're overwhelmed enough to start returning errors — that gives autoscalers time to add capacity instead of forcing clients into retries, 429 storms, or cascading outages.
-
-**This is built for a network effect, not just a single deployment.** If more tools, agents, and services come to speak `X-Aqueduct-*`, traffic across the whole internet could coordinate directly with each other instead of every client guessing alone under load — each adopter would make the signal more useful to every other adopter, not just to itself. That's the design goal; it depends on adoption Aquifer alone can't create, so treat it as the long-term shape, not a claim about how much of the internet speaks this today.
+Long-term protocol goal: if more services emit `X-Aqueduct-*`, agents can respond to capacity signals instead of independently guessing retry and concurrency behavior. Aquifer works today without ecosystem adoption; broader protocol adoption is the longer-term goal.
 
 ---
 
@@ -55,6 +53,8 @@ Services you control can signal slower traffic while they're still under pressur
 3. A per-upstream worker dispatches at your configured RPS with jitter
 4. On completion Aquifer POSTs your webhook with the response body and status
 5. The upstream can adjust the rate live via `X-Aqueduct-*` response headers
+
+**Semantics:** this is **at-least-once delivery, not exactly-once**. A webhook can be delivered more than once — for example, if Aquifer crashes after a dispatch succeeds but before it records that completion, the recovered job dispatches again on restart. Make your webhook handler idempotent on `job_id` (or `idempotent_key`) anywhere duplicate execution isn't safe, the same contract Stripe and GitHub webhooks already ask of you.
 
 ---
 
@@ -120,23 +120,7 @@ upstreams:
 | `AQUIFER_DB_MAX_BYTES` | `838860800` (800MB) | Reject new jobs with `429` once the SQLite file exceeds this size |
 | `AQUIFER_RETRY_AFTER_SECONDS` | `5` | Base `Retry-After` value sent on `429` admission rejections |
 
-Body-size and DB-size admission are **on by default** — Aquifer protects itself from the traffic
-it's meant to be absorbing without needing to be told to. The defaults are sized off the
-infrastructure this project is actually benchmarked against (a single 512MB Fly.io instance with a
-1GB volume — see [benchmark.md](benchmark.md)); set an explicit `0` to disable a check entirely, or
-raise it for a bigger deployment. Memory is the exception: there's no safe one-size-fits-all
-default since it depends on your own deployment's memory budget, not Aquifer's disk usage, so it
-stays disabled until you set it — Aquifer logs a warning on startup if you haven't (benchmarked
-safe at 400MB on a 512MB instance, as a starting point). See [benchmark.md](benchmark.md) for real
-numbers, including what happens under sustained load, a 10x burst, a memory ceiling, a mid-flight
-crash, multi-tenant fairness, and capacity/drain time by machine size.
-
-**Retry-After backs off exponentially under sustained pressure.** A single rejection returns
-your configured base value (default 5s). Each additional *consecutive* rejection — with no
-allowed request in between — doubles it: 5s → 10s → 20s → 40s → capped at 60s. The moment a
-request is allowed again, it resets to the base. This exists so that clients retrying into a
-sustained overload spread out over time instead of all hammering the same fixed 5-second ceiling
-forever, which is exactly the pattern that keeps an overloaded instance from ever catching up.
+Body-size and DB-size admission are on by default; memory admission stays off until you set a limit, since a safe default depends on your own deployment, not Aquifer's disk usage. Retry-After backs off exponentially under sustained rejection (5s → 10s → 20s → 40s → capped at 60s, resets on the next allowed request). See [CONFIGURATION.md](CONFIGURATION.md) for the full rationale and [benchmark.md](benchmark.md) for the numbers behind these defaults.
 
 ---
 
@@ -176,13 +160,7 @@ MCP tools:
 | `aquifer_l8_metadata` | Return L8 public key metadata |
 | `aquifer_l8_challenge` | Answer an L8 challenge |
 
-MCP resources:
-
-| Resource | Purpose |
-|----------|---------|
-| `aquifer://jobs/{job_id}` | Read current job status and metadata as JSON |
-
-The HTTP adapter remains the default so existing deployments do not change.
+MCP resource: `aquifer://jobs/{job_id}` reads current job status and metadata as JSON. The HTTP adapter remains the default so existing deployments do not change.
 
 ### Writing an adapter
 
@@ -192,8 +170,7 @@ Adapter authors import Aquifer as a Go package, implement `FrameworkAdapter`, an
 
 ## Metrics adapter
 
-Aquifer emits lifecycle events through a pluggable metrics adapter. Implement
-`MetricsAdapter` and pass it into `NewRegistry`:
+Aquifer emits lifecycle events through a pluggable metrics adapter — implement `MetricsAdapter` and pass it into `NewRegistry`:
 
 ```go
 type MetricsAdapter interface {
@@ -228,6 +205,8 @@ Aquifer ships with `NoopMetricsAdapter`, so existing deployments do not change.
 }
 ```
 
+**Do not expose Aquifer directly to untrusted callers.** `url` is dispatched as a real HTTP request — if an arbitrary or untrusted party can set it, Aquifer becomes an open relay/SSRF vector: it can be pointed at your internal network, cloud metadata endpoints (`169.254.169.254`), or anything else the machine Aquifer runs on can reach, using Aquifer's own network position and identity. The intended caller is **your own trusted backend or gateway code** dispatching to a destination it already knows about — not an agent, end user, or any other party choosing the destination itself. Run Aquifer on a private network, not bound to a public address, and put your own authorization and destination allow-listing in front if agents need to reach it indirectly.
+
 Idempotent — duplicate `idempotent_key` per `user_id` returns the existing job.
 
 **201** new job queued · **200 + `"duplicate": true`** already exists
@@ -246,34 +225,11 @@ Idempotent — duplicate `idempotent_key` per `user_id` returns the existing job
 
 ### GET /jobs/:id/stream
 
-Server-Sent Events stream for live job updates.
-
-```
-event: queued
-data: {"job_id":"a3f9...","status":"queued"}
-
-event: dispatching
-data: {"job_id":"a3f9..."}
-
-event: completed
-data: {"job_id":"a3f9...","response_status":200,"body":"..."}
-```
-
-Or `event: failed` with `{"job_id":"...","reason":"..."}`.
-
-**Position updates** — while the job waits in queue, a position event is broadcast every 2 seconds:
-```
-event: position
-data: {"job_id":"a3f9...","position":4}
-```
+Server-Sent Events stream for live job updates: `queued` → `dispatching` → `completed` (`{"job_id","response_status","body"}`) or `failed` (`{"job_id","reason"}`), plus a `position` event every 2s while queued. Connecting late is safe — you'll receive synthetic catchup events for states you missed. SSE is a convenience, not the source of truth: the webhook fires regardless of whether the stream was ever open.
 
 ```bash
 curl -N http://localhost:8080/jobs/<id>/stream
 ```
-
-Connecting late is safe — you'll receive synthetic `queued` and `dispatching` catchup events for states you missed.
-
-**The Aqueduct Protocol:** SSE gives you live updates while you're connected; the webhook fires regardless, whether or not the stream was open. Stay connected for real-time progress, or don't — either way the result reaches you.
 
 ### GET /health
 
@@ -320,34 +276,24 @@ Connecting late is safe — you'll receive synthetic `queued` and `dispatching` 
 }
 ```
 
-Webhook delivery retries 4 times: 1 s · 2 s · 4 s · 8 s.
-
-**This is at-least-once delivery, not exactly-once.** A webhook can be delivered more than once — for example, if Aquifer crashes after a dispatch succeeds but before it records that completion, the recovered job dispatches again on restart. Make your webhook handler idempotent on `job_id` (or `idempotent_key`) anywhere duplicate execution isn't safe, the same contract Stripe and GitHub webhooks already ask of you.
+Webhook delivery retries 4 times: 1 s · 2 s · 4 s · 8 s. Delivery is at-least-once — see [Semantics](#how-it-works) above.
 
 ---
 
 ## L8 Protocol — trustless webhook delivery
 
-Traditional webhook security requires sharing a secret between sender and receiver and storing it in a database on both sides. Aquifer implements **L8 v0.1**, a lightweight challenge-response protocol that eliminates shared secrets entirely.
-
-**The attack surface problem L8 solves:** A shared HMAC secret is something that can be stolen, accidentally logged, forgotten to rotate, or compromised on either side. A stolen secret lets anyone forge webhook deliveries forever. L8 replaces that shared secret with public key cryptography — there is no secret to steal from a database.
+Traditional webhook security shares an HMAC secret between sender and receiver, stored in a database on both sides — something that can be stolen, logged accidentally, or forgotten during rotation, letting anyone forge deliveries forever once it leaks. Aquifer implements **L8 v0.1**, a lightweight challenge-response protocol that replaces the shared secret with public key cryptography — there's no secret to steal from a database.
 
 **How it works:**
 
 1. The receiver publishes a public key at `GET /.well-known/l8`
 2. Before the first delivery, Aquifer challenges the receiver to prove ownership of the corresponding private key — a one-time handshake
 3. Trust is cached to disk as `l8-trust/{domain}.json` — the handshake never runs again for that domain
-4. Every webhook delivery carries `X-L8-Signature` headers the receiver verifies locally with no database lookup and no round-trip to any authority
+4. Every delivery carries `X-L8-Signature` headers, verified locally with a single Ed25519 call — no database lookup, no round-trip to any authority, microseconds
 
-**Why this keeps things fast:** verification is a single local Ed25519 `verify()` call against a cached public key, with no database query, HTTP call, or shared state involved — it takes microseconds.
+Trust stays deliberately pairwise, not transitive — a receiver verifies each sender's key directly on first contact, and there's no "I trust A, A vouches for B" chain, since that indirection is exactly what makes forged trust possible. Long-term protocol goal: a receiver that implements L8 once could accept any sender that speaks it, the same way supporting HTTPS once means supporting any HTTPS client — that's the value if the protocol spreads beyond Aquifer and ezthrottle-local, the two implementations that speak it today.
 
-**This is built for a network effect too, of a different kind than the pacing headers above.** L8 trust stays deliberately pairwise — a receiver verifies each sender's key directly, on first contact, cached for that pair; there's no transitive "I trust A, A vouches for B, so I trust B" chain, and there shouldn't be, since that's exactly the kind of indirection that makes forged trust possible. The network effect here, if the protocol gets adopted beyond Aquifer and ezthrottle-local, would be protocol standardization, not trust propagation: a receiver that implements the L8 verification endpoint once could accept *any* sender that speaks L8 with no new secret to provision or rotate per sender, the same way supporting HTTPS once means supporting any HTTPS client. That's the value if L8 spreads — right now it's the two implementations that already speak it.
-
-**Key management:**
-
-Set `L8_PRIVATE_KEY` (base64 Ed25519 private key) for a stable identity across restarts. Without it, Aquifer auto-generates a key and saves it to `.l8-key` on first start.
-
-To revoke trust with a domain: delete `l8-trust/{domain}.json`. The handshake re-runs on next delivery.
+Set `L8_PRIVATE_KEY` (base64 Ed25519 private key) for a stable identity across restarts, or let Aquifer auto-generate one on first start. Delete `l8-trust/{domain}.json` to revoke trust with a domain — the handshake re-runs on next delivery.
 
 **Aquifer exposes:**
 
@@ -355,39 +301,29 @@ To revoke trust with a domain: delete `l8-trust/{domain}.json`. The handshake re
 |---|---|
 | `GET /.well-known/l8` | Aquifer's public key and capabilities — receivers discover Aquifer here |
 | `POST /l8/challenge` | Handles incoming challenges from receivers verifying Aquifer's identity |
-| `GET /l8-spec` | The full L8 protocol spec — served on any running Aquifer instance |
+| `GET /l8-spec` | The full L8 protocol spec, served locally for an agent/script with only network access to this instance |
 
-**Protocol version:** `0.1`. The version is advertised in `/.well-known/l8` and `GET /health` so agents can detect what capabilities are available. Future versions will add payload encryption (0.2) and formalized key rotation (0.3).
-
-The full protocol spec is at [rjpruitt16.github.io/l8-protocol](https://rjpruitt16.github.io/l8-protocol/), the same canonical spec ezthrottle-local's L8 implementation follows too, also browsable at `GET /l8-spec` on any running instance for an agent or script that only has access to a running instance, not the internet. The spec documents the receiver-side endpoints any service needs to implement to receive signed webhooks.
-
-See `tests/l8_receiver.py` for a complete reference implementation of the receiver side, and `tests/test_l8.py` for end-to-end tests that verify the handshake, signed delivery, and cryptographic signature validation.
+Current protocol version `0.1`, advertised in `/.well-known/l8` and `GET /health`. The full spec — receiver-side endpoints, wire format, versioning — lives at [rjpruitt16.github.io/l8-protocol](https://rjpruitt16.github.io/l8-protocol/), the same canonical spec ezthrottle-local follows. A complete reference receiver implementation and end-to-end tests are in `tests/l8_receiver.py` and `tests/test_l8.py`.
 
 ---
 
 ## Dynamic Pacing
 
-**Terminology**: Aquifer is this implementation; Aqueduct is the name of the header protocol (`X-Aqueduct-*`) it speaks, designed to be implementation-agnostic so other services could speak it too — the same relationship as, say, nginx and HTTP.
+**Terminology**: Aquifer is this implementation; Aqueduct is the implementation-agnostic header protocol (`X-Aqueduct-*`) it speaks, so other services could speak it too.
 
 The upstream controls pace at runtime via response headers. `X-Aqueduct-*` is the protocol namespace; `X-Aquifer-*` remains supported as a backward-compatible product alias.
 
-| Header                      | Effect                                       |
-|-----------------------------|----------------------------------------------|
-| `X-Aqueduct-Rps`            | Reduce dispatch rate to this value           |
-| `X-Aqueduct-Max-Concurrent` | Reduce max in-flight requests                |
-| `X-Aqueduct-Account-Queue`  | `enabled` — isolate each tenant's queue      |
+| Header (preferred)          | Alias                        | Effect                                  |
+|------------------------------|-------------------------------|------------------------------------------|
+| `X-Aqueduct-Rps`            | `X-Aquifer-Rps`               | Reduce dispatch rate to this value      |
+| `X-Aqueduct-Max-Concurrent` | `X-Aquifer-Max-Concurrent`    | Reduce max in-flight requests           |
+| `X-Aqueduct-Account-Queue`  | `X-Aquifer-Account-Queue`     | `enabled` — isolate each tenant's queue |
 
-With `X-Aqueduct-Account-Queue: enabled`, each `(user_id, api_key)` pair gets its own independently paced queue. One tenant's burst can't slow down another. Each queue's own pace is still capped by the upstream's actual budget, though — a background check keeps the *sum* of every active tenant queue's rate within the upstream's configured (or, for a pool-backed upstream, live aggregate) ceiling, throttling proportionally if too many tenants are active at once. Isolation between tenants doesn't mean each one gets its own unbounded copy of the full rate.
+Aquifer reads both namespaces, preferring `X-Aqueduct-*` when both are present.
 
-Aquifer reads both namespaces, preferring `X-Aqueduct-*` when both are present:
+With `X-Aqueduct-Account-Queue: enabled`, each `(user_id, api_key)` pair gets its own independently paced queue, so one tenant's burst can't slow down another. Each queue's pace still stays inside the upstream's actual budget — a background check throttles the *sum* of every active tenant queue proportionally if too many are active at once, so isolation never means an unbounded copy of the full rate per tenant.
 
-| Preferred | Compatibility alias |
-|-----------|---------------------|
-| `X-Aqueduct-Rps` | `X-Aquifer-Rps` |
-| `X-Aqueduct-Max-Concurrent` | `X-Aquifer-Max-Concurrent` |
-| `X-Aqueduct-Account-Queue` | `X-Aquifer-Account-Queue` |
-
-Dynamic pacing is useful for your own servers because it lets them shed pressure gradually while still making progress. A backend can lower RPS when CPU, queue depth, database latency, or downstream dependency pressure rises; Aquifer will honor that lower pace immediately, and then recover gradually toward the configured ceiling when pressure clears.
+A backend can lower RPS at any time via these headers when it's under pressure; Aquifer honors the lower pace immediately and recovers gradually toward the configured ceiling once pressure clears.
 
 ---
 
@@ -447,7 +383,7 @@ The same call is both initial registration and heartbeat — call it again perio
 
 **Set `capacity_rps` conservatively, not at your true theoretical max.** Aquifer only learns a member died via a failed dispatch or a missed heartbeat, both of which lag the actual failure — leaving headroom in what you declare gives real slack for that detection delay. Reputation decay is a second line of defense on top of this: a member that's silently struggling gets throttled down by observed failures even if its last-declared capacity was optimistic.
 
-**A given `pool_id` should belong to exactly one Aquifer instance** — the same partitioning rule as domains and tenants elsewhere in this README, just extended to pool registration. Pool state isn't shared or coordinated across Aquifer instances; if the same member registers the same `pool_id` with two different Aquifer instances, each one independently believes it owns that member's full declared capacity, and aggregate load on that member can exceed what it actually declared. If a member genuinely needs to register with more than one instance (e.g. for its own redundancy), divide its declared `capacity_rps` across however many instances it's registered with, the same way you'd under-declare capacity for detection lag.
+Pool state isn't shared across Aquifer instances — see [Deployment model](#deployment-model) for how that constrains a given `pool_id` to one instance.
 
 `GET /health` reports every pool's current members, their declared capacity, and current reputation.
 
@@ -477,11 +413,11 @@ The same call is both initial registration and heartbeat — call it again perio
 
 Aquifer runs three ways: as a **sidecar** alongside your app on the same machine, as a **standalone service** on its own machine or container that multiple services point to, or **embedded directly as a Go library** in your own process (see [Framework adapters](#framework-adapters) above — `FrameworkAdapter` and `aquifer.RunAdapter` are built for exactly this). Each instance persists to its own SQLite volume, so there's no external database or coordination service to run.
 
-A single instance's throughput isn't a hard ceiling on the system — it's the unit you scale by adding more of them. Run one instance per upstream domain or tenant, each owning a distinct key space, and total throughput scales with instance count. Running multiple instances against the *same* upstream without partitioning will multiply your request rate against it instead, which is the one setup to avoid.
+A single instance's throughput isn't a hard ceiling on the system — it's the unit you scale by adding more of them. Run one instance per upstream domain or tenant, each owning a distinct key space, and total throughput scales with instance count. Running multiple instances against the *same* upstream without partitioning will multiply your request rate against it instead, which is the one setup to avoid. The same rule applies to pools: a given `pool_id` should belong to exactly one instance, since pool state isn't shared or coordinated across instances — if a member genuinely needs to register with more than one, divide its declared `capacity_rps` across however many instances it's registered with.
 
 People run Aquifer in front of things like: internal coding platforms (GitLab, Forgejo), CI runners, database read replicas, and MCP servers — anywhere a burst of agent or service traffic needs to hit something that has its own capacity limit.
 
-**Do not expose Aquifer directly to untrusted callers.** `POST /jobs` takes a `url` field and dispatches a real HTTP request to it — if an arbitrary or untrusted party can set that field, Aquifer becomes an open relay/SSRF vector: it can be pointed at your internal network, cloud metadata endpoints (`169.254.169.254`), or anything else the machine Aquifer runs on can reach, using Aquifer's own network position and identity. The intended caller is **your own trusted backend or gateway code**, dispatching to a specific microservice or third-party API it already knows about — not an agent, end user, or any other untrusted party choosing the destination itself. Run Aquifer on a private network or internal service mesh, not bound to a public address, and if agents need to reach it, put your own authorization and destination allow-listing in front rather than letting them call Aquifer's raw API directly.
+See the [security warning](#post-jobs) under `POST /jobs` — the same untrusted-caller risk applies regardless of deployment shape.
 
 ---
 
