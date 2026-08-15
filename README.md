@@ -14,7 +14,7 @@ Built by [Rahmi Pruitt](https://rahmipruitt.me) — open to AI infra consulting,
 
 Distributed agents call tools and APIs in bursts. Your backend gets overwhelmed on inbound. Your app gets 429s on outbound. One slow dependency takes everything else down with it.
 
-Aquifer gives those agents a coordination layer. It absorbs the burst, queues requests durably (SQLite by default, or Pebble — see below), and releases them at the rate you configure. Either your backend or the upstream can ask for a slower pace, and Aquifer honors whichever one is asking for less.
+Aquifer gives those agents a coordination layer. It absorbs the burst, queues requests durably (SQLite by default, or Pebble — see below), and releases them at the rate you configure. The destination service can ask for a slower pace, and Aquifer honors whichever limit is lower.
 
 **Benchmarked:** 10x traffic spikes absorbed with zero failures, 30/30 jobs surviving a `kill -9` mid-drain, and clean `429` admission shedding under sustained overload. See [benchmark.md](benchmark.md) for throughput ceilings, crash recovery, memory behavior, and capacity by machine size.
 
@@ -387,7 +387,7 @@ Pool state isn't shared across Aquifer instances — see [Deployment model](#dep
 
 ## Reliability
 
-- **Durable queue** — jobs persist to SQLite on every write
+- **Durable queue** — jobs persist to the configured storage backend on every write
 - **Crash recovery** — queued jobs re-dispatched automatically on restart
 - **In-flight tracking** — jobs marked `in_flight` before dispatch; recovered immediately on panic without waiting for full restart
 - **Stale job safety net** — in-flight jobs older than 5 min automatically reset to `queued`
@@ -417,7 +417,7 @@ See the [security warning](#post-jobs) under `POST /jobs` — the same untrusted
 
 ## Choosing a machine size
 
-Every machine/CPU configuration tested broke at the identical ~200 req/s point — that turned out to be a single hardcoded SQLite connection serializing every request, not a hardware ceiling, and it's fixed now. See [benchmark.md](benchmark.md#7-capacity-and-drain-time--and-a-real-bug-this-test-found) for the full story and a checklist for picking a size based on your own traffic shape.
+Earlier benchmarks hit an artificial ~200 req/s ceiling caused by a serialized SQLite connection; that bottleneck is fixed. See [benchmark.md](benchmark.md#7-capacity-and-drain-time--and-a-real-bug-this-test-found) for current throughput, capacity by machine size, and the benchmark methodology.
 
 ---
 
