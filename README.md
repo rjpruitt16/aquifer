@@ -501,6 +501,8 @@ The same call is both initial registration and heartbeat — call it again perio
 
 **Set `capacity_rps` conservatively, not at your true theoretical max.** Aquifer only learns a member died via a failed dispatch or a missed heartbeat, both of which lag the actual failure — leaving headroom in what you declare gives real slack for that detection delay. Reputation decay is a second line of defense on top of this: a member that's silently struggling gets throttled down by observed failures even if its last-declared capacity was optimistic.
 
+**A given `pool_id` should belong to exactly one Aquifer instance** — the same partitioning rule as domains and tenants elsewhere in this README, just extended to pool registration. Pool state isn't shared or coordinated across Aquifer instances; if the same member registers the same `pool_id` with two different Aquifer instances, each one independently believes it owns that member's full declared capacity, and aggregate load on that member can exceed what it actually declared. If a member genuinely needs to register with more than one instance (e.g. for its own redundancy), divide its declared `capacity_rps` across however many instances it's registered with, the same way you'd under-declare capacity for detection lag.
+
 `GET /health` reports every pool's current members, their declared capacity, and current reputation.
 
 ---
