@@ -13,6 +13,12 @@ type RuntimeOptions struct {
 	L8TrustDir      string
 	Metrics         MetricsAdapter
 	AdmissionLimits *AdmissionLimits
+	// Store overrides the storage backend entirely. If nil, NewRuntime falls
+	// back to NewJobStore(DBPath), selecting sqlite/pebble via
+	// AQUIFER_STORE_BACKEND as before. Set this to plug in a custom JobStore
+	// implementation (e.g. Postgres, rqlite) without needing to bypass
+	// NewRuntime and wire the lower-level constructors by hand.
+	Store JobStore
 }
 
 type Runtime struct {
@@ -54,7 +60,10 @@ func NewRuntime(opts RuntimeOptions) *Runtime {
 	}
 
 	l8 := NewL8Registry(l8KeyPath, l8TrustDir)
-	store := NewJobStore(dbPath)
+	store := opts.Store
+	if store == nil {
+		store = NewJobStore(dbPath)
+	}
 	broker := NewBroker()
 	metrics := ensureMetrics(opts.Metrics)
 	pools := NewPoolRegistry()

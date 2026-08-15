@@ -166,6 +166,30 @@ MCP resource: `aquifer://jobs/{job_id}` reads current job status and metadata as
 
 Adapter authors import Aquifer as a Go package, implement `FrameworkAdapter`, and pass the shared core into their framework — see [ADAPTERS.md](ADAPTERS.md) for the interface, a complete example, and how to reuse Aquifer's runtime wiring in a custom binary. `examples/custom_adapter` has a compile-tested reference implementation.
 
+### Writing a storage backend
+
+Persistence is also pluggable. Every core component (`Registry`, `AccountQueue`, `URLWorker`, `Aquifer` itself) is coded against the `JobStore` interface, not the concrete SQLite/Pebble types:
+
+```go
+type JobStore interface {
+    Path() string
+    Close() error
+    CheckOrInsert(job *Job) (string, bool)
+    SetQueueKey(jobID, queueKey string)
+    DeleteJob(jobID string)
+    MarkInFlight(jobID string)
+    RecoverInFlight(queueKey string) []*Job
+    UpdateStatus(jobID string, status Status)
+    Counts() StoreCounts
+    GetJob(jobID string) *Job
+    GetQueuedJobs() []*Job
+}
+```
+
+Implement it against your own backend (Postgres, rqlite, or anything else that can give you atomic check-and-set) and pass it via `RuntimeOptions.Store` — no need to bypass `NewRuntime`/`RunAdapter` or hand-wire the lower-level constructors. Two things a custom backend should be aware of: `CheckOrInsert` needs the same atomicity guarantee SQLite's `INSERT OR IGNORE` and Pebble's own store give it today (a non-atomic check-then-write reintroduces the exact idempotency race this project has already found and fixed twice — once in each language); and `AQUIFER_DB_MAX_BYTES` admission control does a local `os.Stat` on `DB_PATH`, which is meaningless for a networked backend — set it to `0` to disable that check if your store isn't a local file or directory.
+
+Aquifer doesn't ship a Postgres or rqlite backend itself — this is documented as an extension point for anyone who wants multi-instance durability without local-disk-per-instance, not a promise one exists yet.
+
 ### Metrics adapter
 
 Aquifer emits lifecycle events through a pluggable metrics adapter — implement `MetricsAdapter` and pass it into `NewRegistry`:
