@@ -26,6 +26,7 @@ type jobDoneMsg struct {
 type AccountQueue struct {
 	key        string
 	upstream   string
+	pool       *Pool // nil unless this queue dispatches into a registered pool instead of a fixed URL
 	cmds       chan *Job
 	done       chan jobDoneMsg
 	store      JobStore
@@ -39,10 +40,26 @@ func (q *AccountQueue) RPS() float64 {
 	return float64(q.currentRPS.Load()) / 100
 }
 
-func NewAccountQueue(key, upstream string, rps float64, maxConc int, store JobStore, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, onIdle func(string)) *AccountQueue {
+// Throttle pushes an external rate adjustment into the queue's dispatch
+// loop, reusing the same jobDoneMsg channel that header-driven pacing
+// already uses — the loop doesn't need to know whether a lower rate came
+// from the upstream's own response header or from the URLWorker capping
+// this queue's share of a shared aggregate budget, it's the same signal
+// either way.
+func (q *AccountQueue) Throttle(rps float64) {
+	select {
+	case q.done <- jobDoneMsg{rps: &rps}:
+	default:
+		// Queue's done channel is momentarily full (100-deep buffer) —
+		// skip this tick, the next aggregate-budget check will retry.
+	}
+}
+
+func NewAccountQueue(key, upstream string, rps float64, maxConc int, pool *Pool, store JobStore, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, onIdle func(string)) *AccountQueue {
 	q := &AccountQueue{
 		key:      key,
 		upstream: upstream,
+		pool:     pool,
 		cmds:     make(chan *Job, 1000),
 		done:     make(chan jobDoneMsg, 100),
 		store:    store,
@@ -103,7 +120,40 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int) {
 	q.currentRPS.Store(int64(rps * 100))
 
 	for {
+		// Pool-backed queues don't have a fixed configured ceiling — the
+		// pool's aggregate capacity is the live sum of whatever its
+		// current members are individually reporting, so it's resampled
+		// here rather than captured once at queue startup. TotalCapacity
+		// is O(n) over the pool's own member count (typically small), so
+		// this is cheap to call on every pass through the dispatch loop.
+		if q.pool != nil {
+			if cap := q.pool.TotalCapacity(); cap > 0 {
+				rps = math.Max(math.Min(cap, configuredRPS), minRPS)
+			}
+		}
+
 		for len(queue) > 0 && inFlight < maxConc {
+			var member *PoolMember
+			if q.pool != nil {
+				member = q.pool.Pick()
+				if member == nil {
+					// No registered members to dispatch to at all —
+					// fail the head job now rather than blocking the
+					// whole queue behind an empty pool.
+					job := queue[0]
+					queue = queue[1:]
+					q.metrics.QueueDepth(q.upstream, len(queue))
+					q.store.UpdateStatus(job.ID, StatusFailed)
+					q.metrics.JobFailed(job.UserID, q.upstream, "no pool members registered")
+					deliverWebhook(job.WebhookURL, map[string]any{
+						"job_id": job.ID,
+						"status": "failed",
+						"reason": "no pool members registered",
+					}, q.l8, q.metrics)
+					continue
+				}
+			}
+
 			interval := time.Duration(float64(time.Second) / rps)
 			jitter := time.Duration(rand.Int63n(int64(interval/10) + 1))
 			elapsed := time.Since(lastRequestAt)
@@ -121,8 +171,13 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int) {
 			q.store.MarkInFlight(job.ID)
 			q.metrics.JobDispatched(job.UserID, q.upstream)
 
+			dispatchURL := job.URL
+			if member != nil {
+				dispatchURL = member.Address
+			}
+
 			currentRPS := rps
-			go func(j *Job, flowRate float64) {
+			go func(j *Job, url string, m *PoolMember, flowRate float64) {
 				defer func() {
 					if r := recover(); r != nil {
 						log.Printf("[AccountQueue] panic executing job %s: %v", j.ID, r)
@@ -136,8 +191,8 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int) {
 						q.done <- jobDoneMsg{}
 					}
 				}()
-				q.done <- execute(j, q.upstream, q.store, q.broker, q.l8, q.metrics, flowRate)
-			}(job, currentRPS)
+				q.done <- execute(j, url, q.upstream, q.store, q.broker, q.l8, q.metrics, q.pool, m, flowRate)
+			}(job, dispatchURL, member, currentRPS)
 		}
 
 		select {
@@ -180,7 +235,7 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int) {
 	}
 }
 
-func execute(job *Job, upstream string, store JobStore, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, flowRate float64) jobDoneMsg {
+func execute(job *Job, dispatchURL, upstream string, store JobStore, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, pool *Pool, member *PoolMember, flowRate float64) jobDoneMsg {
 	metrics = ensureMetrics(metrics)
 	startedAt := time.Now()
 
@@ -195,12 +250,12 @@ func execute(job *Job, upstream string, store JobStore, broker *Broker, l8 *L8Re
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
 			backoff := time.Duration(math.Pow(2, float64(attempt-1))) * time.Second
-			log.Printf("[AccountQueue] retry %d/%d for %s in %s", attempt, maxRetries, job.URL, backoff)
+			log.Printf("[AccountQueue] retry %d/%d for %s in %s", attempt, maxRetries, dispatchURL, backoff)
 			time.Sleep(backoff)
 		}
 
 		counts := store.Counts()
-		resp, err = makeRequest(job, counts.TotalJobs, counts.QueueDepth, flowRate)
+		resp, err = makeRequest(job, dispatchURL, counts.TotalJobs, counts.QueueDepth, flowRate)
 		if err != nil {
 			continue
 		}
@@ -217,6 +272,9 @@ func execute(job *Job, upstream string, store JobStore, broker *Broker, l8 *L8Re
 		if err != nil {
 			reason = err.Error()
 		}
+		if pool != nil && member != nil {
+			pool.RecordFailure(member.ID)
+		}
 		store.UpdateStatus(job.ID, StatusFailed)
 		broker.Publish(job.ID, SSEEvent{
 			Event: "failed",
@@ -231,6 +289,14 @@ func execute(job *Job, upstream string, store JobStore, broker *Broker, l8 *L8Re
 		return jobDoneMsg{}
 	}
 	defer resp.Body.Close()
+
+	if pool != nil && member != nil {
+		if resp.StatusCode >= 500 {
+			pool.RecordFailure(member.ID)
+		} else {
+			pool.RecordSuccess(member.ID)
+		}
+	}
 
 	body, _ := io.ReadAll(resp.Body)
 	store.UpdateStatus(job.ID, StatusCompleted)
@@ -274,13 +340,13 @@ func pacingHeader(headers http.Header, name string) string {
 	return headers.Get("X-Aquifer-" + name)
 }
 
-func makeRequest(job *Job, totalJobs, queueDepth int64, flowRate float64) (*http.Response, error) {
+func makeRequest(job *Job, dispatchURL string, totalJobs, queueDepth int64, flowRate float64) (*http.Response, error) {
 	var bodyReader io.Reader
 	if job.Body != "" {
 		bodyReader = strings.NewReader(job.Body)
 	}
 
-	req, err := http.NewRequest(job.Method, job.URL, bodyReader)
+	req, err := http.NewRequest(job.Method, dispatchURL, bodyReader)
 	if err != nil {
 		return nil, err
 	}

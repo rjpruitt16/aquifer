@@ -247,12 +247,13 @@ func mcpTools() []map[string]any {
 			"inputSchema": objectSchema(map[string]any{
 				"user_id":        stringSchema("Stable user, tenant, or agent identifier."),
 				"idempotent_key": stringSchema("Caller-provided idempotency key scoped to user_id."),
-				"url":            stringSchema("Target URL Aquifer should dispatch to."),
+				"url":            stringSchema("Target URL Aquifer should dispatch to. Mutually exclusive with pool_id — set exactly one."),
+				"pool_id":        stringSchema("Dispatch to a registered pool by id instead of a fixed URL. Mutually exclusive with url — set exactly one."),
 				"method":         stringSchema("HTTP method to use when dispatching the request."),
 				"headers":        map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}},
 				"body":           stringSchema("Optional raw request body."),
 				"webhook_url":    stringSchema("URL that receives the eventual job result."),
-			}, []string{"user_id", "idempotent_key", "url", "method", "webhook_url"}),
+			}, []string{"user_id", "idempotent_key", "method", "webhook_url"}),
 		},
 		{
 			"name":        "aquifer_get_job",

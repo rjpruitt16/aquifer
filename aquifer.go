@@ -1,6 +1,9 @@
 package aquifer
 
-import "errors"
+import (
+	"errors"
+	"time"
+)
 
 var ErrJobNotFound = errors.New("job not found")
 
@@ -16,10 +19,32 @@ type Aquifer struct {
 	broker    *Broker
 	l8        *L8Registry
 	admission *AdmissionController
+	pools     *PoolRegistry
 }
 
-func NewAquifer(store JobStore, registry *Registry, broker *Broker, l8 *L8Registry, admission *AdmissionController) *Aquifer {
-	return &Aquifer{store: store, registry: registry, broker: broker, l8: l8, admission: admission}
+func NewAquifer(store JobStore, registry *Registry, broker *Broker, l8 *L8Registry, admission *AdmissionController, pools *PoolRegistry) *Aquifer {
+	return &Aquifer{store: store, registry: registry, broker: broker, l8: l8, admission: admission, pools: pools}
+}
+
+// RegisterPoolMember adds or refreshes (heartbeats) a member of a pool.
+// The same call serves both roles — re-registering resets the member's
+// liveness TTL and updates its declared capacity.
+func (a *Aquifer) RegisterPoolMember(poolID, memberID, address string, declaredRPS float64, heartbeatIntervalSeconds int) error {
+	if a.pools == nil {
+		return errors.New("pool registry not configured")
+	}
+	if poolID == "" || memberID == "" || address == "" {
+		return errors.New("pool_id, member_id, and address are required")
+	}
+	if declaredRPS <= 0 {
+		return errors.New("capacity_rps must be greater than 0")
+	}
+	interval := time.Duration(heartbeatIntervalSeconds) * time.Second
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	a.pools.Register(poolID, memberID, address, declaredRPS, interval)
+	return nil
 }
 
 func (a *Aquifer) Enqueue(req JobRequest) (EnqueueResult, error) {
@@ -101,12 +126,16 @@ func (a *Aquifer) SubscribeJob(id string) (*Job, <-chan SSEEvent, func(), error)
 }
 
 func (a *Aquifer) Health() map[string]any {
-	return map[string]any{
+	h := map[string]any{
 		"status":        "ok",
 		"l8_protocol":   "0.1",
 		"l8_public_key": a.l8.PubB64,
 		"admission":     a.AdmissionSnapshot(),
 	}
+	if a.pools != nil {
+		h["pools"] = a.pools.Snapshot()
+	}
+	return h
 }
 
 func (a *Aquifer) L8Metadata(host string) L8Meta {

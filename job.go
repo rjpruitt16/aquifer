@@ -20,7 +20,8 @@ type Job struct {
 	ID            string            `json:"id"`
 	UserID        string            `json:"user_id"`
 	IdempotentKey string            `json:"idempotent_key"`
-	URL           string            `json:"url"`
+	URL           string            `json:"url,omitempty"`
+	PoolID        string            `json:"pool_id,omitempty"`
 	Method        string            `json:"method"`
 	Headers       map[string]string `json:"headers,omitempty"`
 	Body          string            `json:"body,omitempty"`
@@ -32,7 +33,8 @@ type Job struct {
 type JobRequest struct {
 	UserID        string            `json:"user_id"`
 	IdempotentKey string            `json:"idempotent_key"`
-	URL           string            `json:"url"`
+	URL           string            `json:"url,omitempty"`
+	PoolID        string            `json:"pool_id,omitempty"`
 	Method        string            `json:"method"`
 	Headers       map[string]string `json:"headers,omitempty"`
 	Body          string            `json:"body,omitempty"`
@@ -51,8 +53,10 @@ func (r *JobRequest) Validate() string {
 		return "user_id is required"
 	case r.IdempotentKey == "":
 		return "idempotent_key is required"
-	case r.URL == "":
-		return "url is required"
+	case r.URL == "" && r.PoolID == "":
+		return "either url or pool_id is required"
+	case r.URL != "" && r.PoolID != "":
+		return "url and pool_id are mutually exclusive — a job dispatches to one or the other"
 	case r.Method == "":
 		return "method is required"
 	case r.WebhookURL == "":
@@ -67,6 +71,7 @@ func NewJob(r *JobRequest) *Job {
 		UserID:        r.UserID,
 		IdempotentKey: r.IdempotentKey,
 		URL:           r.URL,
+		PoolID:        r.PoolID,
 		Method:        strings.ToUpper(r.Method),
 		Headers:       r.Headers,
 		Body:          r.Body,

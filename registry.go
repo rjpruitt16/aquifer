@@ -13,11 +13,12 @@ type Registry struct {
 	broker     *Broker
 	l8         *L8Registry
 	metrics    MetricsAdapter
+	pools      *PoolRegistry
 	totalJobs  atomic.Int64
 	queueDepth atomic.Int64
 }
 
-func NewRegistry(store JobStore, cfg *Config, broker *Broker, l8 *L8Registry, metrics MetricsAdapter) *Registry {
+func NewRegistry(store JobStore, cfg *Config, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, pools *PoolRegistry) *Registry {
 	r := &Registry{
 		workers: make(map[string]*URLWorker),
 		store:   store,
@@ -25,6 +26,7 @@ func NewRegistry(store JobStore, cfg *Config, broker *Broker, l8 *L8Registry, me
 		broker:  broker,
 		l8:      l8,
 		metrics: ensureMetrics(metrics),
+		pools:   pools,
 	}
 	counts := store.Counts()
 	r.totalJobs.Store(counts.TotalJobs)
@@ -32,7 +34,8 @@ func NewRegistry(store JobStore, cfg *Config, broker *Broker, l8 *L8Registry, me
 	return r
 }
 
-// Enqueue queues a job on the URLWorker for its upstream domain.
+// Enqueue queues a job on the URLWorker for its upstream domain, or for
+// its target pool if the job carries a PoolID instead of a URL.
 // accountQueueHeader is the raw X-Aqueduct-Account-Queue/X-Aquifer-Account-Queue
 // value from the originating HTTP request, or "" if this job has no live
 // request behind it (e.g. recovered from disk at startup). An empty value
@@ -47,12 +50,24 @@ func (r *Registry) Enqueue(job *Job, accountQueueHeader string) {
 	r.totalJobs.Add(1)
 	r.queueDepth.Add(1)
 
-	key := domainKey(job.URL)
+	var key string
+	var pool *Pool
+	var rc RateConfig
+	if job.PoolID != "" {
+		key = "pool:" + job.PoolID
+		if r.pools != nil {
+			pool = r.pools.Get(job.PoolID)
+		}
+		rc = r.cfg.Defaults
+	} else {
+		key = domainKey(job.URL)
+		rc = r.cfg.ForURL(job.URL)
+	}
+
 	r.metrics.JobQueued(job.UserID, key)
 	w, ok := r.workers[key]
 	if !ok {
-		rc := r.cfg.ForURL(job.URL)
-		w = NewURLWorker(key, rc.RPS, rc.MaxConcurrent, r.store, r.broker, r.l8, r.metrics, func(k string) {
+		w = NewURLWorker(key, rc.RPS, rc.MaxConcurrent, pool, r.store, r.broker, r.l8, r.metrics, func(k string) {
 			r.mu.Lock()
 			delete(r.workers, k)
 			r.mu.Unlock()

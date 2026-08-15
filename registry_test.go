@@ -26,7 +26,7 @@ func testRegistry(t *testing.T) *Registry {
 	broker := NewBroker()
 	l8 := NewL8Registry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"))
 	cfg := &Config{Defaults: RateConfig{RPS: 100, MaxConcurrent: 1}}
-	return NewRegistry(store, cfg, broker, l8, NoopMetricsAdapter{})
+	return NewRegistry(store, cfg, broker, l8, NoopMetricsAdapter{}, nil)
 }
 
 func jobFor(userID, apiKey string) *Job {

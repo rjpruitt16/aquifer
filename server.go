@@ -53,10 +53,39 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /jobs/{id}/stream", s.streamJob)
 	mux.HandleFunc("GET /jobs/{id}", s.getJob)
 	mux.HandleFunc("GET /health", s.health)
+	mux.HandleFunc("POST /pools/{pool_id}/members", s.registerPoolMember)
 	mux.HandleFunc("GET /.well-known/l8", s.wellKnownL8)
 	mux.HandleFunc("POST /l8/challenge", s.l8Challenge)
 	mux.HandleFunc("GET /l8-spec", s.l8Spec)
 	return mux
+}
+
+// registerPoolMember handles both initial registration and heartbeat
+// refresh for a pool member — the same request shape serves both, per
+// the API design: re-calling this resets the member's liveness TTL and
+// updates its declared capacity.
+func (s *Server) registerPoolMember(w http.ResponseWriter, r *http.Request) {
+	poolID := r.PathValue("pool_id")
+
+	var req struct {
+		MemberID                 string  `json:"member_id"`
+		Address                  string  `json:"address"`
+		CapacityRPS              float64 `json:"capacity_rps"`
+		HeartbeatIntervalSeconds int     `json:"heartbeat_interval_seconds"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.aquifer.RegisterPoolMember(poolID, req.MemberID, req.Address, req.CapacityRPS, req.HeartbeatIntervalSeconds); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]any{"status": "registered"})
 }
 
 func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {

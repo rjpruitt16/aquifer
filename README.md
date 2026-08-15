@@ -431,7 +431,7 @@ The upstream controls pace at runtime via response headers. `X-Aqueduct-*` is th
 | `X-Aqueduct-Max-Concurrent` | Reduce max in-flight requests                |
 | `X-Aqueduct-Account-Queue`  | `enabled` — isolate each tenant's queue      |
 
-With `X-Aqueduct-Account-Queue: enabled`, each `(user_id, api_key)` pair gets its own independently paced queue. One tenant's burst can't slow down another.
+With `X-Aqueduct-Account-Queue: enabled`, each `(user_id, api_key)` pair gets its own independently paced queue. One tenant's burst can't slow down another. Each queue's own pace is still capped by the upstream's actual budget, though — a background check keeps the *sum* of every active tenant queue's rate within the upstream's configured (or, for a pool-backed upstream, live aggregate) ceiling, throttling proportionally if too many tenants are active at once. Isolation between tenants doesn't mean each one gets its own unbounded copy of the full rate.
 
 Aquifer reads both namespaces, preferring `X-Aqueduct-*` when both are present:
 
@@ -465,6 +465,43 @@ if total_jobs > 500:
 ```
 
 This keeps the autoscaling decision in your hands — Aquifer exposes the signal, your service acts on it however fits your infrastructure.
+
+---
+
+## Pool-based load balancing
+
+Instead of dispatching to a fixed `url`, a job can target a named **pool** — a group of registered service instances Aquifer picks from at dispatch time. Useful when you have several interchangeable backends (or, e.g., a separate group of writers and a separate group of readers) instead of one fixed endpoint.
+
+**Registering a member:**
+
+```bash
+curl -X POST https://your-aquifer/pools/writers/members \
+  -d '{"member_id": "writer-1", "address": "http://10.0.1.5:8080", "capacity_rps": 20, "heartbeat_interval_seconds": 30}'
+```
+
+The same call is both initial registration and heartbeat — call it again periodically (at roughly your declared `heartbeat_interval_seconds`) to stay in the pool. Missing several consecutive expected heartbeats evicts a member. A member can register under more than one pool id.
+
+**Dispatching to a pool:**
+
+```json
+{
+  "user_id": "user-123",
+  "idempotent_key": "job-1",
+  "pool_id": "writers",
+  "method": "POST",
+  "webhook_url": "https://yourapp.com/webhooks/aquifer"
+}
+```
+
+`pool_id` and `url` are mutually exclusive — a job sets exactly one.
+
+**How a member gets picked:** proportional to `capacity_rps × reputation`, not equal-split round robin — a member declaring 100 RPS gets roughly 4x the dispatches of one declaring 25. The pool's aggregate ceiling is the live sum of every member's current effective rate, so it grows and shrinks automatically as members register, degrade, or drop out — no need to reconfigure Aquifer as your fleet autoscales.
+
+**Reputation**: a dispatch failure halves a member's effective share; a success nudges it back up. A member isn't evicted on one bad response — only once its reputation has stayed at the floor continuously, with no interrupting success, for a sustained window. This avoids flapping a member in and out of the pool over a single transient error.
+
+**Set `capacity_rps` conservatively, not at your true theoretical max.** Aquifer only learns a member died via a failed dispatch or a missed heartbeat, both of which lag the actual failure — leaving headroom in what you declare gives real slack for that detection delay. Reputation decay is a second line of defense on top of this: a member that's silently struggling gets throttled down by observed failures even if its last-declared capacity was optimistic.
+
+`GET /health` reports every pool's current members, their declared capacity, and current reputation.
 
 ---
 

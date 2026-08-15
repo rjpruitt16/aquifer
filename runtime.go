@@ -23,6 +23,7 @@ type Runtime struct {
 	L8        *L8Registry
 	Config    *Config
 	Admission *AdmissionController
+	Pools     *PoolRegistry
 }
 
 func NewRuntime(opts RuntimeOptions) *Runtime {
@@ -56,9 +57,10 @@ func NewRuntime(opts RuntimeOptions) *Runtime {
 	store := NewJobStore(dbPath)
 	broker := NewBroker()
 	metrics := ensureMetrics(opts.Metrics)
-	registry := NewRegistry(store, cfg, broker, l8, metrics)
+	pools := NewPoolRegistry()
+	registry := NewRegistry(store, cfg, broker, l8, metrics, pools)
 	admission := NewAdmissionController(*admissionLimits, dbPath)
-	app := NewAquifer(store, registry, broker, l8, admission)
+	app := NewAquifer(store, registry, broker, l8, admission, pools)
 
 	return &Runtime{
 		Aquifer:   app,
@@ -68,6 +70,7 @@ func NewRuntime(opts RuntimeOptions) *Runtime {
 		L8:        l8,
 		Config:    cfg,
 		Admission: admission,
+		Pools:     pools,
 	}
 }
 
