@@ -160,7 +160,7 @@ MCP tools:
 | `aquifer_l8_metadata` | Return L8 public key metadata |
 | `aquifer_l8_challenge` | Answer an L8 challenge |
 
-MCP resource: `aquifer://jobs/{job_id}` reads current job status and metadata as JSON. The HTTP adapter remains the default so existing deployments do not change.
+MCP resource: `aquifer://jobs/{job_id}` reads current job status and metadata as JSON. The HTTP adapter remains the default for the binary, so existing deployments do not change.
 
 ### Writing an adapter
 
