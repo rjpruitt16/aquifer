@@ -2,7 +2,7 @@
 
 **Increase your rate limit without DDoSing your backend.**
 
-A dedicated service absorbs the burst and paces dispatch to your backend, giving your autoscaler time to catch up before it ever sees the flood. That's what makes raising your rate limit safe — and your own clients see fewer 429s, so they retry less too.
+A dedicated service absorbs the burst, paces dispatch to your backend, and — with agent-native load balancing — spreads it across a pool of registered instances, giving your autoscaler time to catch up before it ever sees the flood. That's what makes raising your rate limit safe — and your own clients see fewer 429s, so they retry less too.
 
 **Self-hosted MCP server framework for coordinating HTTP traffic from distributed agents. Aquifer absorbs retry storms before they turn into a bigger LLM bill — durable queuing, controlled dispatch pace, agent-native load balancing across pools of registered backends, and cryptographic agent identity via the L8 protocol, exposed through pluggable adapters.**
 
