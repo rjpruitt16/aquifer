@@ -177,6 +177,14 @@ Same 1 vCPU / 512MB instance, same ramp sequence, post-fix:
 
 **Practical takeaway:** don't reach for a bigger machine to fix a throughput ceiling before checking whether it's actually a resource limit. This one looked exactly like "needs more CPU" — identical breakdown point across 256MB/512MB/1024MB *and* across 1/2/4 shared vCPUs — and was actually a single hardcoded database connection. The lesson generalizes: a ceiling that doesn't move when you change the resource you'd expect to relieve it is a signal to look at the code path, not the instance size.
 
+### Checklist for picking a size
+
+- [ ] **Traffic sustains under ~200 req/s?** Any size works, including 256MB — this workload's bottleneck wasn't CPU or RAM at that range.
+- [ ] **Traffic sustains above ~200-300 req/s?** Re-run `benchmark/capacity_by_size.sh` against your own traffic shape and instance type before assuming a bigger box fixes it — verify the ceiling is actually hardware-bound first, not a code-level one, the way this one turned out to be.
+- [ ] **Bursts happen but are followed by quiet periods?** A 500-job burst drains in about 75-79s at a 50 RPS dispatch pace, regardless of machine size — scale that linearly against your own `CONFIG_PATH` rate to estimate your own catch-up time.
+- [ ] **A capacity ceiling looks identical no matter what you scale?** That's a strong signal it's not the resource you're scaling — treat it as a code-path question, not a bigger-machine question.
+- [ ] **Need genuine per-tenant fairness under a shared upstream?** Set `X-Aqueduct-Account-Queue: enabled` — see the README's Dynamic Pacing section.
+
 ---
 
 ## 8. An alternative storage backend: Pebble

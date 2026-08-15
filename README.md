@@ -44,7 +44,7 @@ In both cases, **the upstream's response headers have the final say on pace.** Y
 
 Services you control can signal slower traffic while they're still under pressure, before they're overwhelmed enough to start returning errors — that gives autoscalers time to add capacity instead of forcing clients into retries, 429 storms, or cascading outages.
 
-**This has a network effect.** The value isn't capped at one deployment: the more tools, agents, and services that speak `X-Aqueduct-*`, the more traffic across the whole internet can coordinate directly with each other instead of every client guessing alone under load. Each new adopter makes the signal more useful to every other adopter, not just to itself.
+**This is built for a network effect, not just a single deployment.** If more tools, agents, and services come to speak `X-Aqueduct-*`, traffic across the whole internet could coordinate directly with each other instead of every client guessing alone under load — each adopter would make the signal more useful to every other adopter, not just to itself. That's the design goal; it depends on adoption Aquifer alone can't create, so treat it as the long-term shape, not a claim about how much of the internet speaks this today.
 
 ---
 
@@ -186,69 +186,7 @@ The HTTP adapter remains the default so existing deployments do not change.
 
 ### Writing an adapter
 
-Adapter authors import Aquifer as a Go package, implement `FrameworkAdapter`, and pass the shared core into their framework. Built-in adapters are selected with `AQUIFER_ADAPTER`; third-party adapters normally ship as small custom binaries that call `aquifer.RunAdapter`.
-
-```go
-package myframework
-
-import (
-    "context"
-
-    "github.com/rjpruitt16/aquifer"
-)
-
-type Adapter struct{}
-
-func (a *Adapter) Name() string {
-    return "my-mcp-framework"
-}
-
-func (a *Adapter) Start(ctx context.Context, app *aquifer.Aquifer) error {
-    // Register framework handlers that call:
-    // app.Enqueue(req)
-    // app.GetJob(jobID)
-    // app.SubscribeJob(jobID)
-    // app.Health()
-    return nil
-}
-```
-
-Custom binaries can reuse Aquifer's runtime wiring:
-
-```go
-package main
-
-import (
-    "context"
-    "log"
-
-    "github.com/rjpruitt16/aquifer"
-    myadapter "github.com/you/your-adapter"
-)
-
-func main() {
-    runtime := aquifer.NewRuntime(aquifer.RuntimeOptions{
-        DBPath:     "aquifer.db",
-        ConfigPath: "aquifer.yml",
-    })
-    runtime.RecoverQueuedJobs("aquifer.db")
-
-    adapter := myadapter.New()
-    log.Fatal(adapter.Start(context.Background(), runtime.Aquifer))
-}
-```
-
-For the shortest form, let Aquifer create the runtime and start your adapter:
-
-```go
-adapter := myadapter.New()
-log.Fatal(aquifer.RunAdapter(context.Background(), adapter, aquifer.RuntimeOptions{
-    DBPath:     "aquifer.db",
-    ConfigPath: "aquifer.yml",
-}))
-```
-
-See `examples/custom_adapter` for a complete compile-tested adapter binary.
+Adapter authors import Aquifer as a Go package, implement `FrameworkAdapter`, and pass the shared core into their framework — see [ADAPTERS.md](ADAPTERS.md) for the interface, a complete example, and how to reuse Aquifer's runtime wiring in a custom binary. `examples/custom_adapter` has a compile-tested reference implementation.
 
 ---
 
@@ -384,6 +322,8 @@ Connecting late is safe — you'll receive synthetic `queued` and `dispatching` 
 
 Webhook delivery retries 4 times: 1 s · 2 s · 4 s · 8 s.
 
+**This is at-least-once delivery, not exactly-once.** A webhook can be delivered more than once — for example, if Aquifer crashes after a dispatch succeeds but before it records that completion, the recovered job dispatches again on restart. Make your webhook handler idempotent on `job_id` (or `idempotent_key`) anywhere duplicate execution isn't safe, the same contract Stripe and GitHub webhooks already ask of you.
+
 ---
 
 ## L8 Protocol — trustless webhook delivery
@@ -401,7 +341,7 @@ Traditional webhook security requires sharing a secret between sender and receiv
 
 **Why this keeps things fast:** verification is a single local Ed25519 `verify()` call against a cached public key, with no database query, HTTP call, or shared state involved — it takes microseconds.
 
-**This also has a network effect, of a different kind than the pacing headers above.** L8 trust stays deliberately pairwise — a receiver verifies each sender's key directly, on first contact, cached for that pair; there's no transitive "I trust A, A vouches for B, so I trust B" chain, and there shouldn't be, since that's exactly the kind of indirection that makes forged trust possible. The network effect here is protocol standardization, not trust propagation: once a receiver implements the L8 verification endpoint once, *any* sender that speaks L8 can start delivering trustlessly with no new secret to provision or rotate per sender. The marginal cost of the next integration drops as more senders adopt the protocol — the same way supporting HTTPS once means supporting any HTTPS client, not a fresh negotiation per client.
+**This is built for a network effect too, of a different kind than the pacing headers above.** L8 trust stays deliberately pairwise — a receiver verifies each sender's key directly, on first contact, cached for that pair; there's no transitive "I trust A, A vouches for B, so I trust B" chain, and there shouldn't be, since that's exactly the kind of indirection that makes forged trust possible. The network effect here, if the protocol gets adopted beyond Aquifer and ezthrottle-local, would be protocol standardization, not trust propagation: a receiver that implements the L8 verification endpoint once could accept *any* sender that speaks L8 with no new secret to provision or rotate per sender, the same way supporting HTTPS once means supporting any HTTPS client. That's the value if L8 spreads — right now it's the two implementations that already speak it.
 
 **Key management:**
 
@@ -419,13 +359,15 @@ To revoke trust with a domain: delete `l8-trust/{domain}.json`. The handshake re
 
 **Protocol version:** `0.1`. The version is advertised in `/.well-known/l8` and `GET /health` so agents can detect what capabilities are available. Future versions will add payload encryption (0.2) and formalized key rotation (0.3).
 
-The full protocol spec and verification examples are in [L8-SPEC.md](L8-SPEC.md), also browsable at `GET /l8-spec` on any running instance. The spec documents the receiver-side endpoints any service needs to implement to receive signed webhooks.
+The full protocol spec is at [rjpruitt16.github.io/l8-protocol](https://rjpruitt16.github.io/l8-protocol/), the same canonical spec ezthrottle-local's L8 implementation follows too, also browsable at `GET /l8-spec` on any running instance for an agent or script that only has access to a running instance, not the internet. The spec documents the receiver-side endpoints any service needs to implement to receive signed webhooks.
 
 See `tests/l8_receiver.py` for a complete reference implementation of the receiver side, and `tests/test_l8.py` for end-to-end tests that verify the handshake, signed delivery, and cryptographic signature validation.
 
 ---
 
 ## Dynamic Pacing
+
+**Terminology**: Aquifer is this implementation; Aqueduct is the name of the header protocol (`X-Aqueduct-*`) it speaks, designed to be implementation-agnostic so other services could speak it too — the same relationship as, say, nginx and HTTP.
 
 The upstream controls pace at runtime via response headers. `X-Aqueduct-*` is the protocol namespace; `X-Aquifer-*` remains supported as a backward-compatible product alias.
 
@@ -545,15 +487,7 @@ People run Aquifer in front of things like: internal coding platforms (GitLab, F
 
 ## Choosing a machine size
 
-Real measurements from [benchmark.md](benchmark.md#7-capacity-and-drain-time--and-a-real-bug-this-test-found): testing across 256MB/512MB/1024MB *and* separately across 1/2/4 shared vCPUs on Fly.io, every configuration broke at the identical ~200 req/s point. That turned out **not** to be a hardware ceiling at all — it was a single hardcoded SQLite connection (`SetMaxOpenConns(1)`) serializing every request through one handle regardless of machine size, plus a related bug where SQLite pragmas were silently not applied to any connection beyond the first. Both are fixed now (see benchmark.md for the full story), and 200 req/s went from a hard, repeatable failure to a usually-clean, occasionally-marginal rate. 400 req/s is a real ceiling post-fix (memory climbs genuinely, not just connection-pool noise).
-
-Checklist for picking a size:
-
-- [ ] **Traffic sustains under ~200 req/s?** Any size works, including 256MB — this workload's bottleneck wasn't CPU or RAM at that range.
-- [ ] **Traffic sustains above ~200-300 req/s?** Re-run `benchmark/capacity_by_size.sh` against your own traffic shape and instance type before assuming a bigger box fixes it — verify the ceiling is actually hardware-bound first, not a code-level one, the way this one turned out to be.
-- [ ] **Bursts happen but are followed by quiet periods?** A 500-job burst drains in about 75-79s at a 50 RPS dispatch pace, regardless of machine size — scale that linearly against your own `CONFIG_PATH` rate to estimate your own catch-up time.
-- [ ] **A capacity ceiling looks identical no matter what you scale?** That's a strong signal it's not the resource you're scaling — treat it as a code-path question, not a bigger-machine question.
-- [ ] **Need genuine per-tenant fairness under a shared upstream?** Set `X-Aqueduct-Account-Queue: enabled` — see [Dynamic Pacing](#dynamic-pacing) above.
+Every machine/CPU configuration tested broke at the identical ~200 req/s point — that turned out to be a single hardcoded SQLite connection serializing every request, not a hardware ceiling, and it's fixed now. See [benchmark.md](benchmark.md#7-capacity-and-drain-time--and-a-real-bug-this-test-found) for the full story and a checklist for picking a size based on your own traffic shape.
 
 ---
 
