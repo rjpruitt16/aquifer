@@ -42,7 +42,9 @@ Calling a rate-limited upstream? Aquifer queues the calls and dispatches them at
 
 In both cases, **the upstream's response headers have the final say on pace.** Your config sets the ceiling; headers can only reduce below it, never exceed it. When pressure clears, the rate recovers gradually back to your ceiling.
 
-Services you control can signal slower traffic while they're still under pressure, before they're overwhelmed enough to start returning errors — that gives autoscalers time to add capacity instead of forcing clients into retries, 429 storms, or cascading outages. If more tools, agents, and services speak the same pacing headers, traffic across the internet can coordinate instead of every client guessing alone.
+Services you control can signal slower traffic while they're still under pressure, before they're overwhelmed enough to start returning errors — that gives autoscalers time to add capacity instead of forcing clients into retries, 429 storms, or cascading outages.
+
+**This has a network effect.** The value isn't capped at one deployment: the more tools, agents, and services that speak `X-Aqueduct-*`, the more traffic across the whole internet can coordinate directly with each other instead of every client guessing alone under load. Each new adopter makes the signal more useful to every other adopter, not just to itself.
 
 ---
 
@@ -398,6 +400,8 @@ Traditional webhook security requires sharing a secret between sender and receiv
 4. Every webhook delivery carries `X-L8-Signature` headers the receiver verifies locally with no database lookup and no round-trip to any authority
 
 **Why this keeps things fast:** verification is a single local Ed25519 `verify()` call against a cached public key, with no database query, HTTP call, or shared state involved — it takes microseconds.
+
+**This also has a network effect, of a different kind than the pacing headers above.** L8 trust stays deliberately pairwise — a receiver verifies each sender's key directly, on first contact, cached for that pair; there's no transitive "I trust A, A vouches for B, so I trust B" chain, and there shouldn't be, since that's exactly the kind of indirection that makes forged trust possible. The network effect here is protocol standardization, not trust propagation: once a receiver implements the L8 verification endpoint once, *any* sender that speaks L8 can start delivering trustlessly with no new secret to provision or rotate per sender. The marginal cost of the next integration drops as more senders adopt the protocol — the same way supporting HTTPS once means supporting any HTTPS client, not a fresh negotiation per client.
 
 **Key management:**
 
