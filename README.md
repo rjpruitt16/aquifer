@@ -2,7 +2,7 @@
 
 **Increase your rate limit without DDoSing your backend.**
 
-Aquifer is a self-hosted traffic coordination layer for agent workloads. It absorbs bursts into a durable queue, dispatches at a controlled rate, and — with agent-native load balancing — spreads traffic across a pool of registered backend instances. Upstreams can dynamically slow Aquifer down with `X-Aqueduct-*` response headers, so an overloaded service can shed pressure before it starts returning 429s, and your own clients retry less as a result.
+Aquifer is a self-hosted agent-native load balancer and traffic coordination layer for agent workloads. It absorbs bursts into a durable queue, dispatches at a controlled rate, and spreads traffic across a pool of registered backend instances. Upstreams can dynamically slow Aquifer down with `X-Aqueduct-*` response headers, so an overloaded service can shed pressure before it starts returning 429s, and your own clients retry less as a result.
 
 Exposed through pluggable adapters — an MCP server for agent tool-calling, or a plain HTTP API — with cryptographic agent identity via the L8 protocol for trustless webhook delivery.
 
