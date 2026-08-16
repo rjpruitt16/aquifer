@@ -300,33 +300,6 @@ Webhook delivery retries 4 times: 1 s · 2 s · 4 s · 8 s. Delivery is at-least
 
 ---
 
-## L8 Protocol — trustless webhook delivery
-
-Traditional webhook security shares an HMAC secret between sender and receiver, stored in a database on both sides — something that can be stolen, logged accidentally, or forgotten during rotation, letting anyone forge deliveries forever once it leaks. Aquifer implements **L8 v0.1**, a lightweight challenge-response protocol that replaces the shared secret with public key cryptography — there's no secret to steal from a database.
-
-**How it works:**
-
-1. The receiver publishes a public key at `GET /.well-known/l8`
-2. Before the first delivery, Aquifer challenges the receiver to prove ownership of the corresponding private key — a one-time handshake
-3. Trust is cached to disk as `l8-trust/{domain}.json` — the handshake never runs again for that domain
-4. Every delivery carries `X-L8-Signature` headers, verified locally with a single Ed25519 call — no database lookup, no round-trip to any authority, microseconds
-
-Trust stays deliberately pairwise, not transitive, by design. For better security and less latency than a shared-secret scheme, see the [L8 spec](https://rjpruitt16.github.io/l8-protocol/) for the full protocol rationale.
-
-Set `L8_PRIVATE_KEY` (base64 Ed25519 private key) for a stable identity across restarts, or let Aquifer auto-generate one on first start. Delete `l8-trust/{domain}.json` to revoke trust with a domain — the handshake re-runs on next delivery.
-
-**Aquifer exposes:**
-
-| Endpoint | Purpose |
-|---|---|
-| `GET /.well-known/l8` | Aquifer's public key and capabilities — receivers discover Aquifer here |
-| `POST /l8/challenge` | Handles incoming challenges from receivers verifying Aquifer's identity |
-| `GET /l8-spec` | The full L8 protocol spec, served locally for an agent/script with only network access to this instance |
-
-Current protocol version `0.1`, advertised in `/.well-known/l8` and `GET /health` — the same canonical spec ezthrottle-local follows. A complete reference receiver implementation and end-to-end tests are in `tests/l8_receiver.py` and `tests/test_l8.py`.
-
----
-
 ## Dynamic Pacing
 
 **Terminology**: Aquifer is this implementation; Aqueduct is the implementation-agnostic header protocol (`X-Aqueduct-*`) it speaks, so other services could speak it too.
@@ -406,6 +379,33 @@ The same call is both initial registration and heartbeat — call it again perio
 Pool state isn't shared across Aquifer instances — see [Deployment model](#deployment-model) for how that constrains a given `pool_id` to one instance.
 
 `GET /health` reports every pool's current members, their declared capacity, and current reputation.
+
+---
+
+## L8 Protocol — trustless webhook delivery
+
+Traditional webhook security shares an HMAC secret between sender and receiver, stored in a database on both sides — something that can be stolen, logged accidentally, or forgotten during rotation, letting anyone forge deliveries forever once it leaks. Aquifer implements **L8 v0.1**, a lightweight challenge-response protocol that replaces the shared secret with public key cryptography — there's no secret to steal from a database.
+
+**How it works:**
+
+1. The receiver publishes a public key at `GET /.well-known/l8`
+2. Before the first delivery, Aquifer challenges the receiver to prove ownership of the corresponding private key — a one-time handshake
+3. Trust is cached to disk as `l8-trust/{domain}.json` — the handshake never runs again for that domain
+4. Every delivery carries `X-L8-Signature` headers, verified locally with a single Ed25519 call — no database lookup, no round-trip to any authority, microseconds
+
+Trust stays deliberately pairwise, not transitive, by design. For better security and less latency than a shared-secret scheme, see the [L8 spec](https://rjpruitt16.github.io/l8-protocol/) for the full protocol rationale.
+
+Set `L8_PRIVATE_KEY` (base64 Ed25519 private key) for a stable identity across restarts, or let Aquifer auto-generate one on first start. Delete `l8-trust/{domain}.json` to revoke trust with a domain — the handshake re-runs on next delivery.
+
+**Aquifer exposes:**
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /.well-known/l8` | Aquifer's public key and capabilities — receivers discover Aquifer here |
+| `POST /l8/challenge` | Handles incoming challenges from receivers verifying Aquifer's identity |
+| `GET /l8-spec` | The full L8 protocol spec, served locally for an agent/script with only network access to this instance |
+
+Current protocol version `0.1`, advertised in `/.well-known/l8` and `GET /health` — the same canonical spec ezthrottle-local follows. A complete reference receiver implementation and end-to-end tests are in `tests/l8_receiver.py` and `tests/test_l8.py`.
 
 ---
 
