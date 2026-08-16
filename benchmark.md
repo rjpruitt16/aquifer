@@ -143,9 +143,9 @@ The point is to stop clients from hammering a fixed 5-second ceiling forever onc
 
 ---
 
-## 7. Capacity and drain time — and a real bug this test found
+## 7. Capacity and drain time
 
-The question this started out answering: **given a traffic shape, what machine size actually fits it, and if a burst exceeds that, how long until the queue is caught up again?** It ended up finding something more important than a capacity number: a real correctness/scaling bug in the SQLite layer, unrelated to machine size at all.
+The question this started out answering: **given a traffic shape, what machine size actually fits it, and if a burst exceeds that, how long until the queue is caught up again?** It ended up finding something more important than a capacity number — a real correctness/scaling bug in the SQLite layer, unrelated to machine size at all, documented below.
 
 ### What the first pass showed
 
@@ -228,7 +228,7 @@ Same `shared-cpu-1x` / 512MB tier, same ramp:
 
 Pebble roughly **doubled** the point where Aquifer stops reliably completing requests (SQLite's real ceiling ~200-400 req/s vs. Pebble's ~400-600 req/s) — a large, structural win consistent with the same memory-first-vs-disk-first reasoning that explained Mnesia's advantage over SQLite. The trade Pebble makes at high load is different from SQLite's, though: SQLite *fails* outright past its ceiling (timeouts, connection resets); Pebble keeps *succeeding* well past its comfortable zone, just slower (mean latency climbing into the double-digit seconds at 400 req/s rather than requests being dropped). That's arguably the better failure mode for what this system is actually for — reliable eventual delivery under burst, not winning a raw-throughput benchmark — but it does mean Pebble's "ceiling" is fuzzier to define than SQLite's hard wall.
 
-### Does it scale with CPU cores? No — and that's itself informative
+### Does it scale with CPU cores?
 
 Same instance, 4 shared vCPUs instead of 1, same rates:
 
