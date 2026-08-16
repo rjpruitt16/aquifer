@@ -441,7 +441,7 @@ See the [security warning](#post-jobs) under `POST /jobs` — the same untrusted
 
 ## Choosing a machine size
 
-Earlier benchmarks hit an artificial ~200 req/s ceiling caused by a serialized SQLite connection; that bottleneck is fixed. See [benchmark.md](benchmark.md#7-capacity-and-drain-time--and-a-real-bug-this-test-found) for current throughput, capacity by machine size, and the benchmark methodology.
+Earlier benchmarks hit an artificial ~200 req/s ceiling caused by a serialized SQLite connection; that bottleneck is fixed. See [benchmark.md](benchmark.md#7-capacity-and-drain-time) for current throughput, capacity by machine size, and the benchmark methodology.
 
 ---
 
