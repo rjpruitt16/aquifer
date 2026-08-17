@@ -341,19 +341,7 @@ if total_jobs > 500:
 
 This keeps the autoscaling decision in your hands — Aquifer exposes the signal, your service acts on it however fits your infrastructure.
 
-**Proactive autoscaling.** The example above reacts to a level — scale up once `total_jobs` crosses a fixed number. That means capacity only starts coming online after the queue is already deep. Since these same headers are on every response, polling `X-Aqueduct-Queue-Depth` over successive requests and tracking its *rate of change* lets you scale on a rising trend instead of waiting for a static threshold:
-
-```python
-history.append((time.time(), queue_depth))
-history[:] = [(t, d) for t, d in history if time.time() - t < 30]
-
-if len(history) >= 2:
-    growth_per_sec = (history[-1][1] - history[0][1]) / (history[-1][0] - history[0][0])
-    if growth_per_sec > 10:  # queue growing faster than it's draining
-        scale_up()  # act before total_jobs ever crosses a fixed number
-```
-
-No new signal to opt into — same headers, just watching the slope instead of the level. A backlog that's growing fast gets capacity on the way before it becomes an outage, instead of after.
+**This is already proactive, not just reactive to a crash.** Combined with [Dynamic Pacing](#dynamic-pacing) — where your fleet reports its own capacity via response headers — Aquifer is scaling its pace down as machines show early strain and back up as capacity comes online, before a queue ever gets deep enough to trip a fixed threshold.
 
 ---
 
