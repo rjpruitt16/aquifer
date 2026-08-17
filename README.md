@@ -16,8 +16,6 @@ Distributed agents call tools and APIs in bursts. Your backend gets overwhelmed 
 
 Aquifer gives those agents a coordination layer. It absorbs the burst, queues requests durably (SQLite by default, or Pebble — see below), and releases them at the rate you configure. The destination service can ask for a slower pace, and Aquifer honors whichever limit is lower.
 
-Traditional orchestrators scale reactively — capacity only comes online after something's already struggling. Aquifer scales proactively: failure and reinforcement are already handled by dynamic pacing and reputation-weighted dispatch before a fixed threshold is ever hit.
-
 **Benchmarked:** 10x traffic spikes absorbed with zero failures, 30/30 jobs surviving a `kill -9` mid-drain, and clean `429` admission shedding under sustained overload. See [benchmark.md](benchmark.md) for throughput ceilings, crash recovery, memory behavior, and capacity by machine size.
 
 ---
@@ -320,7 +318,11 @@ With `X-Aqueduct-Account-Queue: enabled`, each `(user_id, api_key)` pair gets it
 
 A backend can lower RPS at any time via these headers when it's under pressure; Aquifer honors the lower pace immediately and recovers gradually toward the configured ceiling once pressure clears.
 
-**Outbound signals**: Aquifer reports its own load back to your service on every response, so your infrastructure can act on it however fits (calling an autoscaler, alerting, anything):
+---
+
+## Autoscaling
+
+Traditional load balancers and autoscalers rely on failure to start scaling — capacity only responds once something's already struggling. Aquifer treats resources as fluid, not fixed: it paces down as machines show strain and back up as capacity comes online, using the same signals it already reports on every response.
 
 | Header                    | Value                                              |
 |---------------------------|----------------------------------------------------|
