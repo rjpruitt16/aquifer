@@ -16,6 +16,8 @@ Distributed agents call tools and APIs in bursts. Your backend gets overwhelmed 
 
 Aquifer gives those agents a coordination layer. It absorbs the burst, queues requests durably (SQLite by default, or Pebble — see below), and releases them at the rate you configure. The destination service can ask for a slower pace, and Aquifer honors whichever limit is lower.
 
+Traditional orchestrators scale reactively — capacity only comes online after something's already struggling. Aquifer scales proactively: failure and reinforcement are already handled by dynamic pacing and reputation-weighted dispatch before a fixed threshold is ever hit.
+
 **Benchmarked:** 10x traffic spikes absorbed with zero failures, 30/30 jobs surviving a `kill -9` mid-drain, and clean `429` admission shedding under sustained overload. See [benchmark.md](benchmark.md) for throughput ceilings, crash recovery, memory behavior, and capacity by machine size.
 
 ---
@@ -318,30 +320,13 @@ With `X-Aqueduct-Account-Queue: enabled`, each `(user_id, api_key)` pair gets it
 
 A backend can lower RPS at any time via these headers when it's under pressure; Aquifer honors the lower pace immediately and recovers gradually toward the configured ceiling once pressure clears.
 
----
-
-## Autoscaling
-
-Aquifer sends machine load data as headers on every outgoing request to your service. It sends both `X-Aqueduct-*` and `X-Aquifer-*` names for compatibility.
+**Outbound signals**: Aquifer reports its own load back to your service on every response, so your infrastructure can act on it however fits (calling an autoscaler, alerting, anything):
 
 | Header                    | Value                                              |
 |---------------------------|----------------------------------------------------|
 | `X-Aqueduct-Total-Jobs`   | Total jobs on this machine right now               |
 | `X-Aqueduct-Queue-Depth`  | Jobs waiting to be dispatched                      |
 | `X-Aqueduct-Flow-Rate`    | Current dispatch rate (RPS) for this queue         |
-
-Your service reads these headers and calls your autoscaler when the queue is growing:
-
-```python
-total_jobs = int(request.headers.get("X-Aqueduct-Total-Jobs", 0))
-
-if total_jobs > 500:
-    scale_up()  # call Fly.io, AWS ASG, k8s HPA, etc.
-```
-
-This keeps the autoscaling decision in your hands — Aquifer exposes the signal, your service acts on it however fits your infrastructure.
-
-**This is already proactive, not just reactive to a crash.** Combined with [Dynamic Pacing](#dynamic-pacing) — where your fleet reports its own capacity via response headers — Aquifer is scaling its pace down as machines show early strain and back up as capacity comes online, before a queue ever gets deep enough to trip a fixed threshold.
 
 ---
 
