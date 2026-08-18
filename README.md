@@ -379,6 +379,14 @@ Roll new members into a pool gradually. Start new versions with a conservative `
 
 **Set `capacity_rps` conservatively, not at your true theoretical max.** Aquifer only learns a member died via a failed dispatch or a missed heartbeat, both of which lag the actual failure — leaving headroom in what you declare gives real slack for that detection delay. Reputation decay is a second line of defense on top of this: a member that's silently struggling gets throttled down by observed failures even if its last-declared capacity was optimistic.
 
+**Watch the model locally:** Aquifer includes a local scenario harness that starts one fake backend server with multiple logical workers, registers them as pool members, and prints per-second traffic, failures, dynamic header values, and reputation.
+
+```bash
+go run ./cmd/aquifer-scenario --scenario mixed --workers 10 --jobs 500 --duration 30s --rps 50
+```
+
+Scenarios: `steady`, `weighted`, `flapping`, `backpressure`, `recovering`, `mixed`, and `harsh`. The `harsh` scenario penalizes sustained overload by adding latency, then `5xx`, then simulated crash windows. Add `--mode regular` to compare against a simple round-robin load balancer model that retries on `5xx` but ignores Aquifer reputation and dynamic pacing headers.
+
 Pool state isn't shared across Aquifer instances — see [Deployment model](#deployment-model) for how that constrains a given `pool_id` to one instance.
 
 `GET /health` reports every pool's current members, their declared capacity, and current reputation.
