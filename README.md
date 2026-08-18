@@ -318,6 +318,8 @@ With `X-Aqueduct-Account-Queue: enabled`, each `(user_id, api_key)` pair gets it
 
 A backend can lower RPS at any time via these headers when it's under pressure; Aquifer honors the lower pace immediately and recovers gradually toward the configured ceiling once pressure clears.
 
+Use the pacing headers for intentional backpressure. A `5xx` response is treated as a failed dispatch attempt and, for pool members, lowers that member's reputation. If a service is alive but overloaded, prefer `429` and/or `X-Aqueduct-Rps` / `X-Aqueduct-Max-Concurrent` so Aquifer slows down without interpreting the member as broken.
+
 ---
 
 ## Autoscaling
@@ -361,7 +363,19 @@ The same call is both initial registration and heartbeat — call it again perio
 
 **How a member gets picked:** proportional to `capacity_rps × reputation`, not equal-split round robin — a member declaring 100 RPS gets roughly 4x the dispatches of one declaring 25. The pool's aggregate ceiling is the live sum of every member's current effective rate, so it grows and shrinks automatically as members register, degrade, or drop out — no need to reconfigure Aquifer as your fleet autoscales.
 
-**Reputation**: a dispatch failure halves a member's effective share; a success nudges it back up. A member isn't evicted on one bad response — only once its reputation has stayed at the floor continuously, with no interrupting success, for a sustained window. This avoids flapping a member in and out of the pool over a single transient error.
+**Reputation**: a dispatch failure halves a member's effective share; a successful dispatch nudges it back up, and heartbeats recover it more slowly after a restart. A member isn't evicted on one bad response — only once its reputation has stayed at the floor continuously, with no interrupting success, for a sustained window. This avoids flapping a member in and out of the pool over a single transient error.
+
+**Treat `5xx` carefully.** Aquifer interprets connection errors and `5xx` responses as reliability signals for the selected member. One `5xx` does not fail the job by itself — Aquifer records failure for that member and retries another member when possible. If every retry across the pool still ends in connection errors or `5xx`, the job is marked failed. That behavior is intentional for reliability, but it means application bugs that accidentally return `5xx` on a new code path can reduce that member's traffic share or eventually remove it from the pool.
+
+For overload, prefer explicit backpressure over generic server errors:
+
+| Situation | Recommended signal |
+|-----------|--------------------|
+| Instance is healthy but needs less traffic | `X-Aqueduct-Rps` or `X-Aqueduct-Max-Concurrent` |
+| Request should be retried later due to pressure | `429` with `Retry-After` |
+| Instance/code path is actually failing | `5xx` |
+
+Roll new members into a pool gradually. Start new versions with a conservative `capacity_rps`, send a small share of traffic first, watch `/health` reputation and your own error metrics, then raise capacity as confidence grows. Blue/green or canary rollout matters more here than with a blind round-robin balancer because Aquifer uses runtime failures as routing input.
 
 **Set `capacity_rps` conservatively, not at your true theoretical max.** Aquifer only learns a member died via a failed dispatch or a missed heartbeat, both of which lag the actual failure — leaving headroom in what you declare gives real slack for that detection delay. Reputation decay is a second line of defense on top of this: a member that's silently struggling gets throttled down by observed failures even if its last-declared capacity was optimistic.
 

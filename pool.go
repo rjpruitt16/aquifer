@@ -31,6 +31,11 @@ const (
 	// shouldn't immediately restore full trust.
 	reputationRecoveryFactor = 1.5
 
+	// heartbeatRecoveryFactor lets a live, re-registering member climb back
+	// slowly after a restart without treating liveness as equivalent to a
+	// successful dispatched job.
+	heartbeatRecoveryFactor = 1.1
+
 	// defaultHeartbeatMissLimit is how many consecutive missed heartbeats
 	// (relative to the member's own declared interval) evict a member for
 	// having gone silent, independent of the reputation/failure path.
@@ -135,6 +140,7 @@ func (p *Pool) Register(id, address string, declaredRPS float64, heartbeatInterv
 		m.DeclaredRPS = declaredRPS
 		m.HeartbeatInterval = heartbeatInterval
 		m.LastHeartbeat = time.Now()
+		m.reputation = math.Min(1.0, m.reputation*heartbeatRecoveryFactor)
 		return
 	}
 

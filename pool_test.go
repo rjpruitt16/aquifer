@@ -97,6 +97,24 @@ func TestPoolReputationDecaysAndRecovers(t *testing.T) {
 	}
 }
 
+func TestPoolHeartbeatGraduallyRecoversReputation(t *testing.T) {
+	p := newPool("test")
+	p.Register("restarted", "http://old", 10, time.Minute)
+	p.RecordFailure("restarted")
+	p.RecordFailure("restarted")
+
+	before := p.members["restarted"].Reputation()
+	p.Register("restarted", "http://new", 10, time.Minute)
+	after := p.members["restarted"].Reputation()
+
+	if after <= before {
+		t.Fatalf("expected heartbeat registration to recover reputation, got %.2f -> %.2f", before, after)
+	}
+	if after >= 1.0 {
+		t.Fatalf("heartbeat should recover reputation gradually, not reset to full trust; got %.2f", after)
+	}
+}
+
 // TestPoolEvictsAfterSustainedFloor is the concrete answer to "how many
 // 500s before we conclude it's gone": not a fixed count on its own, but
 // reputation staying at or below the floor for the sustained window.

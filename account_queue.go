@@ -13,9 +13,26 @@ import (
 )
 
 const (
-	minRPS     = 0.5
-	maxRetries = 4
+	minRPS                     = 0.5
+	maxRetries                 = 4
+	noPoolMembersRetryInterval = time.Second
 )
+
+var retrySleepFunc atomic.Value
+var poolEmptySleepFunc atomic.Value
+
+func init() {
+	retrySleepFunc.Store(time.Sleep)
+	poolEmptySleepFunc.Store(time.Sleep)
+}
+
+func sleepBeforeRetry(d time.Duration) {
+	retrySleepFunc.Load().(func(time.Duration))(d)
+}
+
+func sleepWhilePoolEmpty(d time.Duration) {
+	poolEmptySleepFunc.Load().(func(time.Duration))(d)
+}
 
 type jobDoneMsg struct {
 	rps           *float64
@@ -137,19 +154,12 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int) {
 			if q.pool != nil {
 				member = q.pool.Pick()
 				if member == nil {
-					// No registered members to dispatch to at all —
-					// fail the head job now rather than blocking the
-					// whole queue behind an empty pool.
-					job := queue[0]
-					queue = queue[1:]
-					q.metrics.QueueDepth(q.upstream, len(queue))
-					q.store.UpdateStatus(job.ID, StatusFailed)
-					q.metrics.JobFailed(job.UserID, q.upstream, "no pool members registered")
-					deliverWebhook(job.WebhookURL, map[string]any{
-						"job_id": job.ID,
-						"status": "failed",
-						"reason": "no pool members registered",
-					}, q.l8, q.metrics)
+					// A pool may be temporarily empty during process
+					// restart before members have had a chance to
+					// heartbeat back in. Keep queued work durable here
+					// instead of converting recoverable absence into a
+					// permanent job failure.
+					sleepWhilePoolEmpty(noPoolMembersRetryInterval)
 					continue
 				}
 			}
@@ -246,56 +256,85 @@ func execute(job *Job, dispatchURL, upstream string, store JobStore, broker *Bro
 
 	var resp *http.Response
 	var err error
+	currentURL := dispatchURL
+	currentMember := member
+	reason := "connection error"
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
 			backoff := time.Duration(math.Pow(2, float64(attempt-1))) * time.Second
-			log.Printf("[AccountQueue] retry %d/%d for %s in %s", attempt, maxRetries, dispatchURL, backoff)
-			time.Sleep(backoff)
+			log.Printf("[AccountQueue] retry %d/%d for %s in %s", attempt, maxRetries, currentURL, backoff)
+			sleepBeforeRetry(backoff)
 		}
 
 		counts := store.Counts()
-		resp, err = makeRequest(job, dispatchURL, counts.TotalJobs, counts.QueueDepth, flowRate)
+		resp, err = makeRequest(job, currentURL, counts.TotalJobs, counts.QueueDepth, flowRate)
 		if err != nil {
+			reason = err.Error()
+			if pool != nil && currentMember != nil {
+				pool.RecordFailure(currentMember.ID)
+				if attempt < maxRetries {
+					currentMember = pool.Pick()
+					if currentMember == nil {
+						reason = "no pool members registered"
+						break
+					}
+					currentURL = currentMember.Address
+				}
+			}
 			continue
 		}
 		if resp.StatusCode >= 500 && attempt < maxRetries {
+			reason = fmt.Sprintf("upstream returned %d", resp.StatusCode)
 			resp.Body.Close()
 			resp = nil
+			if pool != nil && currentMember != nil {
+				pool.RecordFailure(currentMember.ID)
+				currentMember = pool.Pick()
+				if currentMember == nil {
+					reason = "no pool members registered"
+					break
+				}
+				currentURL = currentMember.Address
+			}
 			continue
 		}
 		break
 	}
 
-	if err != nil || resp == nil {
-		reason := "connection error"
-		if err != nil {
-			reason = err.Error()
+	if err != nil || resp == nil || resp.StatusCode >= 500 {
+		var body []byte
+		var responseStatus int
+		if resp != nil {
+			responseStatus = resp.StatusCode
+			body, _ = io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if reason == "connection error" {
+				reason = fmt.Sprintf("upstream returned %d", resp.StatusCode)
+			}
 		}
-		if pool != nil && member != nil {
-			pool.RecordFailure(member.ID)
+		if pool != nil && currentMember != nil && resp != nil {
+			pool.RecordFailure(currentMember.ID)
 		}
 		store.UpdateStatus(job.ID, StatusFailed)
 		broker.Publish(job.ID, SSEEvent{
 			Event: "failed",
-			Data:  map[string]any{"job_id": job.ID, "reason": reason},
+			Data:  map[string]any{"job_id": job.ID, "reason": reason, "response_status": responseStatus, "body": string(body)},
 		})
 		metrics.JobFailed(job.UserID, upstream, reason)
 		deliverWebhook(job.WebhookURL, map[string]any{
-			"job_id": job.ID,
-			"status": "failed",
-			"reason": reason,
+			"job_id":          job.ID,
+			"status":          "failed",
+			"reason":          reason,
+			"response_status": responseStatus,
+			"body":            string(body),
 		}, l8, metrics)
 		return jobDoneMsg{}
 	}
 	defer resp.Body.Close()
 
-	if pool != nil && member != nil {
-		if resp.StatusCode >= 500 {
-			pool.RecordFailure(member.ID)
-		} else {
-			pool.RecordSuccess(member.ID)
-		}
+	if pool != nil && currentMember != nil {
+		pool.RecordSuccess(currentMember.ID)
 	}
 
 	body, _ := io.ReadAll(resp.Body)
