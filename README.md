@@ -6,7 +6,7 @@ Aquifer is a self-hosted agent-native load balancer and traffic coordination lay
 
 Exposed through pluggable adapters — an MCP server for agent tool-calling, or a plain HTTP API — with cryptographic agent identity via the L8 protocol for trustless webhook delivery.
 
-Built by [Rahmi Pruitt](https://rahmipruitt.me) — open to AI infra consulting, founding engineer, and contract work.
+**Benchmarked:** 10x traffic spikes absorbed with zero failures, 30/30 jobs surviving a `kill -9` mid-drain, and clean `429` admission shedding under sustained overload. See [benchmark.md](benchmark.md) for throughput ceilings, crash recovery, memory behavior, and capacity by machine size.
 
 ---
 
@@ -15,8 +15,6 @@ Built by [Rahmi Pruitt](https://rahmipruitt.me) — open to AI infra consulting,
 Distributed agents call tools and APIs in bursts. Your backend gets overwhelmed on inbound. Your app gets 429s on outbound. One slow dependency takes everything else down with it.
 
 Aquifer gives those agents a coordination layer. It absorbs the burst, queues requests durably (SQLite by default, or Pebble — see below), and releases them at the rate you configure. The destination service can ask for a slower pace, and Aquifer honors whichever limit is lower.
-
-**Benchmarked:** 10x traffic spikes absorbed with zero failures, 30/30 jobs surviving a `kill -9` mid-drain, and clean `429` admission shedding under sustained overload. See [benchmark.md](benchmark.md) for throughput ceilings, crash recovery, memory behavior, and capacity by machine size.
 
 ---
 
@@ -459,3 +457,5 @@ Earlier benchmarks hit an artificial ~200 req/s ceiling caused by a serialized S
 ## License
 
 MIT
+
+Built by [Rahmi Pruitt](https://rahmipruitt.me) — open to AI infra consulting, founding engineer, and contract work.
