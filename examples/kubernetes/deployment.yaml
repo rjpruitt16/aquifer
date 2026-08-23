@@ -1,0 +1,68 @@
+# replicas: 1 is load-bearing, not a default left unconfigured. Pool
+# membership and the SSE broker's subscriber map are in-process only, and
+# the durable queue is a local SQLite file -- multiple replicas behind one
+# Service would silently violate Aquifer's own documented model (risking
+# double-dispatch on retries, and pool members registered on one replica
+# being invisible to another). Scale by running additional, separately
+# partitioned Deployments (one per upstream/tenant), not by bumping this
+# number. See the root README's "Deployment model" section.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aquifer
+  namespace: aquifer
+  labels:
+    app: aquifer
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # avoid two pods ever attaching the same RWO volume during a rollout
+  selector:
+    matchLabels:
+      app: aquifer
+  template:
+    metadata:
+      labels:
+        app: aquifer
+    spec:
+      containers:
+        - name: aquifer
+          image: ghcr.io/rjpruitt16/aquifer:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: AQUIFER_ADAPTER
+              value: http
+            - name: PORT
+              value: "8080"
+            - name: DB_PATH
+              value: /data/aquifer.db
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            # Starting point only -- see the root README's "Choosing a
+            # machine size" section and benchmark.md for real numbers before
+            # sizing this for your own traffic shape.
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: aquifer-data

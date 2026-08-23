@@ -1,0 +1,9 @@
+# Skip this file if Envoy Gateway's own Helm install already provisioned a
+# default GatewayClass in your cluster (check with `kubectl get gatewayclass`
+# first) -- included here so this example is self-contained either way.
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: envoy-gateway
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller

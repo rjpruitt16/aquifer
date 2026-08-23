@@ -1,0 +1,18 @@
+# ReadWriteOnce is intentional, not a placeholder to loosen later.
+# Aquifer's durable queue is a local SQLite file per instance, and scaling is
+# by partitioning instances (one per upstream/tenant), not by replicas
+# sharing state -- see the root README's "Deployment model" section. A
+# ReadWriteMany volume would let multiple pods mount the same file, which
+# Aquifer never expects and does not coordinate around.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: aquifer-data
+  namespace: aquifer
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  # storageClassName: ""  # set to a ReadWriteOnce-capable StorageClass for your cluster

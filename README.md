@@ -438,7 +438,7 @@ Current protocol version `0.1`, advertised in `/.well-known/l8` and `GET /health
 
 ## Deployment model
 
-Aquifer runs three ways: as a **sidecar** alongside your app, as a **standalone service** multiple services point to, or **embedded directly as a Go library** in your own process (see [Framework adapters](#framework-adapters)). Each instance persists to its own SQLite volume — no external database or coordination service to run.
+Aquifer runs four ways: as a **sidecar** alongside your app, as a **standalone service** multiple services point to, **embedded directly as a Go library** in your own process (see [Framework adapters](#framework-adapters)), or as an **extension behind a Gateway API proxy** like Envoy Gateway in Kubernetes — the proxy owns routing and TLS, Aquifer owns the queue behind it (see [examples/kubernetes](examples/kubernetes)). Each instance persists to its own SQLite volume — no external database or coordination service to run.
 
 Scale by partitioning: run one instance per upstream domain or tenant, each owning a distinct key space, and total throughput scales with instance count. Multiple instances against the *same* upstream without partitioning multiplies your request rate against it instead — the one setup to avoid. The same applies to pools: a given `pool_id` should belong to exactly one instance, since pool state isn't shared across instances.
 
