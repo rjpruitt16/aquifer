@@ -15,6 +15,16 @@ import (
 //	endpoint-load-metrics: JSON {"named_metrics":{"kv_cache_usage_perc":0.4}}
 const orcaHeaderName = "endpoint-load-metrics"
 
+// orcaRequestHeaderName is the request-side header that opts a dispatch
+// into getting an ORCA response back at all. Verified against vLLM's
+// current source (vllm/entrypoints/openai/chat_completion/api_router.py):
+// ORCA reporting is entirely request-driven there -- the backend only
+// includes endpoint-load-metrics on the response if the request carried
+// this header naming the desired format ("TEXT" or "JSON"). There is no
+// server-side startup flag for this in current vLLM; an earlier version
+// used one (--orca_formats), but that's not what's deployed today.
+const orcaRequestHeaderName = "endpoint-load-metrics-format"
+
 // orcaKVCacheMetric is the one named metric this pacing curve keys off --
 // vLLM already normalizes it to a 0-1 utilization fraction (Prometheus
 // vllm:kv_cache_usage_perc). vLLM also reports num_requests_waiting, a raw

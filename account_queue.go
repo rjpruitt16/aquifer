@@ -405,6 +405,18 @@ func makeRequest(job *Job, dispatchURL string, totalJobs, queueDepth int64, flow
 	setLoadHeader(req.Header, "Queue-Depth", fmt.Sprintf("%d", queueDepth))
 	setLoadHeader(req.Header, "Flow-Rate", fmt.Sprintf("%.2f", flowRate))
 
+	// Opt in to ORCA endpoint-load-metrics on every dispatch. In current
+	// vLLM, this is entirely request-driven -- the backend only includes
+	// the endpoint-load-metrics response header if the request itself asks
+	// for it via this header (verified against vLLM's actual source,
+	// vllm/entrypoints/openai/chat_completion/api_router.py). Harmless to
+	// send unconditionally: a backend that doesn't understand it just
+	// ignores an unrecognized request header, same as the outbound load
+	// headers above.
+	if req.Header.Get(orcaRequestHeaderName) == "" {
+		req.Header.Set(orcaRequestHeaderName, "TEXT")
+	}
+
 	client := &http.Client{Timeout: 30 * time.Second}
 	return client.Do(req)
 }

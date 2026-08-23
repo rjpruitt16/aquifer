@@ -2,8 +2,52 @@ package aquifer
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"testing"
 )
+
+func TestMakeRequestRequestsOrcaMetricsByDefault(t *testing.T) {
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get(orcaRequestHeaderName)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	job := &Job{Method: "POST"}
+	resp, err := makeRequest(job, srv.URL, 0, 0, 0)
+	if err != nil {
+		t.Fatalf("makeRequest failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if got != "TEXT" {
+		t.Fatalf("expected %q request header to be %q, got %q", orcaRequestHeaderName, "TEXT", got)
+	}
+}
+
+func TestMakeRequestDoesNotOverrideExplicitOrcaHeader(t *testing.T) {
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get(orcaRequestHeaderName)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	job := &Job{
+		Method:  "POST",
+		Headers: map[string]string{orcaRequestHeaderName: "JSON"},
+	}
+	resp, err := makeRequest(job, srv.URL, 0, 0, 0)
+	if err != nil {
+		t.Fatalf("makeRequest failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if got != "JSON" {
+		t.Fatalf("expected caller-provided header %q to survive, got %q", "JSON", got)
+	}
+}
 
 func TestPacingHeaderPrefersAqueduct(t *testing.T) {
 	headers := http.Header{}
