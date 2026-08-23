@@ -173,6 +173,28 @@ Pebble roughly doubles the point where Aquifer stops reliably completing request
 
 ---
 
+## 9. GPU inference and the retry tax (RunPod/vLLM)
+
+Everything above dispatches to a dummy HTTP echo upstream. This one targets a real GPU: `Qwen/Qwen2.5-1.5B-Instruct` on a single RunPod RTX PRO 4500 Blackwell running vLLM (`--max-num-seqs 48`, KV cache deliberately capped at 512MB so a realistic burst can actually pressure it), pacing driven entirely by the ORCA fallback signal (see [README.md](README.md), "Dynamic pacing") — `kv_cache_usage_perc` on vLLM's own response headers, no `X-Aqueduct-*` config needed. Requests forced to `min_tokens=max_tokens=300` so each one holds GPU/KV-cache resources long enough to matter, not a one-token echo.
+
+**Same offered load (40 req/s for 30s), direct-to-vLLM vs. through Aquifer:**
+
+| | Direct | Through Aquifer |
+|---|---|---|
+| Client success | 100% | 100% |
+| Client mean latency | 11.2s | 1.0ms (durable enqueue, dispatch decoupled) |
+| Client p99 latency | 20.1s | 3.2ms |
+| Peak vLLM-side queue depth | 449 waiting | 8 waiting |
+| Peak `kv_cache_usage_perc` | 69.4% | 59.1% |
+
+Hitting vLLM directly at 40 req/s doesn't fail — vLLM queues everything internally rather than rejecting — but its own backlog balloons to 449 requests deep, and callers wait up to 20 seconds for a response that eventually succeeds. That's the retry tax: technically 100% success, but exactly the shape of slowness that makes a caller give up and retry, doubling load on a GPU that's already behind. Through Aquifer, the burst is durably absorbed in ~1ms per request and dispatched to vLLM at a controlled pace; vLLM's own internal queue barely builds.
+
+**Does the ORCA signal itself actually engage** (not just a static rate cap doing the work)? Loosened Aquifer's static ceiling above what vLLM can sustain (80 RPS / 120 concurrent vs. vLLM's real ~48-concurrent capacity) and pushed a sustained 60 req/s for 40s. `kv_cache_usage_perc` oscillated 22% → 79% → 22% → ... in a repeating cycle: cache crosses the 70% threshold, ORCA tells Aquifer to cut to 2 RPS, backlog drains, cache falls, Aquifer ramps back up (5%/dispatch recovery), cache climbs again. A real, self-regulating feedback loop against a live GPU, not a static number that happened to be tuned right.
+
+**Takeaway:** the durable-queue-plus-paced-dispatch model already prevents the worst of the retry tax on its own; ORCA adds automatic, no-config self-regulation on top for backends that report their own load, which vLLM already does.
+
+---
+
 ## Reproducing these results
 
 ```bash
@@ -186,6 +208,10 @@ cd benchmark
 # Capacity/drain by machine size -- much slower (multiple full redeploys),
 # run separately, not part of the GitHub Action's regular pass:
 ./capacity_by_size.sh <target-url> <fly-app-name> "256 512 1024" 500
+
+# GPU retry tax -- needs a real vLLM instance (RunPod or otherwise),
+# not part of the regular pass either:
+./gpu_retry_tax.sh <vllm-url> <aquifer-url> 40 40 300
 ```
 
 For Pebble instead of SQLite: deploy with `-e AQUIFER_STORE_BACKEND=pebble -e DB_PATH=/data/pebble` and run the same scripts unchanged.

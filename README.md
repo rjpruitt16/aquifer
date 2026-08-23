@@ -6,7 +6,7 @@ Aquifer is a self-hosted agent-native load balancer and traffic coordination lay
 
 Exposed through pluggable adapters — an MCP server for agent tool-calling, or a plain HTTP API — with cryptographic agent identity via the L8 protocol for trustless webhook delivery.
 
-**Benchmarked:** 10x traffic spikes absorbed with zero failures, 30/30 jobs surviving a `kill -9` mid-drain, and clean `429` admission shedding under sustained overload. See [benchmark.md](benchmark.md) for throughput ceilings, crash recovery, memory behavior, and capacity by machine size.
+**Benchmarked:** 10x traffic spikes absorbed with zero failures, 30/30 jobs surviving a `kill -9` mid-drain, and clean `429` admission shedding under sustained overload — including a real GPU under load, where the ORCA fallback signal cut peak backend queue depth from 449 to 8 waiting requests. See [benchmark.md](benchmark.md) for throughput ceilings, crash recovery, memory behavior, capacity by machine size, and the [GPU/vLLM run](benchmark.md#9-gpu-inference-and-the-retry-tax-runpodvllm).
 
 ---
 
