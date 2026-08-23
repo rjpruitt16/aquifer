@@ -360,6 +360,13 @@ func execute(job *Job, dispatchURL, upstream string, store JobStore, broker *Bro
 		var rps float64
 		fmt.Sscanf(val, "%f", &rps)
 		msg.rps = &rps
+	} else if rps := orcaRps(resp.Header); rps != nil {
+		// No explicit Aqueduct directive on this response -- fall back to an
+		// ORCA endpoint-load-metrics header if the backend (e.g. vLLM with
+		// --orca_formats) sent one. An explicit X-Aqueduct-Rps always wins;
+		// this only fires when the backend hasn't opted into speaking
+		// Aqueduct's own pacing headers directly.
+		msg.rps = rps
 	}
 	if val := pacingHeader(resp.Header, "Max-Concurrent"); val != "" {
 		var max int

@@ -318,6 +318,8 @@ A backend can lower RPS at any time via these headers when it's under pressure; 
 
 Use the pacing headers for intentional backpressure. A `5xx` response is treated as a failed dispatch attempt and, for pool members, lowers that member's reputation. If a service is alive but overloaded, prefer `429` and/or `X-Aqueduct-Rps` / `X-Aqueduct-Max-Concurrent` so Aquifer slows down without interpreting the member as broken.
 
+**ORCA fallback for backends that can't speak Aqueduct directly.** Some backends already report load in a different, real open standard — [ORCA](https://github.com/cncf/xds/blob/main/xds/data/orca/v3/orca_load_report.proto) (Open Request Cost Aggregation), the gRPC/Envoy ecosystem's convention for backends to report utilization. vLLM supports this natively over plain HTTP (`--orca_formats TEXT` or `JSON`), emitting an `endpoint-load-metrics` header with a `kv_cache_usage_perc` utilization fraction on every response. If a response carries no `X-Aqueduct-Rps`/`X-Aquifer-Rps`, Aquifer reads this header as a fallback and paces down as KV-cache usage rises: full configured rate below 70%, 2 RPS at 70-90%, 0.5 RPS at 90-97%, 0.25 RPS above that — never dropping to zero, same pacing-down-gracefully philosophy as everywhere else. An explicit `X-Aqueduct-Rps` always wins if present; this only fires when the backend hasn't opted into speaking Aqueduct's own headers.
+
 ---
 
 ## Autoscaling
