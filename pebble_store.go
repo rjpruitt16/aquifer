@@ -314,6 +314,63 @@ func (s *PebbleStore) GetQueuedJobs() []*Job {
 	return jobs
 }
 
+// ListIdempotentKeys backs drain mode's ledger export. Unlike SQLite,
+// pebbleRecord.Job retains the plaintext IdempotentKey (for unrelated
+// reasons -- see the package doc comment), but this must never surface it:
+// the hash is recomputed the same way CheckOrInsert derives it, and only
+// the hash/job_id/status ever go into the returned LedgerEntry.
+func (s *PebbleStore) ListIdempotentKeys() []LedgerEntry {
+	var entries []LedgerEntry
+	s.forEachJob(func(rec *pebbleRecord) {
+		entries = append(entries, LedgerEntry{
+			HashKey: hashKey(rec.Job.UserID + ":" + rec.Job.IdempotentKey),
+			JobID:   rec.Job.ID,
+			Status:  rec.Job.Status,
+		})
+	})
+	return entries
+}
+
+// ClearIdempotentKeys wipes both the job: and idem: prefixes -- only ever
+// called by drain mode's watchdog after a successful ledger-flush webhook
+// delivery, never on a normal (non-drain-mode) deployment. Takes every
+// shard lock before wiping so a concurrent CheckOrInsert (which only holds
+// one shard's lock) can't race a mid-wipe read/write and reintroduce a row.
+func (s *PebbleStore) ClearIdempotentKeys() {
+	for i := range s.locks {
+		s.locks[i].Lock()
+	}
+	defer func() {
+		for i := range s.locks {
+			s.locks[i].Unlock()
+		}
+	}()
+
+	deletePrefix := func(lower, upper []byte) {
+		iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: lower, UpperBound: upper})
+		if err != nil {
+			log.Printf("pebble: iterate for clear: %v", err)
+			return
+		}
+		defer iter.Close()
+
+		var keys [][]byte
+		for iter.First(); iter.Valid(); iter.Next() {
+			k := make([]byte, len(iter.Key()))
+			copy(k, iter.Key())
+			keys = append(keys, k)
+		}
+		for _, k := range keys {
+			if err := s.db.Delete(k, s.syncOpts); err != nil {
+				log.Printf("pebble: delete %s: %v", k, err)
+			}
+		}
+	}
+
+	deletePrefix([]byte("job:"), []byte("job;"))
+	deletePrefix([]byte("idem:"), []byte("idem;"))
+}
+
 func (s *PebbleStore) cleanupLoop() {
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()

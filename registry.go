@@ -16,22 +16,46 @@ type Registry struct {
 	pools      *PoolRegistry
 	totalJobs  atomic.Int64
 	queueDepth atomic.Int64
+	drainCfg   DrainConfig
 }
 
+// NewRegistry reads drain mode's config from AQUIFER_DRAIN_* env vars
+// (LoadDrainConfig) — disabled unless AQUIFER_DRAIN_ENABLED is explicitly
+// set, matching NewPebbleStore's existing precedent of reading its own
+// opt-in env vars internally. Callers wanting a programmatic override
+// (RuntimeOptions.DrainConfig) call ConfigureDrain after construction.
 func NewRegistry(store JobStore, cfg *Config, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, pools *PoolRegistry) *Registry {
 	r := &Registry{
-		workers: make(map[string]*URLWorker),
-		store:   store,
-		cfg:     cfg,
-		broker:  broker,
-		l8:      l8,
-		metrics: ensureMetrics(metrics),
-		pools:   pools,
+		workers:  make(map[string]*URLWorker),
+		store:    store,
+		cfg:      cfg,
+		broker:   broker,
+		l8:       l8,
+		metrics:  ensureMetrics(metrics),
+		pools:    pools,
+		drainCfg: LoadDrainConfig(),
 	}
 	counts := store.Counts()
 	r.totalJobs.Store(counts.TotalJobs)
 	r.queueDepth.Store(counts.QueueDepth)
+	if r.drainCfg.Enabled {
+		go r.drainWatchdogLoop()
+	}
 	return r
+}
+
+// ConfigureDrain overrides drain mode's config after construction (used by
+// RuntimeOptions.DrainConfig) and starts the watchdog if the override
+// enables it and the constructor-time env-based config hadn't already
+// started one. There is no supported path to stop an already-running
+// watchdog at runtime — disabling drain mode requires a restart, same as
+// every other env-var-driven config in this codebase.
+func (r *Registry) ConfigureDrain(cfg DrainConfig) {
+	wasEnabled := r.drainCfg.Enabled
+	r.drainCfg = cfg
+	if cfg.Enabled && !wasEnabled {
+		go r.drainWatchdogLoop()
+	}
 }
 
 // Enqueue queues a job on the URLWorker for its upstream domain, or for

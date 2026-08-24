@@ -438,6 +438,56 @@ Current protocol version `0.1`, advertised in `/.well-known/l8` and `GET /health
 
 ---
 
+## Drain mode
+
+**Off by default.** A normal deployment (a single long-lived instance, or static domain/tenant
+partitioning as described below) is completely unaffected unless you explicitly turn this on — no
+background watchdog runs, no added overhead, nothing about default behavior changes.
+
+Aquifer's idempotency store exists to dedupe retries while a burst is actively draining, not to be a
+permanent system of record. Drain mode is for a specific deployment pattern: instances get handed to a
+tenant, absorb and drain their burst, then get freed for reassignment to a different tenant. When
+enabled, and an instance goes completely idle (no requests anywhere on the whole process, not just one
+tenant's queue) for `AQUIFER_DRAIN_TIMER_SECONDS`, Aquifer flushes everything it's deduped since the
+last flush to a webhook, and only on confirmed delivery, clears its local ledger — making the instance
+safe to hand to someone else.
+
+**Aquifer does not decide who gets a freed instance next**, and does not retain the ledger itself
+beyond the next flush. That orchestration — durable long-term storage, and assigning tenants to
+instances — is entirely up to whatever service you build to receive this webhook. Aquifer only detects
+idle and hands off what it has.
+
+**Env vars:**
+
+| Var | Default | Notes |
+|---|---|---|
+| `AQUIFER_DRAIN_ENABLED` | `false` | The real gate — the other two vars are only read when this is `true`. |
+| `AQUIFER_DRAIN_TIMER_SECONDS` | `45` | How long the whole instance must be idle before flushing. Deliberately separate from the unrelated 5-minute per-tenant-queue self-GC timer, which reclaims one queue's memory and has nothing to do with instance-wide handoff. |
+| `AQUIFER_DRAIN_WEBHOOK_URL` | *(none)* | Required if enabled — if unset, drain mode logs a warning and stays off rather than flushing with nowhere to send it. |
+
+**Webhook payload:**
+
+```json
+{
+  "event": "instance_idle",
+  "flushed_at": "2026-08-23T14:02:11Z",
+  "ledger": [
+    { "idempotent_key_hash": "3fa9c1...", "job_id": "a3f9...", "status": "completed" }
+  ]
+}
+```
+
+`idempotent_key_hash` is `sha256(user_id + ":" + idempotent_key)`, hex-encoded lowercase — the exact
+hash Aquifer already computes internally, never the plaintext key. A downstream consumer re-checking a
+key for a duplicate must hash it the same way.
+
+If you're also running [ezthrottle-local](https://github.com/rjpruitt16/ezthrottle-local), note its
+drain mode hashes differently — `sha256(idempotent_key)` alone, with no `user_id` scoping. The two
+systems' ledgers are not interchangeable under one hash-key namespace; hash lookups separately against
+each.
+
+---
+
 ## Deployment model
 
 Aquifer runs four ways: as a **sidecar** alongside your app, as a **standalone service** multiple services point to, **embedded directly as a Go library** in your own process (see [Framework adapters](#framework-adapters)), or as an **extension behind a Gateway API proxy** like Envoy Gateway in Kubernetes — the proxy owns routing and TLS, Aquifer owns the queue behind it (see [examples/kubernetes](examples/kubernetes)). Each instance persists to its own SQLite volume — no external database or coordination service to run.

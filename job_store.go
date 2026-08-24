@@ -25,6 +25,12 @@ type JobStore interface {
 	Counts() StoreCounts
 	GetJob(jobID string) *Job
 	GetQueuedJobs() []*Job
+
+	// ListIdempotentKeys and ClearIdempotentKeys back drain mode (see
+	// drain.go) -- an opt-in feature, off by default, so calling these on
+	// a deployment that never enables it is never reached.
+	ListIdempotentKeys() []LedgerEntry
+	ClearIdempotentKeys()
 }
 
 // NewJobStore constructs whichever backend AQUIFER_STORE_BACKEND names.

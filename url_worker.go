@@ -132,7 +132,15 @@ func (w *URLWorker) Enqueue(job *Job) {
 		q = NewAccountQueue(key, w.domain, w.rps, w.maxConc, w.pool, w.store, w.broker, w.l8, w.metrics, func(k string) {
 			w.mu.Lock()
 			delete(w.queues, k)
+			empty := len(w.queues) == 0
 			w.mu.Unlock()
+			// Propagate upward so Registry can observe an instance-wide
+			// idle state -- w.onIdle was previously wired but never
+			// called, leaking this worker in Registry.workers forever
+			// once its last queue went idle.
+			if empty && w.onIdle != nil {
+				w.onIdle(w.domain)
+			}
 		})
 		w.queues[key] = q
 	}

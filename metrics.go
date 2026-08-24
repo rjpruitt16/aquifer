@@ -9,6 +9,11 @@ type MetricsAdapter interface {
 	WebhookFailed(url string, attempts int)
 	QueueDepth(upstream string, depth int)
 	FlowRate(upstream string, rps float64)
+	// DrainFlushSucceeded/DrainFlushFailed only ever fire when drain mode
+	// is enabled (see drain.go) -- unreached on a deployment that never
+	// turns it on.
+	DrainFlushSucceeded(instanceKey string, ledgerSize int)
+	DrainFlushFailed(instanceKey string, ledgerSize int)
 }
 
 type NoopMetricsAdapter struct{}
@@ -21,6 +26,8 @@ func (NoopMetricsAdapter) WebhookDelivered(url string, attempt int)             
 func (NoopMetricsAdapter) WebhookFailed(url string, attempts int)                 {}
 func (NoopMetricsAdapter) QueueDepth(upstream string, depth int)                  {}
 func (NoopMetricsAdapter) FlowRate(upstream string, rps float64)                  {}
+func (NoopMetricsAdapter) DrainFlushSucceeded(instanceKey string, ledgerSize int) {}
+func (NoopMetricsAdapter) DrainFlushFailed(instanceKey string, ledgerSize int)    {}
 
 func ensureMetrics(metrics MetricsAdapter) MetricsAdapter {
 	if metrics == nil {

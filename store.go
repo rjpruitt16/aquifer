@@ -218,6 +218,38 @@ func (s *Store) GetQueuedJobs() []*Job {
 	return jobs
 }
 
+// ListIdempotentKeys backs drain mode's ledger export -- hash-only, matches
+// what this table has always stored (the plaintext idempotent key was never
+// persisted here, only its hash, see hashKey/CheckOrInsert).
+func (s *Store) ListIdempotentKeys() []LedgerEntry {
+	rows, err := s.db.Query(`SELECT idempotent_key_hash, id, status FROM jobs WHERE expires_at > ?`, time.Now().UnixMilli())
+	if err != nil {
+		log.Printf("ListIdempotentKeys: %v", err)
+		return nil
+	}
+	defer rows.Close()
+
+	var entries []LedgerEntry
+	for rows.Next() {
+		var e LedgerEntry
+		if err := rows.Scan(&e.HashKey, &e.JobID, &e.Status); err != nil {
+			log.Printf("ListIdempotentKeys scan: %v", err)
+			continue
+		}
+		entries = append(entries, e)
+	}
+	return entries
+}
+
+// ClearIdempotentKeys wipes the whole table -- only ever called by drain
+// mode's watchdog after a successful ledger-flush webhook delivery, never
+// on a normal (non-drain-mode) deployment.
+func (s *Store) ClearIdempotentKeys() {
+	if _, err := s.db.Exec(`DELETE FROM jobs`); err != nil {
+		log.Printf("ClearIdempotentKeys: %v", err)
+	}
+}
+
 func (s *Store) cleanupLoop() {
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()

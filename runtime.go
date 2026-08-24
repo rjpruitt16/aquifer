@@ -19,6 +19,10 @@ type RuntimeOptions struct {
 	// implementation (e.g. Postgres, rqlite) without needing to bypass
 	// NewRuntime and wire the lower-level constructors by hand.
 	Store JobStore
+	// DrainConfig overrides drain mode's config (see drain.go). If nil,
+	// the Registry reads AQUIFER_DRAIN_* env vars itself — disabled unless
+	// AQUIFER_DRAIN_ENABLED is explicitly set to true.
+	DrainConfig *DrainConfig
 }
 
 type Runtime struct {
@@ -68,6 +72,9 @@ func NewRuntime(opts RuntimeOptions) *Runtime {
 	metrics := ensureMetrics(opts.Metrics)
 	pools := NewPoolRegistry()
 	registry := NewRegistry(store, cfg, broker, l8, metrics, pools)
+	if opts.DrainConfig != nil {
+		registry.ConfigureDrain(*opts.DrainConfig)
+	}
 	admission := NewAdmissionController(*admissionLimits, dbPath)
 	app := NewAquifer(store, registry, broker, l8, admission, pools)
 
