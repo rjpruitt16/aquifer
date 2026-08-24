@@ -17,6 +17,7 @@ type Registry struct {
 	totalJobs  atomic.Int64
 	queueDepth atomic.Int64
 	drainCfg   DrainConfig
+	drainState atomic.Value // DrainState, read from Health() concurrently with the watchdog goroutine writing it
 }
 
 // NewRegistry reads drain mode's config from AQUIFER_DRAIN_* env vars
@@ -38,10 +39,33 @@ func NewRegistry(store JobStore, cfg *Config, broker *Broker, l8 *L8Registry, me
 	counts := store.Counts()
 	r.totalJobs.Store(counts.TotalJobs)
 	r.queueDepth.Store(counts.QueueDepth)
+	r.drainState.Store(DrainStateActive)
 	if r.drainCfg.Enabled {
 		go r.drainWatchdogLoop()
 	}
 	return r
+}
+
+// DrainState is the instance's current position in drain mode's lifecycle
+// (active/draining/unassigned) — meaningful only when drain mode is
+// enabled, but always safe to call (returns DrainStateActive otherwise,
+// since the watchdog that would ever move it elsewhere never runs).
+func (r *Registry) DrainState() DrainState {
+	return r.drainState.Load().(DrainState)
+}
+
+func (r *Registry) setDrainState(s DrainState) {
+	r.drainState.Store(s)
+}
+
+// DrainSnapshot reports drain mode's current state for GET /health, or nil
+// when drain mode isn't enabled — an instance that never turned this on
+// shouldn't see a new key appear in its health output.
+func (r *Registry) DrainSnapshot() map[string]any {
+	if !r.drainCfg.Enabled {
+		return nil
+	}
+	return map[string]any{"state": string(r.DrainState())}
 }
 
 // ConfigureDrain overrides drain mode's config after construction (used by

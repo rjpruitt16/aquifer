@@ -135,6 +135,9 @@ func (a *Aquifer) Health() map[string]any {
 	if a.pools != nil {
 		h["pools"] = a.pools.Snapshot()
 	}
+	if drain := a.registry.DrainSnapshot(); drain != nil {
+		h["drain"] = drain
+	}
 	return h
 }
 
