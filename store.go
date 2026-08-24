@@ -220,9 +220,12 @@ func (s *Store) GetQueuedJobs() []*Job {
 
 // ListIdempotentKeys backs drain mode's ledger export -- hash-only, matches
 // what this table has always stored (the plaintext idempotent key was never
-// persisted here, only its hash, see hashKey/CheckOrInsert).
+// persisted here, only its hash, see hashKey/CheckOrInsert). Excludes
+// webhook-delivery jobs (webhook_url = ”, see Job.isWebhookDeliveryJob) --
+// those are internal delivery bookkeeping, not real user-submitted work, and
+// have no business appearing in a ledger meant for tenant-handoff dedup.
 func (s *Store) ListIdempotentKeys() []LedgerEntry {
-	rows, err := s.db.Query(`SELECT idempotent_key_hash, id, status FROM jobs WHERE expires_at > ?`, time.Now().UnixMilli())
+	rows, err := s.db.Query(`SELECT idempotent_key_hash, id, status FROM jobs WHERE expires_at > ? AND webhook_url != ''`, time.Now().UnixMilli())
 	if err != nil {
 		log.Printf("ListIdempotentKeys: %v", err)
 		return nil

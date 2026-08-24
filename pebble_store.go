@@ -318,10 +318,16 @@ func (s *PebbleStore) GetQueuedJobs() []*Job {
 // pebbleRecord.Job retains the plaintext IdempotentKey (for unrelated
 // reasons -- see the package doc comment), but this must never surface it:
 // the hash is recomputed the same way CheckOrInsert derives it, and only
-// the hash/job_id/status ever go into the returned LedgerEntry.
+// the hash/job_id/status ever go into the returned LedgerEntry. Excludes
+// webhook-delivery jobs (WebhookURL == "", see Job.isWebhookDeliveryJob) --
+// those are internal delivery bookkeeping, not real user-submitted work, and
+// have no business appearing in a ledger meant for tenant-handoff dedup.
 func (s *PebbleStore) ListIdempotentKeys() []LedgerEntry {
 	var entries []LedgerEntry
 	s.forEachJob(func(rec *pebbleRecord) {
+		if rec.Job.isWebhookDeliveryJob() {
+			return
+		}
 		entries = append(entries, LedgerEntry{
 			HashKey: hashKey(rec.Job.UserID + ":" + rec.Job.IdempotentKey),
 			JobID:   rec.Job.ID,

@@ -9,6 +9,64 @@ import (
 	"time"
 )
 
+// TestWebhookDeliveryJobsExcludedFromLedger is the regression test for a
+// real bug caught while porting this to ezthrottle-local: webhook-delivery
+// jobs are persisted via the same CheckOrInsert path as real jobs (for
+// durability/dedup), which also backs drain mode's idempotency ledger
+// export -- without an explicit exclusion, internal webhook bookkeeping
+// would show up in a ledger meant only for real user-submitted work.
+func TestWebhookDeliveryJobsExcludedFromLedger(t *testing.T) {
+	hits := make(chan struct{}, 8)
+	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if skipL8Probe(w, r) {
+			return
+		}
+		hits <- struct{}{}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer webhook.Close()
+
+	dir := t.TempDir()
+	store := NewStore(filepath.Join(dir, "aquifer.db"))
+	t.Cleanup(func() {
+		store.Close()
+		time.Sleep(20 * time.Millisecond)
+	})
+	broker := NewBroker()
+	l8 := NewL8Registry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"))
+	cfg := &Config{Defaults: RateConfig{RPS: 100, MaxConcurrent: 1}}
+	registry := NewRegistry(store, cfg, broker, l8, NoopMetricsAdapter{}, nil)
+
+	realJob := &Job{
+		ID:            generateID(),
+		UserID:        "user-1",
+		IdempotentKey: "real-job-1",
+		URL:           webhook.URL,
+		Method:        "GET",
+		WebhookURL:    webhook.URL,
+		Status:        StatusQueued,
+	}
+	if _, dup := store.CheckOrInsert(realJob); dup {
+		t.Fatalf("unexpected duplicate on a freshly generated id")
+	}
+
+	registry.EnqueueWebhook("some-other-job", "user-1", webhook.URL, map[string]any{"status": "completed"})
+
+	select {
+	case <-hits:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for the webhook-delivery job to actually dispatch")
+	}
+
+	entries := store.ListIdempotentKeys()
+	if len(entries) != 1 {
+		t.Fatalf("expected only the real job in the ledger, got %d entries: %+v", len(entries), entries)
+	}
+	if entries[0].JobID != realJob.ID {
+		t.Fatalf("expected the real job's id %s in the ledger, got %s", realJob.ID, entries[0].JobID)
+	}
+}
+
 // TestWebhookDeliveryDoesNotChain is the direct regression test for the
 // infinite-recursion hazard: a webhook-delivery job (Job.WebhookURL == "")
 // must never itself trigger another webhook enqueue when it completes.
@@ -112,7 +170,12 @@ func TestWebhookDeliveryIsPacedByAccountQueue(t *testing.T) {
 			w.mu.Lock()
 			q, ok := w.queues[sharedKey]
 			w.mu.Unlock()
-			if ok && q.RPS() <= 1.01 {
+			// q.RPS() reads an atomic.Int64 that starts at its Go zero
+			// value until AccountQueue's own goroutine initializes it to
+			// the configured rate -- excluding 0 here avoids catching
+			// that brief not-yet-started window and misreading it as
+			// "already throttled to ~1".
+			if ok && q.RPS() > 0 && q.RPS() <= 1.01 {
 				rps = q.RPS()
 				break
 			}
