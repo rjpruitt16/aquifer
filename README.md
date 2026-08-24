@@ -506,6 +506,8 @@ Aquifer runs four ways: as a **sidecar** alongside your app, as a **standalone s
 
 Scale by partitioning: run one instance per upstream domain or tenant, each owning a distinct key space, and total throughput scales with instance count. Multiple instances against the *same* upstream without partitioning multiplies your request rate against it instead — the one setup to avoid. The same applies to pools: a given `pool_id` should belong to exactly one instance, since pool state isn't shared across instances.
 
+This partitioning is static — decided at deploy time, fixed until you redeploy. [Drain mode](#drain-mode) is a dynamic alternative to the same problem: rather than every instance owning a fixed slice forever, an idle instance can flush what it's deduped and hand itself back for reassignment, letting an external orchestrator repartition on the fly as load shifts between tenants instead of you doing it by hand at deploy time. The two aren't mutually exclusive — a fleet can partition statically by upstream domain while individual instances within a partition cycle through tenants dynamically via drain mode.
+
 People run Aquifer in front of things like: internal coding platforms (GitLab, Forgejo), CI runners, database read replicas, and MCP servers — anywhere a burst of agent or service traffic needs to hit something that has its own capacity limit.
 
 See the [security warning](#post-jobs) under `POST /jobs` — the same untrusted-caller risk applies regardless of deployment shape.
