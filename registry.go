@@ -1,6 +1,7 @@
 package aquifer
 
 import (
+	"encoding/json"
 	"sync"
 	"sync/atomic"
 )
@@ -115,7 +116,7 @@ func (r *Registry) Enqueue(job *Job, accountQueueHeader string) {
 	r.metrics.JobQueued(job.UserID, key)
 	w, ok := r.workers[key]
 	if !ok {
-		w = NewURLWorker(key, rc.RPS, rc.MaxConcurrent, pool, r.store, r.broker, r.l8, r.metrics, func(k string) {
+		w = NewURLWorker(key, rc.RPS, rc.MaxConcurrent, pool, r.store, r.broker, r.l8, r.metrics, r.EnqueueWebhook, func(k string) {
 			r.mu.Lock()
 			delete(r.workers, k)
 			r.mu.Unlock()
@@ -129,6 +130,40 @@ func (r *Registry) Enqueue(job *Job, accountQueueHeader string) {
 
 	w.Enqueue(job)
 	r.metrics.QueueDepth(key, int(r.queueDepth.Load()))
+}
+
+// EnqueueWebhook queues a webhook delivery through the same domain-keyed
+// account-queue pacing and backpressure machinery as forward dispatch
+// (RPS/concurrency limits, X-Aqueduct-* response-header throttling) instead
+// of firing immediately with a fixed retry schedule — a slow or
+// rate-limited webhook receiver can now shed load exactly the way an
+// upstream API already can, and delivery is durable across a restart the
+// same way a real job is (the underlying webhook-delivery Job is persisted
+// via CheckOrInsert, not just an in-memory retry loop).
+//
+// originalJobID scopes the idempotent key (see Job.isWebhookDeliveryJob) so
+// a given job's webhook is enqueued at most once even if this were somehow
+// called twice for it.
+func (r *Registry) EnqueueWebhook(originalJobID, userID, webhookURL string, payload map[string]any) {
+	if webhookURL == "" {
+		return
+	}
+
+	body, _ := json.Marshal(payload)
+	job := NewJob(&JobRequest{
+		UserID:        userID,
+		IdempotentKey: "webhook:" + originalJobID,
+		URL:           webhookURL,
+		Method:        "POST",
+		Headers:       map[string]string{"Content-Type": "application/json"},
+		Body:          string(body),
+	})
+
+	if _, duplicate := r.store.CheckOrInsert(job); duplicate {
+		return
+	}
+
+	r.Enqueue(job, "")
 }
 
 func (r *Registry) JobDispatched() {

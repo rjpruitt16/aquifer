@@ -89,6 +89,19 @@ func NewJob(r *JobRequest) *Job {
 	}
 }
 
+// isWebhookDeliveryJob reports whether this job represents a webhook
+// delivery attempt itself (constructed by Registry.EnqueueWebhook to push
+// webhook delivery through the same account-queue pacing as forward
+// dispatch), as opposed to a regular user-submitted job. A regular job
+// always has a non-empty WebhookURL — JobRequest.Validate rejects an empty
+// one — so an empty WebhookURL is a safe, already-enforced signal rather
+// than a separate field: it's what execute() checks to avoid enqueueing a
+// webhook-about-a-webhook, and what makeRequest checks to decide whether to
+// L8-sign the outbound request.
+func (j *Job) isWebhookDeliveryJob() bool {
+	return j.WebhookURL == ""
+}
+
 func generateID() string {
 	b := make([]byte, 16)
 	rand.Read(b)

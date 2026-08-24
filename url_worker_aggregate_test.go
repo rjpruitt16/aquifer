@@ -24,16 +24,16 @@ func TestAggregateBudgetThrottlesSiblingQueues(t *testing.T) {
 	l8 := NewL8Registry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"))
 
 	const ceiling = 10.0
-	w := NewURLWorker("https://example.com", ceiling, 5, nil, store, broker, l8, NoopMetricsAdapter{}, func(string) {})
+	w := NewURLWorker("https://example.com", ceiling, 5, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, map[string]any) {}, func(string) {})
 
 	// Three tenant queues, each spawned with the worker's full ceiling —
 	// this exact call shape (w.rps, unchanged, per queue) is what
 	// url_worker.go:Enqueue does for every new AccountQueue, confirmed
 	// via code read earlier this session. Before the aggregate-budget
 	// fix, nothing bounded their combined rate.
-	q1 := NewAccountQueue("tenant-1", w.domain, ceiling, 5, nil, store, broker, l8, NoopMetricsAdapter{}, func(string) {})
-	q2 := NewAccountQueue("tenant-2", w.domain, ceiling, 5, nil, store, broker, l8, NoopMetricsAdapter{}, func(string) {})
-	q3 := NewAccountQueue("tenant-3", w.domain, ceiling, 5, nil, store, broker, l8, NoopMetricsAdapter{}, func(string) {})
+	q1 := NewAccountQueue("tenant-1", w.domain, ceiling, 5, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, map[string]any) {}, func(string) {})
+	q2 := NewAccountQueue("tenant-2", w.domain, ceiling, 5, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, map[string]any) {}, func(string) {})
+	q3 := NewAccountQueue("tenant-3", w.domain, ceiling, 5, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, map[string]any) {}, func(string) {})
 
 	// Give each queue's run() goroutine a moment to set its initial
 	// currentRPS before we read it.
@@ -76,8 +76,8 @@ func TestAggregateBudgetLeavesSingleQueueAlone(t *testing.T) {
 	l8 := NewL8Registry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"))
 
 	const ceiling = 10.0
-	w := NewURLWorker("https://example.com", ceiling, 5, nil, store, broker, l8, NoopMetricsAdapter{}, func(string) {})
-	q1 := NewAccountQueue("tenant-1", w.domain, ceiling, 5, nil, store, broker, l8, NoopMetricsAdapter{}, func(string) {})
+	w := NewURLWorker("https://example.com", ceiling, 5, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, map[string]any) {}, func(string) {})
+	q1 := NewAccountQueue("tenant-1", w.domain, ceiling, 5, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, map[string]any) {}, func(string) {})
 
 	time.Sleep(20 * time.Millisecond)
 	w.mu.Lock()

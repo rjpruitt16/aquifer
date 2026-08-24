@@ -40,17 +40,26 @@ type jobDoneMsg struct {
 	accountQueue  *string
 }
 
+// webhookEnqueuer queues a webhook delivery through the same account-queue
+// pacing machinery as forward dispatch — see Registry.EnqueueWebhook.
+// Threaded down from Registry through URLWorker and AccountQueue as a
+// closure (matching the existing onIdle pattern) rather than a *Registry
+// back-reference, so AccountQueue/execute only get the one capability they
+// actually need.
+type webhookEnqueuer func(originalJobID, userID, webhookURL string, payload map[string]any)
+
 type AccountQueue struct {
-	key        string
-	upstream   string
-	pool       *Pool // nil unless this queue dispatches into a registered pool instead of a fixed URL
-	cmds       chan *Job
-	done       chan jobDoneMsg
-	store      JobStore
-	broker     *Broker
-	l8         *L8Registry
-	metrics    MetricsAdapter
-	currentRPS atomic.Int64 // stored as rps * 100
+	key            string
+	upstream       string
+	pool           *Pool // nil unless this queue dispatches into a registered pool instead of a fixed URL
+	cmds           chan *Job
+	done           chan jobDoneMsg
+	store          JobStore
+	broker         *Broker
+	l8             *L8Registry
+	metrics        MetricsAdapter
+	enqueueWebhook webhookEnqueuer
+	currentRPS     atomic.Int64 // stored as rps * 100
 }
 
 func (q *AccountQueue) RPS() float64 {
@@ -72,17 +81,18 @@ func (q *AccountQueue) Throttle(rps float64) {
 	}
 }
 
-func NewAccountQueue(key, upstream string, rps float64, maxConc int, pool *Pool, store JobStore, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, onIdle func(string)) *AccountQueue {
+func NewAccountQueue(key, upstream string, rps float64, maxConc int, pool *Pool, store JobStore, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, enqueueWebhook webhookEnqueuer, onIdle func(string)) *AccountQueue {
 	q := &AccountQueue{
-		key:      key,
-		upstream: upstream,
-		pool:     pool,
-		cmds:     make(chan *Job, 1000),
-		done:     make(chan jobDoneMsg, 100),
-		store:    store,
-		broker:   broker,
-		l8:       l8,
-		metrics:  ensureMetrics(metrics),
+		key:            key,
+		upstream:       upstream,
+		pool:           pool,
+		cmds:           make(chan *Job, 1000),
+		done:           make(chan jobDoneMsg, 100),
+		store:          store,
+		broker:         broker,
+		l8:             l8,
+		metrics:        ensureMetrics(metrics),
+		enqueueWebhook: enqueueWebhook,
 	}
 	go q.supervise(rps, maxConc, onIdle)
 	return q
@@ -193,15 +203,17 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int) {
 						log.Printf("[AccountQueue] panic executing job %s: %v", j.ID, r)
 						q.store.UpdateStatus(j.ID, StatusFailed)
 						q.metrics.JobFailed(j.UserID, q.upstream, "internal panic")
-						deliverWebhook(j.WebhookURL, map[string]any{
-							"job_id": j.ID,
-							"status": "failed",
-							"reason": "internal panic",
-						}, q.l8, q.metrics)
+						if !j.isWebhookDeliveryJob() {
+							q.enqueueWebhook(j.ID, j.UserID, j.WebhookURL, map[string]any{
+								"job_id": j.ID,
+								"status": "failed",
+								"reason": "internal panic",
+							})
+						}
 						q.done <- jobDoneMsg{}
 					}
 				}()
-				q.done <- execute(j, url, q.upstream, q.store, q.broker, q.l8, q.metrics, q.pool, m, flowRate)
+				q.done <- execute(j, url, q.upstream, q.store, q.broker, q.l8, q.metrics, q.pool, m, flowRate, q.enqueueWebhook)
 			}(job, dispatchURL, member, currentRPS)
 		}
 
@@ -245,7 +257,7 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int) {
 	}
 }
 
-func execute(job *Job, dispatchURL, upstream string, store JobStore, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, pool *Pool, member *PoolMember, flowRate float64) jobDoneMsg {
+func execute(job *Job, dispatchURL, upstream string, store JobStore, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, pool *Pool, member *PoolMember, flowRate float64, enqueueWebhook webhookEnqueuer) jobDoneMsg {
 	metrics = ensureMetrics(metrics)
 	startedAt := time.Now()
 
@@ -268,7 +280,7 @@ func execute(job *Job, dispatchURL, upstream string, store JobStore, broker *Bro
 		}
 
 		counts := store.Counts()
-		resp, err = makeRequest(job, currentURL, counts.TotalJobs, counts.QueueDepth, flowRate)
+		resp, err = makeRequest(job, currentURL, counts.TotalJobs, counts.QueueDepth, flowRate, l8)
 		if err != nil {
 			reason = err.Error()
 			if pool != nil && currentMember != nil {
@@ -322,13 +334,15 @@ func execute(job *Job, dispatchURL, upstream string, store JobStore, broker *Bro
 			Data:  map[string]any{"job_id": job.ID, "reason": reason, "response_status": responseStatus, "body": string(body)},
 		})
 		metrics.JobFailed(job.UserID, upstream, reason)
-		deliverWebhook(job.WebhookURL, map[string]any{
-			"job_id":          job.ID,
-			"status":          "failed",
-			"reason":          reason,
-			"response_status": responseStatus,
-			"body":            string(body),
-		}, l8, metrics)
+		if !job.isWebhookDeliveryJob() {
+			enqueueWebhook(job.ID, job.UserID, job.WebhookURL, map[string]any{
+				"job_id":          job.ID,
+				"status":          "failed",
+				"reason":          reason,
+				"response_status": responseStatus,
+				"body":            string(body),
+			})
+		}
 		return jobDoneMsg{}
 	}
 	defer resp.Body.Close()
@@ -348,12 +362,14 @@ func execute(job *Job, dispatchURL, upstream string, store JobStore, broker *Bro
 		},
 	})
 	metrics.JobCompleted(job.UserID, upstream, time.Since(startedAt).Milliseconds())
-	deliverWebhook(job.WebhookURL, map[string]any{
-		"job_id":          job.ID,
-		"status":          "completed",
-		"response_status": resp.StatusCode,
-		"body":            string(body),
-	}, l8, metrics)
+	if !job.isWebhookDeliveryJob() {
+		enqueueWebhook(job.ID, job.UserID, job.WebhookURL, map[string]any{
+			"job_id":          job.ID,
+			"status":          "completed",
+			"response_status": resp.StatusCode,
+			"body":            string(body),
+		})
+	}
 
 	msg := jobDoneMsg{}
 	if val := pacingHeader(resp.Header, "Rps"); val != "" {
@@ -386,7 +402,7 @@ func pacingHeader(headers http.Header, name string) string {
 	return headers.Get("X-Aquifer-" + name)
 }
 
-func makeRequest(job *Job, dispatchURL string, totalJobs, queueDepth int64, flowRate float64) (*http.Response, error) {
+func makeRequest(job *Job, dispatchURL string, totalJobs, queueDepth int64, flowRate float64, l8 *L8Registry) (*http.Response, error) {
 	var bodyReader io.Reader
 	if job.Body != "" {
 		bodyReader = strings.NewReader(job.Body)
@@ -399,6 +415,19 @@ func makeRequest(job *Job, dispatchURL string, totalJobs, queueDepth int64, flow
 
 	for k, v := range job.Headers {
 		req.Header.Set(k, v)
+	}
+
+	// L8 signing proves Aquifer's identity to the *receiver* of a webhook —
+	// it has no meaning for forward dispatch to an arbitrary upstream API,
+	// so this only applies when the job being dispatched is itself a
+	// webhook delivery (see Job.isWebhookDeliveryJob).
+	if job.isWebhookDeliveryJob() && l8 != nil {
+		l8.EnsureTrust(dispatchURL)
+		if l8.IsTrusted(dispatchURL) {
+			for k, v := range l8.SignHeaders([]byte(job.Body)) {
+				req.Header.Set(k, v)
+			}
+		}
 	}
 
 	setLoadHeader(req.Header, "Total-Jobs", fmt.Sprintf("%d", totalJobs))

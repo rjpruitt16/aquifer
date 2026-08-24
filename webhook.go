@@ -11,14 +11,12 @@ import (
 
 const webhookMaxRetries = 4
 
-func deliverWebhook(url string, payload map[string]any, l8 *L8Registry, metrics MetricsAdapter) {
-	deliverWithRetry(url, payload, 0, l8, ensureMetrics(metrics))
-}
-
-// deliverWebhookSync is deliverWebhook's success-reporting twin, used by
-// drain mode where clearing the local idempotency ledger must only happen
-// after a confirmed delivery -- deliverWebhook's normal fire-and-forget
-// callers (per-job completion/failure) don't need this and are untouched.
+// deliverWebhookSync is used only by drain mode (drain.go), where clearing
+// the local idempotency ledger must happen only after a confirmed delivery
+// -- a synchronous, immediate-fire-with-retry call, distinct from regular
+// per-job completion/failure webhooks, which now go through
+// Registry.EnqueueWebhook's paced account-queue delivery (account_queue.go)
+// instead of firing immediately from here.
 func deliverWebhookSync(url string, payload map[string]any, l8 *L8Registry, metrics MetricsAdapter) bool {
 	return deliverWithRetry(url, payload, 0, l8, ensureMetrics(metrics))
 }

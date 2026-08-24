@@ -306,7 +306,14 @@ curl -N http://localhost:8080/jobs/<id>/stream
 }
 ```
 
-Webhook delivery retries 4 times: 1 s · 2 s · 4 s · 8 s. Delivery is at-least-once — see [Delivery semantics](#how-it-works) above.
+**Webhook delivery uses the same account-queue pacing as forward dispatch.** A webhook POST isn't fired immediately from the dispatch goroutine — it's enqueued as its own durable job, keyed by the webhook receiver's domain, and dispatched through the identical `AccountQueue`/`URLWorker` machinery described in [Dynamic Pacing](#dynamic-pacing) below. Practically, this means:
+
+- A webhook receiver can slow Aquifer down with the same `X-Aqueduct-Rps` / `X-Aqueduct-Max-Concurrent` response headers a real upstream uses, instead of just getting hammered.
+- Delivery is crash-durable — a webhook still pending when the process restarts is recovered and retried, the same way a queued job is, rather than being lost with an in-memory retry loop.
+- Retries trigger on `5xx` responses (not every non-`2xx`), matching forward dispatch's own retry condition — up to 4 attempts, exponential backoff 1 s · 2 s · 4 s · 8 s.
+- L8 signing (below) still applies exactly as before — trust is established and delivery is signed the same way, just from inside the paced dispatch path instead of a separate one-shot retry loop.
+
+Delivery is still at-least-once — see [Delivery semantics](#how-it-works) above. (Drain mode's own ledger-flush webhook is unaffected — it stays synchronous, confirming delivery before clearing the local idempotency ledger.)
 
 ---
 
