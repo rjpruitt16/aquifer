@@ -221,6 +221,30 @@ Aquifer ships with `NoopMetricsAdapter`, so existing deployments do not change.
 
 ---
 
+## Dynamic Pacing
+
+**Terminology**: Aquifer is this implementation; Aqueduct is the implementation-agnostic header protocol (`X-Aqueduct-*`) it speaks, so other services could speak it too.
+
+The upstream controls pace at runtime via response headers. `X-Aqueduct-*` is the protocol namespace; `X-Aquifer-*` remains supported as a backward-compatible product alias.
+
+| Header (preferred)          | Alias                        | Effect                                  |
+|------------------------------|-------------------------------|------------------------------------------|
+| `X-Aqueduct-Rps`            | `X-Aquifer-Rps`               | Reduce dispatch rate to this value      |
+| `X-Aqueduct-Max-Concurrent` | `X-Aquifer-Max-Concurrent`    | Reduce max in-flight requests           |
+| `X-Aqueduct-Account-Queue`  | `X-Aquifer-Account-Queue`     | `enabled` — isolate each tenant's queue |
+
+Aquifer reads both namespaces, preferring `X-Aqueduct-*` when both are present.
+
+With `X-Aqueduct-Account-Queue: enabled`, each `(user_id, api_key)` pair gets its own independently paced queue, so one tenant's burst can't slow down another. Each queue's pace still stays inside the upstream's actual budget — a background check throttles the *sum* of every active tenant queue proportionally if too many are active at once, so isolation never means an unbounded copy of the full rate per tenant.
+
+A backend can lower RPS at any time via these headers when it's under pressure; Aquifer honors the lower pace immediately and recovers gradually toward the configured ceiling once pressure clears.
+
+Use the pacing headers for intentional backpressure. A `5xx` response is treated as a failed dispatch attempt and, for pool members, lowers that member's reputation. If a service is alive but overloaded, prefer `429` and/or `X-Aqueduct-Rps` / `X-Aqueduct-Max-Concurrent` so Aquifer slows down without interpreting the member as broken.
+
+**ORCA fallback for backends that can't speak Aqueduct directly.** Some backends already report load in a different, real open standard — [ORCA](https://github.com/cncf/xds/blob/main/xds/data/orca/v3/orca_load_report.proto) (Open Request Cost Aggregation), the gRPC/Envoy ecosystem's convention for backends to report utilization. vLLM supports this natively over plain HTTP: Aquifer sends `endpoint-load-metrics-format: TEXT` on every dispatch (the request-side opt-in current vLLM actually requires — there's no server startup flag for this), and a vLLM backend that understands it replies with an `endpoint-load-metrics` header carrying a `kv_cache_usage_perc` utilization fraction. If a response carries no `X-Aqueduct-Rps`/`X-Aquifer-Rps`, Aquifer reads this header as a fallback and paces down as KV-cache usage rises: full configured rate below 70%, 2 RPS at 70-90%, 0.5 RPS at 90-97%, 0.25 RPS above that — never dropping to zero, same pacing-down-gracefully philosophy as everywhere else. An explicit `X-Aqueduct-Rps` always wins if present; this only fires when the backend hasn't opted into speaking Aqueduct's own headers.
+
+---
+
 ## API
 
 ### POST /jobs
@@ -306,7 +330,7 @@ curl -N http://localhost:8080/jobs/<id>/stream
 }
 ```
 
-**Webhook delivery uses the same account-queue pacing as forward dispatch.** A webhook POST isn't fired immediately from the dispatch goroutine — it's enqueued as its own durable job, keyed by the webhook receiver's domain, and dispatched through the identical `AccountQueue`/`URLWorker` machinery described in [Dynamic Pacing](#dynamic-pacing) below. Practically, this means:
+**Webhook delivery uses the same account-queue pacing as forward dispatch.** A webhook POST isn't fired immediately from the dispatch goroutine — it's enqueued as its own durable job, keyed by the webhook receiver's domain, and dispatched through the identical `AccountQueue`/`URLWorker` machinery described in [Dynamic Pacing](#dynamic-pacing) above. Practically, this means:
 
 - A webhook receiver can slow Aquifer down with the same `X-Aqueduct-Rps` / `X-Aqueduct-Max-Concurrent` response headers a real upstream uses, instead of just getting hammered.
 - Delivery is crash-durable — a webhook still pending when the process restarts is recovered and retried, the same way a queued job is, rather than being lost with an in-memory retry loop.
@@ -314,30 +338,6 @@ curl -N http://localhost:8080/jobs/<id>/stream
 - L8 signing (below) still applies exactly as before — trust is established and delivery is signed the same way, just from inside the paced dispatch path instead of a separate one-shot retry loop.
 
 Delivery is still at-least-once — see [Delivery semantics](#how-it-works) above. (Drain mode's own ledger-flush webhook is unaffected — it stays synchronous, confirming delivery before clearing the local idempotency ledger.)
-
----
-
-## Dynamic Pacing
-
-**Terminology**: Aquifer is this implementation; Aqueduct is the implementation-agnostic header protocol (`X-Aqueduct-*`) it speaks, so other services could speak it too.
-
-The upstream controls pace at runtime via response headers. `X-Aqueduct-*` is the protocol namespace; `X-Aquifer-*` remains supported as a backward-compatible product alias.
-
-| Header (preferred)          | Alias                        | Effect                                  |
-|------------------------------|-------------------------------|------------------------------------------|
-| `X-Aqueduct-Rps`            | `X-Aquifer-Rps`               | Reduce dispatch rate to this value      |
-| `X-Aqueduct-Max-Concurrent` | `X-Aquifer-Max-Concurrent`    | Reduce max in-flight requests           |
-| `X-Aqueduct-Account-Queue`  | `X-Aquifer-Account-Queue`     | `enabled` — isolate each tenant's queue |
-
-Aquifer reads both namespaces, preferring `X-Aqueduct-*` when both are present.
-
-With `X-Aqueduct-Account-Queue: enabled`, each `(user_id, api_key)` pair gets its own independently paced queue, so one tenant's burst can't slow down another. Each queue's pace still stays inside the upstream's actual budget — a background check throttles the *sum* of every active tenant queue proportionally if too many are active at once, so isolation never means an unbounded copy of the full rate per tenant.
-
-A backend can lower RPS at any time via these headers when it's under pressure; Aquifer honors the lower pace immediately and recovers gradually toward the configured ceiling once pressure clears.
-
-Use the pacing headers for intentional backpressure. A `5xx` response is treated as a failed dispatch attempt and, for pool members, lowers that member's reputation. If a service is alive but overloaded, prefer `429` and/or `X-Aqueduct-Rps` / `X-Aqueduct-Max-Concurrent` so Aquifer slows down without interpreting the member as broken.
-
-**ORCA fallback for backends that can't speak Aqueduct directly.** Some backends already report load in a different, real open standard — [ORCA](https://github.com/cncf/xds/blob/main/xds/data/orca/v3/orca_load_report.proto) (Open Request Cost Aggregation), the gRPC/Envoy ecosystem's convention for backends to report utilization. vLLM supports this natively over plain HTTP: Aquifer sends `endpoint-load-metrics-format: TEXT` on every dispatch (the request-side opt-in current vLLM actually requires — there's no server startup flag for this), and a vLLM backend that understands it replies with an `endpoint-load-metrics` header carrying a `kv_cache_usage_perc` utilization fraction. If a response carries no `X-Aqueduct-Rps`/`X-Aquifer-Rps`, Aquifer reads this header as a fallback and paces down as KV-cache usage rises: full configured rate below 70%, 2 RPS at 70-90%, 0.5 RPS at 90-97%, 0.25 RPS above that — never dropping to zero, same pacing-down-gracefully philosophy as everywhere else. An explicit `X-Aqueduct-Rps` always wins if present; this only fires when the backend hasn't opted into speaking Aqueduct's own headers.
 
 ---
 
