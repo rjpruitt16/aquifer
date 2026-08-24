@@ -493,10 +493,10 @@ guarantee that never happens, enforce it on your own end before routing traffic 
 hash Aquifer already computes internally, never the plaintext key. A downstream consumer re-checking a
 key for a duplicate must hash it the same way.
 
-If you're also running [ezthrottle-local](https://github.com/rjpruitt16/ezthrottle-local), note its
-drain mode hashes differently — `sha256(idempotent_key)` alone, with no `user_id` scoping. The two
-systems' ledgers are not interchangeable under one hash-key namespace; hash lookups separately against
-each.
+If you're also running [ezthrottle-local](https://github.com/rjpruitt16/ezthrottle-local), its drain
+mode hashes the identical way — both systems share one hash-key namespace for the same
+`(user_id, idempotent_key)` pair, so a downstream consumer can hash lookups the same way regardless of
+which system a given ledger entry came from.
 
 ---
 
