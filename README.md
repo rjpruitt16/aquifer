@@ -520,6 +520,11 @@ Earlier benchmarks hit an artificial ~200 req/s ceiling caused by a serialized S
 
 ---
 
+## Writing
+
+- [Eliminate GPU Waste by Cutting the Retry Tax](https://rahmipruitt.me/content/gpu-retry-tax/) — the thesis behind [drain mode](#drain-mode) and the ORCA fallback pacing [GPU benchmark](benchmark.md#9-gpu-inference-and-the-retry-tax-runpodvllm) above.
+- [GitHub Outages Show the Limits of Reactive Scaling](https://rahmipruitt.me/content/github-outage-reactive-scaling/) — why reactive scaling and retry storms don't mix, the problem Aquifer absorbs instead.
+
 ## License
 
 MIT
