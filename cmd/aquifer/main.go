@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/rjpruitt16/aquifer"
+	"github.com/rjpruitt16/aquifer/a2aadapter"
 )
 
 func main() {
@@ -34,7 +35,7 @@ func main() {
 
 	adapter := buildAdapter(adapterName, port)
 	if adapter == nil {
-		log.Fatalf("unknown AQUIFER_ADAPTER %q (expected http or mcp-stdio)", adapterName)
+		log.Fatalf("unknown AQUIFER_ADAPTER %q (expected http, mcp-stdio, or a2a)", adapterName)
 	}
 
 	if adapter.Name() == "http" {
@@ -59,6 +60,12 @@ func buildAdapter(name, port string) aquifer.FrameworkAdapter {
 		return aquifer.NewHTTPAdapter(":" + port)
 	case "mcp-stdio":
 		return aquifer.NewMCPStdioAdapter(os.Stdin, os.Stdout)
+	case "a2a":
+		publicURL := os.Getenv("AQUIFER_A2A_PUBLIC_URL")
+		if publicURL == "" {
+			publicURL = "http://localhost:" + port
+		}
+		return a2aadapter.NewAdapter(":"+port, publicURL)
 	default:
 		return nil
 	}

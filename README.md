@@ -4,7 +4,7 @@
 
 Aquifer is a self-hosted agent-native load balancer and traffic coordination layer for agent workloads. It absorbs bursts into a durable queue, dispatches at a controlled rate, and spreads traffic across a pool of registered backend instances. Upstreams can dynamically slow Aquifer down with `X-Aqueduct-*` response headers, so an overloaded service can shed pressure before it starts returning 429s.
 
-Exposed through pluggable adapters — an MCP server for agent tool-calling, or a plain HTTP API — with cryptographic agent identity via the L8 protocol for trustless webhook delivery.
+Exposed through pluggable adapters — an MCP server for agent tool-calling, a plain HTTP API, or an A2A (Agent2Agent protocol) agent — with cryptographic agent identity via the L8 protocol for trustless webhook delivery.
 
 **Benchmarked:** 10x traffic spikes absorbed with zero failures, 30/30 jobs surviving a `kill -9` mid-drain, and clean `429` admission shedding under sustained overload — including a real GPU under load, where the ORCA fallback signal cut peak backend queue depth from 449 to 8 waiting requests. See [benchmark.md](benchmark.md) for throughput ceilings, crash recovery, memory behavior, capacity by machine size, and the [GPU/vLLM run](benchmark.md#9-gpu-inference-and-the-retry-tax-runpodvllm).
 
@@ -107,7 +107,8 @@ upstreams:
 
 | Env var       | Default      | Description                    |
 |---------------|--------------|--------------------------------|
-| `AQUIFER_ADAPTER` | `http` for binary, `mcp-stdio` in Docker image | Runtime adapter: `http` or `mcp-stdio` |
+| `AQUIFER_ADAPTER` | `http` for binary, `mcp-stdio` in Docker image | Runtime adapter: `http`, `mcp-stdio`, or `a2a` |
+| `AQUIFER_A2A_PUBLIC_URL` | `http://localhost:$PORT` | A2A adapter only — externally-reachable base URL advertised in the Agent Card |
 | `PORT`        | `8080`       | HTTP listen port               |
 | `DB_PATH`     | `aquifer.db` | Storage path — a SQLite file, or a directory if `AQUIFER_STORE_BACKEND=pebble` |
 | `CONFIG_PATH` | _(none)_     | Path to rate limit config YAML |
@@ -139,6 +140,7 @@ Current adapters:
 |---------|-----|---------|
 | HTTP | `AQUIFER_ADAPTER=http` | Existing REST/SSE API on `PORT` |
 | MCP stdio | `AQUIFER_ADAPTER=mcp-stdio` | MCP server exposing Aquifer tools over stdio |
+| A2A | `AQUIFER_ADAPTER=a2a` | Agent2Agent protocol (v1.0) agent over JSON-RPC/HTTPS on `PORT` |
 
 Run as an MCP stdio server:
 
@@ -159,6 +161,16 @@ MCP tools:
 | `aquifer_l8_challenge` | Answer an L8 challenge |
 
 MCP resource: `aquifer://jobs/{job_id}` reads current job status and metadata as JSON. The HTTP adapter remains the default for the binary, so existing deployments do not change.
+
+### A2A adapter
+
+Run as an A2A agent (JSON-RPC/HTTPS only for v1 — gRPC and REST bindings aren't wired up):
+
+```bash
+AQUIFER_ADAPTER=a2a AQUIFER_A2A_PUBLIC_URL=http://localhost:8080 aquifer
+```
+
+`AQUIFER_A2A_PUBLIC_URL` is the externally-reachable base URL to advertise in the Agent Card — it defaults to `http://localhost:$PORT`, which is only correct for local use; set it explicitly behind any proxy or real deployment. The Agent Card is served at `/.well-known/agent-card.json` (the standard A2A convention); send a `SendMessage`/`SendStreamingMessage` request whose message contains a single data part shaped like `JobRequest` (`user_id`, `idempotent_key`, `url` or `pool_id`, `method`, `headers`, `body`) — the same structured-JSON shape MCP's `aquifer_enqueue_job` tool already takes. The upstream response comes back as a task artifact. `CreateTaskPushNotificationConfig` is supported (backed by the SDK's SSRF-hardened HTTP sender); `CancelTask` deliberately returns an unsupported-operation error rather than a silent no-op, since Aquifer has no real job-cancellation mechanism yet. See [a2aadapter/a2a_adapter.go](a2aadapter/a2a_adapter.go) for the full translation between A2A's task model and Aquifer's `Enqueue`/`SubscribeJob`.
 
 ### Writing an adapter
 
