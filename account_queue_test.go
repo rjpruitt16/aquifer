@@ -6,6 +6,12 @@ import (
 	"testing"
 )
 
+// TestMakeRequestRequestsOrcaMetricsByDefault guards the exact casing sent:
+// lowercase "text", not "TEXT". vLLM accepts either (metrics_format.lower()
+// in orca_metrics.py), but Triton's ORCA support (src/orca_http.cc) does a
+// case-sensitive comparison against the lowercase literal only -- "TEXT"
+// makes Triton log an error and write no header at all, verified directly
+// against Triton's source.
 func TestMakeRequestRequestsOrcaMetricsByDefault(t *testing.T) {
 	var got string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -21,8 +27,8 @@ func TestMakeRequestRequestsOrcaMetricsByDefault(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	if got != "TEXT" {
-		t.Fatalf("expected %q request header to be %q, got %q", orcaRequestHeaderName, "TEXT", got)
+	if got != "text" {
+		t.Fatalf("expected %q request header to be %q, got %q", orcaRequestHeaderName, "text", got)
 	}
 }
 

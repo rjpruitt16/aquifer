@@ -22,6 +22,24 @@ func TestOrcaRpsParsesRealVLLMTextFormat(t *testing.T) {
 	}
 }
 
+// TestOrcaRpsParsesRealTritonTextFormat guards the exact wire format
+// Triton's OrcaKVMetricHeader produces (verified directly against
+// src/orca_http.cc) -- Triton reports the same concept vLLM calls
+// kv_cache_usage_perc under a different name, kv_cache_utilization, which
+// is why orcaRps tries a list of known names rather than one.
+func TestOrcaRpsParsesRealTritonTextFormat(t *testing.T) {
+	headers := http.Header{}
+	headers.Set("endpoint-load-metrics", "TEXT named_metrics.kv_cache_utilization=0.980000, named_metrics.max_token_capacity=1024")
+
+	rps := orcaRps(headers)
+	if rps == nil {
+		t.Fatal("expected an rps override, got nil")
+	}
+	if *rps != 0.25 {
+		t.Fatalf("expected 0.25 rps at 98%% utilization, got %v", *rps)
+	}
+}
+
 func TestOrcaRpsParsesJSONFormat(t *testing.T) {
 	headers := http.Header{}
 	headers.Set("endpoint-load-metrics", `JSON {"named_metrics":{"kv_cache_usage_perc":0.85}}`)
@@ -55,7 +73,7 @@ func TestOrcaRpsMissingMetric(t *testing.T) {
 	headers.Set("endpoint-load-metrics", "TEXT named_metrics.num_requests_waiting=12")
 
 	if rps := orcaRps(headers); rps != nil {
-		t.Fatalf("expected nil when kv_cache_usage_perc isn't reported, got %v", *rps)
+		t.Fatalf("expected nil when no known kv-cache metric name is reported, got %v", *rps)
 	}
 }
 

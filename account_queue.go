@@ -442,8 +442,15 @@ func makeRequest(job *Job, dispatchURL string, totalJobs, queueDepth int64, flow
 	// send unconditionally: a backend that doesn't understand it just
 	// ignores an unrecognized request header, same as the outbound load
 	// headers above.
+	//
+	// Lowercase "text", not "TEXT": vLLM compares via metrics_format.lower()
+	// (orca_metrics.py) so either case works there, but Triton's ORCA
+	// support (src/orca_http.cc, orca_type == "text") is case-sensitive and
+	// only accepts the lowercase literal -- sending "TEXT" makes Triton log
+	// an error and write no header at all. Lowercase is the one value both
+	// verified backends actually accept.
 	if req.Header.Get(orcaRequestHeaderName) == "" {
-		req.Header.Set(orcaRequestHeaderName, "TEXT")
+		req.Header.Set(orcaRequestHeaderName, "text")
 	}
 
 	client := &http.Client{Timeout: 30 * time.Second}

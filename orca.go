@@ -25,18 +25,24 @@ const orcaHeaderName = "endpoint-load-metrics"
 // used one (--orca_formats), but that's not what's deployed today.
 const orcaRequestHeaderName = "endpoint-load-metrics-format"
 
-// orcaKVCacheMetric is the one named metric this pacing curve keys off --
-// vLLM already normalizes it to a 0-1 utilization fraction (Prometheus
-// vllm:kv_cache_usage_perc). vLLM also reports num_requests_waiting, a raw
-// count with no inherent scale to pace against without a configured ceiling
-// -- left as a natural future extension, not used here.
-const orcaKVCacheMetric = "kv_cache_usage_perc"
+// orcaKVCacheMetricNames are the named metrics this pacing curve keys off,
+// tried in order -- different backends report ORCA's KV-cache utilization
+// under different names, and there's no way to know which one a given
+// response used except by checking. "kv_cache_usage_perc" is vLLM's name
+// (Prometheus vllm:kv_cache_usage_perc, already a 0-1 fraction). Triton's
+// own ORCA support (src/orca_http.cc, verified directly against source)
+// reports the same concept as "kv_cache_utilization" instead. Both
+// backends also report a raw waiting-request count (num_requests_waiting /
+// max_token_capacity), which has no inherent scale to pace against without
+// a configured ceiling -- left as a natural future extension, not used
+// here.
+var orcaKVCacheMetricNames = []string{"kv_cache_usage_perc", "kv_cache_utilization"}
 
 // orcaRps derives a suggested dispatch rate from an ORCA endpoint-load-metrics
 // response header, if present and parseable. Returns nil if there's no ORCA
-// header, no kv_cache_usage_perc metric in it, or the reported load is low
-// enough that no override is warranted -- callers should keep whatever rate
-// is already configured in that case.
+// header, none of orcaKVCacheMetricNames appear in it, or the reported load
+// is low enough that no override is warranted -- callers should keep
+// whatever rate is already configured in that case.
 //
 // This is a fallback signal, not a primary one. Callers should only consult
 // it when the response carried no explicit X-Aqueduct-Rps/X-Aquifer-Rps,
@@ -53,12 +59,12 @@ func orcaRps(headers http.Header) *float64 {
 		return nil
 	}
 
-	util, ok := metrics[orcaKVCacheMetric]
-	if !ok {
-		return nil
+	for _, name := range orcaKVCacheMetricNames {
+		if util, ok := metrics[name]; ok {
+			return orcaLoadToRps(util)
+		}
 	}
-
-	return orcaLoadToRps(util)
+	return nil
 }
 
 // parseOrcaHeader splits the "TEXT ..." / "JSON ..." format prefix from the
