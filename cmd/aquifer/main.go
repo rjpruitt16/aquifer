@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 
@@ -9,7 +10,20 @@ import (
 	"github.com/rjpruitt16/aquifer/a2aadapter"
 )
 
+// Set via -ldflags at build time (see .goreleaser.yaml); "dev" when built
+// directly with go build/go run, matching the common Go CLI convention.
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
 func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-version") {
+		fmt.Printf("aquifer %s (commit %s, built %s)\n", version, commit, date)
+		return
+	}
+
 	adapterName := os.Getenv("AQUIFER_ADAPTER")
 	if adapterName == "" {
 		adapterName = "http"
@@ -39,9 +53,9 @@ func main() {
 	}
 
 	if adapter.Name() == "http" {
-		log.Printf("Aquifer listening on :%s (db: %s)", port, dbPath)
+		log.Printf("Aquifer %s listening on :%s (db: %s)", version, port, dbPath)
 	} else {
-		log.Printf("Aquifer running %s (db: %s)", adapter.Name(), dbPath)
+		log.Printf("Aquifer %s running %s (db: %s)", version, adapter.Name(), dbPath)
 	}
 
 	if err := aquifer.RunAdapter(context.Background(), adapter, aquifer.RuntimeOptions{

@@ -1,0 +1,48 @@
+version: 2
+
+project_name: aquifer
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: aquifer
+    main: ./cmd/aquifer
+    binary: aquifer
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+
+# cmd/aquifer-scenario is a benchmark/load-simulation tool for this repo's
+# own development, not something an end user downloading a release is
+# looking for -- deliberately excluded from release builds.
+
+archives:
+  - id: aquifer
+    ids: [aquifer]
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  disable: true
+
+release:
+  # Release notes come from the annotated tag message (git tag -a), same
+  # convention this project already uses -- GoReleaser shouldn't overwrite
+  # that with its own auto-generated changelog.
+  mode: keep-existing
