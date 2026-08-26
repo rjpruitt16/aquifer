@@ -134,104 +134,15 @@ Body-size and DB-size admission are on by default; memory admission stays off un
 
 ## Framework adapters
 
-Aquifer has a framework-neutral core — idempotency, persistence, rate control, dispatch, SSE events, L8 signing, webhook delivery — with pluggable front doors: MCP (stdio), plain HTTP, and A2A today.
-
-<details>
-<summary>Full adapter reference — interface, adapter table, MCP tools, A2A details, writing your own</summary>
-
-```go
-type FrameworkAdapter interface {
-    Name() string
-    Start(ctx context.Context, aquifer *Aquifer) error
-}
-```
-
-Current adapters:
+Aquifer has a framework-neutral core — idempotency, persistence, rate control, dispatch, SSE events, L8 signing, webhook delivery — with pluggable front doors:
 
 | Adapter | Env | Purpose |
 |---------|-----|---------|
-| HTTP | `AQUIFER_ADAPTER=http` | Existing REST/SSE API on `PORT` |
-| MCP stdio | `AQUIFER_ADAPTER=mcp-stdio` | MCP server exposing Aquifer tools over stdio |
-| A2A | `AQUIFER_ADAPTER=a2a` | Agent2Agent protocol (v1.0) agent over JSON-RPC/HTTPS on `PORT` |
+| HTTP | `AQUIFER_ADAPTER=http` | REST/SSE API on `PORT` (the default) |
+| MCP stdio | `AQUIFER_ADAPTER=mcp-stdio` | MCP server exposing Aquifer tools over stdio (the published Docker image's default) |
+| A2A | `AQUIFER_ADAPTER=a2a` | Agent2Agent protocol (v1.0) agent over JSON-RPC/HTTPS |
 
-Run as an MCP stdio server:
-
-```bash
-AQUIFER_ADAPTER=mcp-stdio aquifer
-```
-
-The published Docker image defaults to `AQUIFER_ADAPTER=mcp-stdio` so MCP directories such as Glama can start and introspect it directly. Set `AQUIFER_ADAPTER=http` when running Aquifer as an HTTP queue service.
-
-MCP tools:
-
-| Tool | Purpose |
-|------|---------|
-| `aquifer_enqueue_job` | Queue an HTTP request for durable, rate-controlled dispatch |
-| `aquifer_get_job` | Fetch job status and metadata |
-| `aquifer_health` | Return health and protocol metadata |
-| `aquifer_l8_metadata` | Return L8 public key metadata |
-| `aquifer_l8_challenge` | Answer an L8 challenge |
-
-MCP resource: `aquifer://jobs/{job_id}` reads current job status and metadata as JSON. The HTTP adapter remains the default for the binary, so existing deployments do not change.
-
-### A2A adapter
-
-Run as an A2A agent (JSON-RPC/HTTPS only for v1 — gRPC and REST bindings aren't wired up):
-
-```bash
-AQUIFER_ADAPTER=a2a AQUIFER_A2A_PUBLIC_URL=http://localhost:8080 aquifer
-```
-
-`AQUIFER_A2A_PUBLIC_URL` is the externally-reachable base URL to advertise in the Agent Card — it defaults to `http://localhost:$PORT`, which is only correct for local use; set it explicitly behind any proxy or real deployment. The Agent Card is served at `/.well-known/agent-card.json` (the standard A2A convention); send a `SendMessage`/`SendStreamingMessage` request whose message contains a single data part shaped like `JobRequest` (`user_id`, `idempotent_key`, `url` or `pool_id`, `method`, `headers`, `body`) — the same structured-JSON shape MCP's `aquifer_enqueue_job` tool already takes. The upstream response comes back as a task artifact. `CreateTaskPushNotificationConfig` is supported (backed by the SDK's SSRF-hardened HTTP sender); `CancelTask` deliberately returns an unsupported-operation error rather than a silent no-op, since Aquifer has no real job-cancellation mechanism yet. See [a2aadapter/a2a_adapter.go](a2aadapter/a2a_adapter.go) for the full translation between A2A's task model and Aquifer's `Enqueue`/`SubscribeJob`.
-
-### Writing an adapter
-
-Adapter authors import Aquifer as a Go package, implement `FrameworkAdapter`, and pass the shared core into their framework — see [ADAPTERS.md](ADAPTERS.md) for the interface, a complete example, and how to reuse Aquifer's runtime wiring in a custom binary. `examples/custom_adapter` has a compile-tested reference implementation.
-
-### Writing a storage backend
-
-Persistence is also pluggable. Every core component (`Registry`, `AccountQueue`, `URLWorker`, `Aquifer` itself) is coded against the `JobStore` interface, not the concrete SQLite/Pebble types:
-
-```go
-type JobStore interface {
-    Path() string
-    Close() error
-    CheckOrInsert(job *Job) (string, bool)
-    SetQueueKey(jobID, queueKey string)
-    DeleteJob(jobID string)
-    MarkInFlight(jobID string)
-    RecoverInFlight(queueKey string) []*Job
-    UpdateStatus(jobID string, status Status)
-    Counts() StoreCounts
-    GetJob(jobID string) *Job
-    GetQueuedJobs() []*Job
-}
-```
-
-Implement it against your own backend (Postgres, rqlite, or anything else that can give you atomic check-and-set) and pass it via `RuntimeOptions.Store` — no need to bypass `NewRuntime`/`RunAdapter` or hand-wire the lower-level constructors. Two things a custom backend should be aware of: `CheckOrInsert` needs the same atomicity guarantee SQLite's `INSERT OR IGNORE` and Pebble's own store give it today (a non-atomic check-then-write reintroduces the exact idempotency race this project has already found and fixed twice — once in each language); and `AQUIFER_DB_MAX_BYTES` admission control does a local `os.Stat` on `DB_PATH`, which is meaningless for a networked backend — set it to `0` to disable that check if your store isn't a local file or directory.
-
-Aquifer doesn't ship a Postgres or rqlite backend itself — this is documented as an extension point for anyone who wants multi-instance durability without local-disk-per-instance, not a promise one exists yet.
-
-### Metrics adapter
-
-Aquifer emits lifecycle events through a pluggable metrics adapter — implement `MetricsAdapter` and pass it into `NewRegistry`:
-
-```go
-type MetricsAdapter interface {
-    JobQueued(userID, upstream string)
-    JobDispatched(userID, upstream string)
-    JobCompleted(userID, upstream string, durationMs int64)
-    JobFailed(userID, upstream string, reason string)
-    WebhookDelivered(url string, attempt int)
-    WebhookFailed(url string, attempts int)
-    QueueDepth(upstream string, depth int)
-    FlowRate(upstream string, rps float64)
-}
-```
-
-Aquifer ships with `NoopMetricsAdapter`, so existing deployments do not change.
-
-</details>
+**[ADAPTERS.md](ADAPTERS.md)** has the full reference for each built-in adapter (MCP tool list, A2A Agent Card details), plus how to write your own `FrameworkAdapter`, storage backend, or metrics adapter.
 
 ---
 
@@ -268,14 +179,8 @@ Two backends verified directly against their own source, not assumed: **vLLM** (
 
 ## API
 
-Full REST reference — `POST /jobs`, `GET /jobs/:id`, the SSE stream, `GET /health`, and webhook payload shapes.
-
-<details>
-<summary>Full API reference</summary>
-
-### POST /jobs
-
 ```json
+POST /jobs
 {
   "user_id":        "user-123",
   "idempotent_key": "invoice-42-notify",
@@ -287,95 +192,9 @@ Full REST reference — `POST /jobs`, `GET /jobs/:id`, the SSE stream, `GET /hea
 }
 ```
 
-**Do not expose Aquifer directly to untrusted callers.** `url` is dispatched as a real HTTP request — if an arbitrary or untrusted party can set it, Aquifer becomes an open relay/SSRF vector: it can be pointed at your internal network, cloud metadata endpoints (`169.254.169.254`), or anything else the machine Aquifer runs on can reach, using Aquifer's own network position and identity. The intended caller is **your own trusted backend or gateway code** dispatching to a destination it already knows about — not an agent, end user, or any other party choosing the destination itself. Run Aquifer on a private network, not bound to a public address, and put your own authorization and destination allow-listing in front if agents need to reach it indirectly.
+**Do not expose Aquifer directly to untrusted callers.** `url` is dispatched as a real HTTP request — if an arbitrary or untrusted party can set it, Aquifer becomes an open relay/SSRF vector, using Aquifer's own network position and identity to reach anything the machine can reach. The intended caller is **your own trusted backend or gateway code** dispatching to a destination it already knows about — not an agent, end user, or any other party choosing the destination itself.
 
-Idempotent — duplicate `idempotent_key` per `user_id` returns the existing job.
-
-**201** new job queued · **200 + `"duplicate": true`** already exists
-
-### GET /jobs/:id
-
-```json
-{
-  "job_id":     "a3f9...",
-  "status":     "queued | in_flight | completed | failed",
-  "url":        "https://api.openai.com/v1/chat/completions",
-  "method":     "POST",
-  "created_at": 1715000000000
-}
-```
-
-### GET /jobs/:id/stream
-
-Server-Sent Events stream for live job updates: `queued` → `dispatching` → `completed` (`{"job_id","response_status","body"}`) or `failed` (`{"job_id","reason"}`), plus a `position` event every 2s while queued. Connecting late is safe — you'll receive synthetic catchup events for states you missed. SSE is a convenience, not the source of truth: the webhook fires regardless of whether the stream was ever open.
-
-```bash
-curl -N http://localhost:8080/jobs/<id>/stream
-```
-
-### GET /health
-
-```json
-{
-  "status": "ok",
-  "l8_protocol": "0.1",
-  "l8_public_key": "...",
-  "admission": {
-    "enabled": true,
-    "memory_mb": 42,
-    "memory_limit_mb": 400,
-    "max_body_bytes": 1048576,
-    "db_bytes": 81920,
-    "db_max_bytes": 104857600,
-    "retry_after_seconds": 5
-  }
-}
-```
-
-`admission.enabled` is `false` (with only that key present) when none of the
-`AQUIFER_*` admission env vars are set.
-
-### Webhooks
-
-**Completed**
-```json
-{
-  "job_id":          "a3f9...",
-  "status":          "completed",
-  "response_status": 200,
-  "body":            "..."
-}
-```
-
-**Failed** (after 4 retries with exponential backoff)
-```json
-{
-  "job_id": "a3f9...",
-  "status": "failed",
-  "reason": "connection refused"
-}
-```
-
-**Webhook delivery uses the same account-queue pacing as forward dispatch.** A webhook POST isn't fired immediately from the dispatch goroutine — it's enqueued as its own durable job, keyed by the webhook receiver's domain, and dispatched through the identical `AccountQueue`/`URLWorker` machinery described in [Dynamic Pacing](#dynamic-pacing) above. Practically, this means:
-
-- A webhook receiver can slow Aquifer down with the same `X-Aqueduct-Rps` / `X-Aqueduct-Max-Concurrent` response headers a real upstream uses, instead of just getting hammered.
-- Delivery is crash-durable — a webhook still pending when the process restarts is recovered and retried, the same way a queued job is, rather than being lost with an in-memory retry loop.
-- Retries trigger on `5xx` responses (not every non-`2xx`), matching forward dispatch's own retry condition — up to 4 attempts, exponential backoff 1 s · 2 s · 4 s · 8 s.
-- L8 signing (see below) still applies exactly as before — trust is established and delivery is signed the same way, just from inside the paced dispatch path instead of a separate one-shot retry loop.
-
-Delivery is still at-least-once — see [Delivery semantics](#how-it-works) above. (Drain mode's own ledger-flush webhook is unaffected — it stays synchronous, confirming delivery before clearing the local idempotency ledger.)
-
-### Autoscaling
-
-| Header                    | Value                                              |
-|---------------------------|----------------------------------------------------|
-| `X-Aqueduct-Total-Jobs`   | Total jobs on this machine right now               |
-| `X-Aqueduct-Queue-Depth`  | Jobs waiting to be dispatched                      |
-| `X-Aqueduct-Flow-Rate`    | Current dispatch rate (RPS) for this queue         |
-
-Traditional load balancers and autoscalers rely on failure to start scaling — capacity only responds once something's already struggling. Aquifer treats resources as fluid, not fixed: it paces down as machines show strain and back up as capacity comes online, using the same signals it already reports on every response.
-
-</details>
+**[API.md](API.md)** has the full reference: `GET /jobs/:id`, the SSE stream, `GET /health`, webhook payload shapes, and the autoscaling headers.
 
 ---
 
@@ -445,33 +264,9 @@ Pool state isn't shared across Aquifer instances — see [Deployment model](#dep
 
 ## L8 Protocol — trustless webhook delivery
 
-Traditional webhook security shares an HMAC secret between sender and receiver, stored in a database on both sides — something that can be stolen, logged accidentally, or forgotten during rotation, letting anyone forge deliveries forever once it leaks. Aquifer implements **L8 v0.1**, a lightweight challenge-response protocol that replaces the shared secret with public key cryptography — there's no secret to steal from a database, and verification is a single local Ed25519 call, no round-trip to any authority.
+Traditional webhook security shares an HMAC secret between sender and receiver, stored in a database on both sides — something that can be stolen, logged accidentally, or forgotten during rotation, letting anyone forge deliveries forever once it leaks. Aquifer implements **L8 v0.1**, a lightweight challenge-response protocol that replaces the shared secret with public key cryptography: the receiver publishes a public key, a one-time handshake proves both sides own their private keys, and every delivery afterward carries a signature verified locally in microseconds — no database lookup, no round-trip to any authority.
 
-<details>
-<summary>Full L8 reference — handshake steps, endpoints, key management</summary>
-
-**How it works:**
-
-1. The receiver publishes a public key at `GET /.well-known/l8`
-2. Before the first delivery, Aquifer challenges the receiver to prove ownership of the corresponding private key — a one-time handshake
-3. Trust is cached to disk as `l8-trust/{domain}.json` — the handshake never runs again for that domain
-4. Every delivery carries `X-L8-Signature` headers, verified locally with a single Ed25519 call — no database lookup, no round-trip to any authority, microseconds
-
-Trust stays deliberately pairwise, not transitive, by design. For better security and less latency than a shared-secret scheme, see the [L8 spec](https://rjpruitt16.github.io/l8-protocol/) for the full protocol rationale.
-
-Set `L8_PRIVATE_KEY` (base64 Ed25519 private key) for a stable identity across restarts, or let Aquifer auto-generate one on first start. Delete `l8-trust/{domain}.json` to revoke trust with a domain — the handshake re-runs on next delivery.
-
-**Aquifer exposes:**
-
-| Endpoint | Purpose |
-|---|---|
-| `GET /.well-known/l8` | Aquifer's public key and capabilities — receivers discover Aquifer here |
-| `POST /l8/challenge` | Handles incoming challenges from receivers verifying Aquifer's identity |
-| `GET /l8-spec` | The full L8 protocol spec, served locally for an agent/script with only network access to this instance |
-
-Current protocol version `0.1`, advertised in `/.well-known/l8` and `GET /health` — the same canonical spec ezthrottle-local follows. A complete reference receiver implementation and end-to-end tests are in `tests/l8_receiver.py` and `tests/test_l8.py`.
-
-</details>
+The full protocol rationale, wire format, and a reference receiver implementation live at the **[L8 spec](https://rjpruitt16.github.io/l8-protocol/)** — also served locally at `GET /l8-spec` for an agent/script with only network access to this instance. Set `L8_PRIVATE_KEY` for a stable identity across restarts, or let Aquifer auto-generate one on first start.
 
 ---
 
@@ -502,64 +297,9 @@ Durable queue, automatic crash recovery, panic isolation per job — see [benchm
 
 ## Drain mode
 
-**Off by default**, opt-in for a specific deployment pattern: instances get handed to a tenant, absorb and drain their burst, then get freed for reassignment to a different tenant. A normal single-instance or statically-partitioned deployment is completely unaffected unless you turn this on.
+**Off by default**, opt-in for a specific deployment pattern: instances get handed to a tenant, absorb and drain their burst, then get freed for reassignment to a different tenant. A normal single-instance or statically-partitioned deployment is completely unaffected unless you turn this on. When idle for `AQUIFER_DRAIN_TIMER_SECONDS`, an instance flushes its deduped idempotency ledger to a webhook and clears local state, moving through an `active` → `draining` → `unassigned` state machine visible via `GET /health`.
 
-<details>
-<summary>Full drain mode reference — state machine, env vars, webhook payload</summary>
-
-Aquifer's idempotency store exists to dedupe retries while a burst is actively draining, not to be a
-permanent system of record. When enabled, and an instance goes completely idle (no requests anywhere on
-the whole process, not just one tenant's queue) for `AQUIFER_DRAIN_TIMER_SECONDS`, Aquifer flushes
-everything it's deduped since the last flush to a webhook, and only on confirmed delivery, clears its
-local ledger — making the instance safe to hand to someone else.
-
-**Aquifer does not decide who gets a freed instance next**, and does not retain the ledger itself
-beyond the next flush. That orchestration — durable long-term storage, and assigning tenants to
-instances — is entirely up to whatever service you build to receive this webhook. Aquifer only detects
-idle and hands off what it has.
-
-**State machine**, visible via `GET /health` (`"drain": {"state": "..."}`, only present when enabled):
-
-| State | Meaning |
-|---|---|
-| `active` | At least one upstream has live work. Normal state, drain mode enabled or not. |
-| `draining` | Every upstream has gone idle, but either the drain timer hasn't elapsed yet or a flush attempt is in flight/being retried. Not yet safe to hand off. |
-| `unassigned` | The ledger was flushed (or there was nothing to flush) and local state is clear — safe to hand off. Reverts to `active` the instant new work arrives. |
-
-`unassigned` is a status label, not an access gate — Aquifer keeps accepting new jobs in every state.
-Nothing stops a job from landing on an instance mid-handoff; if your orchestrator needs a hard
-guarantee that never happens, enforce it on your own end before routing traffic there.
-
-**Env vars:**
-
-| Var | Default | Notes |
-|---|---|---|
-| `AQUIFER_DRAIN_ENABLED` | `false` | The real gate — the other two vars are only read when this is `true`. |
-| `AQUIFER_DRAIN_TIMER_SECONDS` | `45` | How long the whole instance must be idle before flushing. Deliberately separate from the unrelated 5-minute per-tenant-queue self-GC timer, which reclaims one queue's memory and has nothing to do with instance-wide handoff. |
-| `AQUIFER_DRAIN_WEBHOOK_URL` | *(none)* | Required if enabled — if unset, drain mode logs a warning and stays off rather than flushing with nowhere to send it. |
-
-**Webhook payload:**
-
-```json
-{
-  "event": "instance_idle",
-  "flushed_at": "2026-08-23T14:02:11Z",
-  "ledger": [
-    { "idempotent_key_hash": "3fa9c1...", "job_id": "a3f9...", "status": "completed" }
-  ]
-}
-```
-
-`idempotent_key_hash` is `sha256(user_id + ":" + idempotent_key)`, hex-encoded lowercase — the exact
-hash Aquifer already computes internally, never the plaintext key. A downstream consumer re-checking a
-key for a duplicate must hash it the same way.
-
-If you're also running [ezthrottle-local](https://github.com/rjpruitt16/ezthrottle-local), its drain
-mode hashes the identical way — both systems share one hash-key namespace for the same
-`(user_id, idempotent_key)` pair, so a downstream consumer can hash lookups the same way regardless of
-which system a given ledger entry came from.
-
-</details>
+See **[DRAIN_MODE.md](DRAIN_MODE.md)** for the full state machine, env vars, and webhook payload shape.
 
 ---
 
@@ -576,7 +316,7 @@ Scale by partitioning: run one instance per upstream domain or tenant, each owni
 
 This partitioning is static — decided at deploy time, fixed until you redeploy. [Drain mode](#drain-mode) is a dynamic alternative to the same problem: rather than every instance owning a fixed slice forever, an idle instance can flush what it's deduped and hand itself back for reassignment, letting an external orchestrator repartition on the fly as load shifts between tenants instead of you doing it by hand at deploy time. The two aren't mutually exclusive — a fleet can partition statically by upstream domain while individual instances within a partition cycle through tenants dynamically via drain mode.
 
-See the [security warning](#post-jobs) under `POST /jobs` — the same untrusted-caller risk applies regardless of deployment shape.
+See the [security warning](API.md#post-jobs) under `POST /jobs` — the same untrusted-caller risk applies regardless of deployment shape.
 
 </details>
 
