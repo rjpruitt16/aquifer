@@ -81,9 +81,16 @@ flyctl volumes create aquifer_data --size 1 --region iad
 flyctl deploy
 ```
 
+Cross-platform release binaries (linux/darwin, amd64/arm64) are attached to every [GitHub Release](https://github.com/rjpruitt16/aquifer/releases) — no Go toolchain required if you'd rather grab one directly.
+
 ---
 
 ## Configuration
+
+Rate limits are set per upstream hostname via a YAML file (`CONFIG_PATH`) and admission/runtime behavior via env vars.
+
+<details>
+<summary>Full config reference — YAML shape, env var table, admission defaults</summary>
 
 Set `CONFIG_PATH` to a YAML file to configure rate limits per upstream hostname:
 
@@ -121,11 +128,16 @@ upstreams:
 
 Body-size and DB-size admission are on by default; memory admission stays off until you set a limit, since a safe default depends on your own deployment, not Aquifer's disk usage. Retry-After backs off exponentially under sustained rejection (5s → 10s → 20s → 40s → capped at 60s, resets on the next allowed request). See [CONFIGURATION.md](CONFIGURATION.md) for the full rationale and [benchmark.md](benchmark.md) for the numbers behind these defaults.
 
+</details>
+
 ---
 
 ## Framework adapters
 
-Aquifer has a framework-neutral core and adapter front doors. The core owns idempotency, persistence, rate control, dispatch, SSE events, L8 signing, and webhook delivery. Adapters translate framework-specific calls into that core.
+Aquifer has a framework-neutral core — idempotency, persistence, rate control, dispatch, SSE events, L8 signing, webhook delivery — with pluggable front doors: MCP (stdio), plain HTTP, and A2A today.
+
+<details>
+<summary>Full adapter reference — interface, adapter table, MCP tools, A2A details, writing your own</summary>
 
 ```go
 type FrameworkAdapter interface {
@@ -219,13 +231,18 @@ type MetricsAdapter interface {
 
 Aquifer ships with `NoopMetricsAdapter`, so existing deployments do not change.
 
+</details>
+
 ---
 
 ## Dynamic Pacing
 
 **Terminology**: Aquifer is this implementation; Aqueduct is the implementation-agnostic header protocol (`X-Aqueduct-*`) it speaks, so other services could speak it too.
 
-The upstream controls pace at runtime via response headers. `X-Aqueduct-*` is the protocol namespace; `X-Aquifer-*` remains supported as a backward-compatible product alias.
+The upstream controls pace at runtime via response headers — `X-Aqueduct-Rps`, `X-Aqueduct-Max-Concurrent`, and per-tenant queue isolation — and Aquifer honors a lower pace immediately, recovering gradually once pressure clears. For backends that can't speak Aqueduct directly, Aquifer also reads the real open [ORCA](https://github.com/cncf/xds/blob/main/xds/data/orca/v3/orca_load_report.proto) standard as a fallback signal — vLLM and Triton/TensorRT-LLM both work today, verified against their actual source.
+
+<details>
+<summary>Full pacing reference — header table, account-queue isolation, ORCA details</summary>
 
 | Header (preferred)          | Alias                        | Effect                                  |
 |------------------------------|-------------------------------|------------------------------------------|
@@ -241,11 +258,20 @@ A backend can lower RPS at any time via these headers when it's under pressure; 
 
 Use the pacing headers for intentional backpressure. A `5xx` response is treated as a failed dispatch attempt and, for pool members, lowers that member's reputation. If a service is alive but overloaded, prefer `429` and/or `X-Aqueduct-Rps` / `X-Aqueduct-Max-Concurrent` so Aquifer slows down without interpreting the member as broken.
 
-**ORCA fallback for backends that can't speak Aqueduct directly.** Some backends already report load in a different, real open standard — [ORCA](https://github.com/cncf/xds/blob/main/xds/data/orca/v3/orca_load_report.proto) (Open Request Cost Aggregation), the gRPC/Envoy ecosystem's convention for backends to report utilization. vLLM supports this natively over plain HTTP: Aquifer sends `endpoint-load-metrics-format: TEXT` on every dispatch (the request-side opt-in current vLLM actually requires — there's no server startup flag for this), and a vLLM backend that understands it replies with an `endpoint-load-metrics` header carrying a `kv_cache_usage_perc` utilization fraction. If a response carries no `X-Aqueduct-Rps`/`X-Aquifer-Rps`, Aquifer reads this header as a fallback and paces down as KV-cache usage rises: full configured rate below 70%, 2 RPS at 70-90%, 0.5 RPS at 90-97%, 0.25 RPS above that — never dropping to zero, same pacing-down-gracefully philosophy as everywhere else. An explicit `X-Aqueduct-Rps` always wins if present; this only fires when the backend hasn't opted into speaking Aqueduct's own headers.
+**ORCA fallback for backends that can't speak Aqueduct directly.** Some backends already report load in a different, real open standard — ORCA (Open Request Cost Aggregation), the gRPC/Envoy ecosystem's convention for backends to report utilization. Aquifer sends `endpoint-load-metrics-format: text` on every dispatch (the request-side opt-in both verified backends require — there's no server startup flag for this), and a backend that understands it replies with an `endpoint-load-metrics` header carrying a KV-cache utilization fraction. If a response carries no `X-Aqueduct-Rps`/`X-Aquifer-Rps`, Aquifer reads this header as a fallback and paces down as utilization rises: full configured rate below 70%, 2 RPS at 70-90%, 0.5 RPS at 90-97%, 0.25 RPS above that — never dropping to zero, same pacing-down-gracefully philosophy as everywhere else. An explicit `X-Aqueduct-Rps` always wins if present; this only fires when the backend hasn't opted into speaking Aqueduct's own headers.
+
+Two backends verified directly against their own source, not assumed: **vLLM** (`vllm/entrypoints/serve/utils/orca_metrics.py`, metric name `kv_cache_usage_perc`, case-insensitive opt-in) and **Triton/TensorRT-LLM** (`src/orca_http.cc`, metric name `kv_cache_utilization`, case-sensitive lowercase-only opt-in — Aquifer sends lowercase specifically so both work). Aquifer tries both known metric names, so whichever backend you're running, this works without any configuration.
+
+</details>
 
 ---
 
 ## API
+
+Full REST reference — `POST /jobs`, `GET /jobs/:id`, the SSE stream, `GET /health`, and webhook payload shapes.
+
+<details>
+<summary>Full API reference</summary>
 
 ### POST /jobs
 
@@ -335,15 +361,11 @@ curl -N http://localhost:8080/jobs/<id>/stream
 - A webhook receiver can slow Aquifer down with the same `X-Aqueduct-Rps` / `X-Aqueduct-Max-Concurrent` response headers a real upstream uses, instead of just getting hammered.
 - Delivery is crash-durable — a webhook still pending when the process restarts is recovered and retried, the same way a queued job is, rather than being lost with an in-memory retry loop.
 - Retries trigger on `5xx` responses (not every non-`2xx`), matching forward dispatch's own retry condition — up to 4 attempts, exponential backoff 1 s · 2 s · 4 s · 8 s.
-- L8 signing (below) still applies exactly as before — trust is established and delivery is signed the same way, just from inside the paced dispatch path instead of a separate one-shot retry loop.
+- L8 signing (see below) still applies exactly as before — trust is established and delivery is signed the same way, just from inside the paced dispatch path instead of a separate one-shot retry loop.
 
 Delivery is still at-least-once — see [Delivery semantics](#how-it-works) above. (Drain mode's own ledger-flush webhook is unaffected — it stays synchronous, confirming delivery before clearing the local idempotency ledger.)
 
----
-
-## Autoscaling
-
-Traditional load balancers and autoscalers rely on failure to start scaling — capacity only responds once something's already struggling. Aquifer treats resources as fluid, not fixed: it paces down as machines show strain and back up as capacity comes online, using the same signals it already reports on every response.
+### Autoscaling
 
 | Header                    | Value                                              |
 |---------------------------|----------------------------------------------------|
@@ -351,11 +373,18 @@ Traditional load balancers and autoscalers rely on failure to start scaling — 
 | `X-Aqueduct-Queue-Depth`  | Jobs waiting to be dispatched                      |
 | `X-Aqueduct-Flow-Rate`    | Current dispatch rate (RPS) for this queue         |
 
+Traditional load balancers and autoscalers rely on failure to start scaling — capacity only responds once something's already struggling. Aquifer treats resources as fluid, not fixed: it paces down as machines show strain and back up as capacity comes online, using the same signals it already reports on every response.
+
+</details>
+
 ---
 
 ## Agent-native load balancing
 
-Instead of dispatching to a fixed `url`, a job can target a named **pool** — a group of registered service instances Aquifer picks from at dispatch time. Useful when you have several interchangeable backends (or, e.g., a separate group of writers and a separate group of readers) instead of one fixed endpoint.
+Instead of dispatching to a fixed `url`, a job can target a named **pool** — a group of registered service instances Aquifer picks from at dispatch time, weighted by declared capacity and live reputation. Useful when you have several interchangeable backends instead of one fixed endpoint, and it grows or shrinks automatically as members register, degrade, or drop out — no need to reconfigure Aquifer as your fleet autoscales.
+
+<details>
+<summary>Full pool reference — registration, dispatch, reputation model, scenario harness</summary>
 
 **Registering a member:**
 
@@ -410,11 +439,16 @@ Pool state isn't shared across Aquifer instances — see [Deployment model](#dep
 
 `GET /health` reports every pool's current members, their declared capacity, and current reputation.
 
+</details>
+
 ---
 
 ## L8 Protocol — trustless webhook delivery
 
-Traditional webhook security shares an HMAC secret between sender and receiver, stored in a database on both sides — something that can be stolen, logged accidentally, or forgotten during rotation, letting anyone forge deliveries forever once it leaks. Aquifer implements **L8 v0.1**, a lightweight challenge-response protocol that replaces the shared secret with public key cryptography — there's no secret to steal from a database.
+Traditional webhook security shares an HMAC secret between sender and receiver, stored in a database on both sides — something that can be stolen, logged accidentally, or forgotten during rotation, letting anyone forge deliveries forever once it leaks. Aquifer implements **L8 v0.1**, a lightweight challenge-response protocol that replaces the shared secret with public key cryptography — there's no secret to steal from a database, and verification is a single local Ed25519 call, no round-trip to any authority.
+
+<details>
+<summary>Full L8 reference — handshake steps, endpoints, key management</summary>
 
 **How it works:**
 
@@ -437,9 +471,16 @@ Set `L8_PRIVATE_KEY` (base64 Ed25519 private key) for a stable identity across r
 
 Current protocol version `0.1`, advertised in `/.well-known/l8` and `GET /health` — the same canonical spec ezthrottle-local follows. A complete reference receiver implementation and end-to-end tests are in `tests/l8_receiver.py` and `tests/test_l8.py`.
 
+</details>
+
 ---
 
 ## Reliability
+
+Durable queue, automatic crash recovery, panic isolation per job — see [benchmark.md](benchmark.md) for the numbers behind these claims.
+
+<details>
+<summary>Full reliability reference — mechanisms, job TTLs</summary>
 
 - **Durable queue** — jobs persist to the configured storage backend on every write
 - **Crash recovery** — queued jobs re-dispatched automatically on restart
@@ -455,21 +496,22 @@ Current protocol version `0.1`, advertised in `/.well-known/l8` and `GET /health
 | `completed` | 30 min |
 | `failed`    | 2 h    |
 
+</details>
+
 ---
 
 ## Drain mode
 
-**Off by default.** A normal deployment (a single long-lived instance, or static domain/tenant
-partitioning as described below) is completely unaffected unless you explicitly turn this on — no
-background watchdog runs, no added overhead, nothing about default behavior changes.
+**Off by default**, opt-in for a specific deployment pattern: instances get handed to a tenant, absorb and drain their burst, then get freed for reassignment to a different tenant. A normal single-instance or statically-partitioned deployment is completely unaffected unless you turn this on.
+
+<details>
+<summary>Full drain mode reference — state machine, env vars, webhook payload</summary>
 
 Aquifer's idempotency store exists to dedupe retries while a burst is actively draining, not to be a
-permanent system of record. Drain mode is for a specific deployment pattern: instances get handed to a
-tenant, absorb and drain their burst, then get freed for reassignment to a different tenant. When
-enabled, and an instance goes completely idle (no requests anywhere on the whole process, not just one
-tenant's queue) for `AQUIFER_DRAIN_TIMER_SECONDS`, Aquifer flushes everything it's deduped since the
-last flush to a webhook, and only on confirmed delivery, clears its local ledger — making the instance
-safe to hand to someone else.
+permanent system of record. When enabled, and an instance goes completely idle (no requests anywhere on
+the whole process, not just one tenant's queue) for `AQUIFER_DRAIN_TIMER_SECONDS`, Aquifer flushes
+everything it's deduped since the last flush to a webhook, and only on confirmed delivery, clears its
+local ledger — making the instance safe to hand to someone else.
 
 **Aquifer does not decide who gets a freed instance next**, and does not retain the ledger itself
 beyond the next flush. That orchestration — durable long-term storage, and assigning tenants to
@@ -517,25 +559,28 @@ mode hashes the identical way — both systems share one hash-key namespace for 
 `(user_id, idempotent_key)` pair, so a downstream consumer can hash lookups the same way regardless of
 which system a given ledger entry came from.
 
+</details>
+
 ---
 
 ## Deployment model
 
 Aquifer runs four ways: as a **sidecar** alongside your app, as a **standalone service** multiple services point to, **embedded directly as a Go library** in your own process (see [Framework adapters](#framework-adapters)), or as an **extension behind a Gateway API proxy** like Envoy Gateway in Kubernetes — the proxy owns routing and TLS, Aquifer owns the queue behind it (see [examples/kubernetes](examples/kubernetes)). Each instance persists to its own SQLite volume — no external database or coordination service to run.
 
+People run Aquifer in front of things like: internal coding platforms (GitLab, Forgejo), CI runners, database read replicas, and MCP servers — anywhere a burst of agent or service traffic needs to hit something that has its own capacity limit.
+
+<details>
+<summary>Full deployment reference — partitioning, scaling, security note</summary>
+
 Scale by partitioning: run one instance per upstream domain or tenant, each owning a distinct key space, and total throughput scales with instance count. Multiple instances against the *same* upstream without partitioning multiplies your request rate against it instead — the one setup to avoid. The same applies to pools: a given `pool_id` should belong to exactly one instance, since pool state isn't shared across instances.
 
 This partitioning is static — decided at deploy time, fixed until you redeploy. [Drain mode](#drain-mode) is a dynamic alternative to the same problem: rather than every instance owning a fixed slice forever, an idle instance can flush what it's deduped and hand itself back for reassignment, letting an external orchestrator repartition on the fly as load shifts between tenants instead of you doing it by hand at deploy time. The two aren't mutually exclusive — a fleet can partition statically by upstream domain while individual instances within a partition cycle through tenants dynamically via drain mode.
 
-People run Aquifer in front of things like: internal coding platforms (GitLab, Forgejo), CI runners, database read replicas, and MCP servers — anywhere a burst of agent or service traffic needs to hit something that has its own capacity limit.
-
 See the [security warning](#post-jobs) under `POST /jobs` — the same untrusted-caller risk applies regardless of deployment shape.
 
----
+</details>
 
-## Choosing a machine size
-
-Earlier benchmarks hit an artificial ~200 req/s ceiling caused by a serialized SQLite connection; that bottleneck is fixed. See [benchmark.md](benchmark.md#7-capacity-and-drain-time) for current throughput, capacity by machine size, and the benchmark methodology.
+**Choosing a machine size:** see [benchmark.md](benchmark.md#7-capacity-and-drain-time) for current throughput, capacity by machine size, and the benchmark methodology.
 
 ---
 
