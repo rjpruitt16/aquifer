@@ -2,19 +2,18 @@
 
 **Increase your rate limit without DDoSing your backend.**
 
-Aquifer is a self-hosted agent-native load balancer and traffic coordination layer for agent workloads. It absorbs bursts into a durable queue, dispatches at a controlled rate, and spreads traffic across a pool of registered backend instances. Upstreams can dynamically slow Aquifer down with `X-Aqueduct-*` response headers, so an overloaded service can shed pressure before it starts returning 429s.
+Distributed agents call tools and APIs in bursts. Your backend gets overwhelmed on inbound. Your app gets 429s on outbound. One slow dependency takes everything else down with it — and the retries agents fire off while they wait only make the pile-up worse.
+
+That's the pattern behind two things I've written:
+
+- [Eliminate GPU Waste by Cutting the Retry Tax](https://rahmipruitt.me/content/gpu-retry-tax/)
+- [GitHub Outages Show the Limits of Reactive Scaling](https://rahmipruitt.me/content/github-outage-reactive-scaling/)
+
+Aquifer gives those agents a coordination layer: a self-hosted load balancer that absorbs the burst, queues requests durably (SQLite by default, or Pebble — see below), and releases them at a rate you configure — or a slower one, if the destination service asks for it.
 
 Exposed through pluggable adapters — an MCP server for agent tool-calling, a plain HTTP API, or an A2A (Agent2Agent protocol) agent — with cryptographic agent identity via the L8 protocol for trustless webhook delivery.
 
 **Benchmarked:** 10x traffic spikes absorbed with zero failures, 30/30 jobs surviving a `kill -9` mid-drain, and clean `429` admission shedding under sustained overload — including a real GPU under load, where the ORCA fallback signal cut peak backend queue depth from 449 to 8 waiting requests. See [benchmark.md](benchmark.md) for throughput ceilings, crash recovery, memory behavior, capacity by machine size, and the [GPU/vLLM run](benchmark.md#9-gpu-inference-and-the-retry-tax-runpodvllm).
-
----
-
-## The problem
-
-Distributed agents call tools and APIs in bursts. Your backend gets overwhelmed on inbound. Your app gets 429s on outbound. One slow dependency takes everything else down with it.
-
-Aquifer gives those agents a coordination layer. It absorbs the burst, queues requests durably (SQLite by default, or Pebble — see below), and releases them at the rate you configure. The destination service can ask for a slower pace, and Aquifer honors whichever limit is lower.
 
 ---
 
