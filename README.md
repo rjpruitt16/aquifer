@@ -1,4 +1,4 @@
-# Aquifer — MCP Traffic Framework
+# Aquifer — Agent Traffic Framework
 
 **Increase your rate limit without DDoSing your backend.**
 
