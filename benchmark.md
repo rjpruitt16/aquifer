@@ -195,6 +195,67 @@ Hitting vLLM directly at 40 req/s doesn't fail — vLLM queues everything intern
 
 ---
 
+## 10. GPU retry tax, measured in tokens (RunPod/vLLM)
+
+Section 9 above measures queue depth and latency. It doesn't measure the thing the retry-tax thesis
+actually claims: that a caller giving up and retrying makes the GPU do real, wasted generation work.
+This section closes that gap with two new numbers, computed from vLLM's own `/metrics`
+(`generation_tokens_total`) and a client harness that behaves like a real caller — times out and
+retries instead of waiting patiently forever (`benchmark/retry_tax_harness.py`,
+`benchmark/analyze_retry_tax.py`).
+
+**raw tokens/sec** — everything the GPU actually generated (ground truth, from vLLM's own counter),
+including generations for requests whose caller already gave up and retried.
+**useful tokens/sec** — tokens that actually reached a caller who was still listening.
+**wasted = raw − useful.** This is the number that proves or kills the "GPU waste" claim; raw
+throughput alone can't, since a GPU generating duplicates is still just as busy.
+
+Same instance as section 9 (RunPod RTX PRO 4500 Blackwell, `Qwen/Qwen2.5-1.5B-Instruct`,
+`--max-num-seqs 48`, 512MB KV-cache cap), offered load ramped 20 → 300 req/s over 60s — aggressive
+enough to actually saturate this GPU, unlike section 9's fixed 40 req/s:
+
+| | Direct, retrying client (5s timeout, 3 retries) | Through Aquifer, misconfigured | Through Aquifer, concurrency capped at vLLM's real limit |
+|---|---|---|---|
+| Logical requests | 9,537 | 9,669 | 9,585 |
+| Success rate | 0.9% | 1.5% | 25.2% |
+| **Wasted generation (raw − useful)** | **96.5%** | 95.5% | **22.0%** |
+| vLLM's own queue depth (peak) | 18,079 | 17,068 | **0** |
+
+Hitting vLLM directly with a client that actually retries (unlike section 9's patient client) is close
+to a worst case: 96.5% of everything the GPU generated was thrown away, spent on attempts whose caller
+had already given up and resubmitted. The GPU is fully busy the entire time — that busyness is exactly
+the trap: raw throughput alone would make this look fine.
+
+**The "misconfigured" column is a real finding, not a discarded mistake.** It came from setting
+Aquifer's static concurrency ceiling (80) above vLLM's actual capacity (48), on the assumption that the
+ORCA fallback (section 9) would catch the difference automatically the way it did there. It didn't:
+`kv_cache_usage_perc` held steady at 0.46 for the whole run, well under the 0.70 threshold that
+triggers ORCA pacing — because at `--max-num-seqs 48`, each of the (at most) 48 concurrently-running
+300-token sequences never pushed the 512MB KV-cache budget past 46% utilization. **The bottleneck here
+is vLLM's scheduler slot limit, not KV-cache memory** — and ORCA's fallback signal specifically watches
+memory pressure. A backend saturated on concurrency rather than memory can be fully maxed out while
+`kv_cache_usage_perc` stays quiet. This appears to sit in tension with section 9's own "does ORCA
+engage" test, which did see `kv_cache_usage_perc` oscillate up to 79% and pace down correctly — the
+likely difference is load shape: section 9's test held a constant 60 req/s for 40s, giving in-flight
+sequences time to run deep into their 300-token generation (accumulating more KV-cache per sequence
+before finishing); this section's fast ramp to 300 req/s saturates the 48-slot ceiling before
+individual sequences get that far, so cache pressure never builds the same way. Both are real
+measurements of the same system under genuinely different load shapes, not a contradiction to
+paper over.
+
+Manually lowering Aquifer's concurrency ceiling to match vLLM's real limit (45, just under 48) fixed
+it: wasted generation dropped to 22.0%, and vLLM's own queue depth never left zero for the whole run —
+Aquifer's durable queue absorbed the backlog instead. The gap this leaves: nothing today lets Aquifer
+discover that real limit on its own. vLLM doesn't currently publish `max_num_seqs` on any endpoint or
+header — confirmed directly against vLLM's source (`vllm/v1/utils.py`); the only place that value
+appears is an internal, non-network anonymous usage-telemetry payload, not anything a client can query.
+The one thing that *is* already exposed and live (`vllm:num_requests_running`, scraped every second by
+the harness above) is the occupied-slot count, not the ceiling itself — inferring the real ceiling
+would mean watching that gauge plateau under sustained load, an empirical detection, not a value read
+off a header. Filed as a follow-up rather than built here: [rjpruitt16/aquifer#11](https://github.com/rjpruitt16/aquifer/issues/11).
+
+---
+
 ## Reproducing these results
 
 ```bash
@@ -212,6 +273,15 @@ cd benchmark
 # GPU retry tax -- needs a real vLLM instance (RunPod or otherwise),
 # not part of the regular pass either:
 ./gpu_retry_tax.sh <vllm-url> <aquifer-url> 40 40 300
+
+# GPU retry tax measured in tokens -- open-loop ramp with a retrying client,
+# raw/useful/wasted tokens computed from vLLM's own /metrics. Needs
+# `pip install -r requirements.txt` first.
+python3 retry_tax_harness.py --mode direct --vllm-url <vllm-url> \
+  --start-rate 20 --end-rate 300 --ramp-seconds 60 --client-timeout 5 --max-retries 3 --max-tokens 300
+python3 retry_tax_harness.py --mode aquifer --vllm-url <vllm-url> --aquifer-url <aquifer-url> \
+  --start-rate 20 --end-rate 300 --ramp-seconds 60 --max-tokens 300
+python3 analyze_retry_tax.py --events <events.jsonl> --metrics <metrics.jsonl>
 ```
 
 For Pebble instead of SQLite: deploy with `-e AQUIFER_STORE_BACKEND=pebble -e DB_PATH=/data/pebble` and run the same scripts unchanged.
