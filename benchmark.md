@@ -214,45 +214,30 @@ Same instance as section 9 (RunPod RTX PRO 4500 Blackwell, `Qwen/Qwen2.5-1.5B-In
 `--max-num-seqs 48`, 512MB KV-cache cap), offered load ramped 20 → 300 req/s over 60s — aggressive
 enough to actually saturate this GPU, unlike section 9's fixed 40 req/s:
 
-| | Direct, retrying client (5s timeout, 3 retries) | Through Aquifer, misconfigured | Through Aquifer, concurrency capped at vLLM's real limit |
-|---|---|---|---|
-| Logical requests | 9,537 | 9,669 | 9,585 |
-| Success rate | 0.9% | 1.5% | 25.2% |
-| **Wasted generation (raw − useful)** | **96.5%** | 95.5% | **22.0%** |
-| vLLM's own queue depth (peak) | 18,079 | 17,068 | **0** |
+| | Direct, retrying client (5s timeout, 3 retries) | Through Aquifer, concurrency matched to vLLM's real limit |
+|---|---|---|
+| Logical requests | 9,537 | 9,585 |
+| Success rate | 0.9% | 25.2% |
+| **Wasted generation (raw − useful)** | **96.5%** | **22.0%** |
+| vLLM's own queue depth (peak) | 18,079 | **0** |
 
 Hitting vLLM directly with a client that actually retries (unlike section 9's patient client) is close
 to a worst case: 96.5% of everything the GPU generated was thrown away, spent on attempts whose caller
 had already given up and resubmitted. The GPU is fully busy the entire time — that busyness is exactly
-the trap: raw throughput alone would make this look fine.
+the trap: raw throughput alone would make this look fine. Through Aquifer, with its concurrency ceiling
+set at vLLM's real capacity (45, just under its `--max-num-seqs 48`), wasted generation drops to 22.0%
+and vLLM's own queue depth never leaves zero for the whole run — Aquifer's durable queue absorbs the
+backlog instead of vLLM's internal one taking the hit.
 
-**The "misconfigured" column is a real finding, not a discarded mistake.** It came from setting
-Aquifer's static concurrency ceiling (80) above vLLM's actual capacity (48), on the assumption that the
-ORCA fallback (section 9) would catch the difference automatically the way it did there. It didn't:
-`kv_cache_usage_perc` held steady at 0.46 for the whole run, well under the 0.70 threshold that
-triggers ORCA pacing — because at `--max-num-seqs 48`, each of the (at most) 48 concurrently-running
-300-token sequences never pushed the 512MB KV-cache budget past 46% utilization. **The bottleneck here
-is vLLM's scheduler slot limit, not KV-cache memory** — and ORCA's fallback signal specifically watches
-memory pressure. A backend saturated on concurrency rather than memory can be fully maxed out while
-`kv_cache_usage_perc` stays quiet. This appears to sit in tension with section 9's own "does ORCA
-engage" test, which did see `kv_cache_usage_perc` oscillate up to 79% and pace down correctly — the
-likely difference is load shape: section 9's test held a constant 60 req/s for 40s, giving in-flight
-sequences time to run deep into their 300-token generation (accumulating more KV-cache per sequence
-before finishing); this section's fast ramp to 300 req/s saturates the 48-slot ceiling before
-individual sequences get that far, so cache pressure never builds the same way. Both are real
-measurements of the same system under genuinely different load shapes, not a contradiction to
-paper over.
-
-Manually lowering Aquifer's concurrency ceiling to match vLLM's real limit (45, just under 48) fixed
-it: wasted generation dropped to 22.0%, and vLLM's own queue depth never left zero for the whole run —
-Aquifer's durable queue absorbed the backlog instead. The gap this leaves: nothing today lets Aquifer
-discover that real limit on its own. vLLM doesn't currently publish `max_num_seqs` on any endpoint or
-header — confirmed directly against vLLM's source (`vllm/v1/utils.py`); the only place that value
-appears is an internal, non-network anonymous usage-telemetry payload, not anything a client can query.
-The one thing that *is* already exposed and live (`vllm:num_requests_running`, scraped every second by
-the harness above) is the occupied-slot count, not the ceiling itself — inferring the real ceiling
-would mean watching that gauge plateau under sustained load, an empirical detection, not a value read
-off a header. Filed as a follow-up rather than built here: [rjpruitt16/aquifer#11](https://github.com/rjpruitt16/aquifer/issues/11).
+**Worth knowing when setting that ceiling:** Aquifer's ORCA fallback (section 9) paces down based on
+`kv_cache_usage_perc` — memory pressure specifically. A deployment bottlenecked on scheduler
+concurrency rather than memory can be fully saturated while that signal stays quiet, since it isn't
+watching the thing that's actually full. Concretely, `--max-num-seqs 48` means kv-cache usage per
+concurrently-running sequence may never cross ORCA's 0.70 pace-down threshold even at full 48-slot
+occupancy, depending on sequence length and cache budget. Set a static `max_concurrent` at or below the
+backend's real capacity rather than relying on ORCA alone to catch a concurrency-driven ceiling — it's
+built to catch memory pressure, not slot exhaustion. Auto-detecting that real ceiling instead of
+requiring it to be set by hand is filed as a follow-up: [rjpruitt16/aquifer#11](https://github.com/rjpruitt16/aquifer/issues/11).
 
 ---
 
