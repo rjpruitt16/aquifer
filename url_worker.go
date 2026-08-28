@@ -48,6 +48,25 @@ func (w *URLWorker) TripBreaker(cooldown time.Duration) {
 	w.breakerUntil = time.Now().Add(cooldown)
 }
 
+// QueueActive reports whether any of this domain's account queues currently
+// has real backlog (queued or in-flight work). Distinct from BreakerOpen: a
+// breaker cooldown is a fixed clock that can expire while a real backlog is
+// still draining, letting proxy mode resume direct dispatch against an
+// upstream that's still catching up from the very overload that tripped the
+// breaker. QueueActive self-corrects instead — it stays true for exactly as
+// long as there's real work in flight, independent of any timer, and goes
+// false the instant the backlog is actually empty.
+func (w *URLWorker) QueueActive() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, q := range w.queues {
+		if q.Active() {
+			return true
+		}
+	}
+	return false
+}
+
 func NewURLWorker(domain string, rps float64, maxConc int, pool *Pool, store JobStore, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, enqueueWebhook webhookEnqueuer, onIdle func(string)) *URLWorker {
 	w := &URLWorker{
 		domain:         domain,

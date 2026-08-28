@@ -61,10 +61,20 @@ type AccountQueue struct {
 	metrics        MetricsAdapter
 	enqueueWebhook webhookEnqueuer
 	currentRPS     atomic.Int64 // stored as rps * 100
+	backlog        atomic.Int32 // len(queue) + inFlight, live — see run()
 }
 
 func (q *AccountQueue) RPS() float64 {
 	return float64(q.currentRPS.Load()) / 100
+}
+
+// Active reports whether this queue currently has real backlog (queued or
+// in-flight work) — used by proxy mode to decide whether a domain should
+// keep routing through the durable queue even after its circuit breaker's
+// cooldown has elapsed, since a cooldown timer alone doesn't know whether
+// the backlog it caused has actually finished draining yet.
+func (q *AccountQueue) Active() bool {
+	return q.backlog.Load() > 0
 }
 
 // Throttle pushes an external rate adjustment into the queue's dispatch
@@ -187,6 +197,7 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int) {
 			queue = queue[1:]
 			q.metrics.QueueDepth(q.upstream, len(queue))
 			inFlight++
+			q.backlog.Store(int32(len(queue) + inFlight))
 			lastRequestAt = time.Now()
 
 			q.store.MarkInFlight(job.ID)
@@ -222,10 +233,12 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int) {
 		case job := <-q.cmds:
 			queue = append(queue, job)
 			q.metrics.QueueDepth(q.upstream, len(queue))
+			q.backlog.Store(int32(len(queue) + inFlight))
 			idle.Reset(5 * time.Minute)
 
 		case msg := <-q.done:
 			inFlight--
+			q.backlog.Store(int32(len(queue) + inFlight))
 			prevRPS := rps
 			if msg.rps != nil {
 				rps = math.Max(math.Min(*msg.rps, configuredRPS), minRPS)

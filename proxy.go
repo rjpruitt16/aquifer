@@ -57,7 +57,7 @@ func (a *Aquifer) AttemptDirect(ctx context.Context, req JobRequest, timeout tim
 	}
 
 	worker := a.registry.workerFor(job)
-	if worker.BreakerOpen() {
+	if worker.BreakerOpen() || worker.QueueActive() {
 		return ProxyOutcome{Job: job}
 	}
 
@@ -74,6 +74,16 @@ func (a *Aquifer) AttemptDirect(ctx context.Context, req JobRequest, timeout tim
 	if overloadCooldown, overloaded := isOverloadSignal(resp); overloaded {
 		worker.TripBreaker(overloadCooldown)
 		return ProxyOutcome{Job: job}
+	}
+
+	// The upstream can proactively ask to be routed through the durable
+	// queue going forward — X-Aqueduct-Queue-Active: true — even on an
+	// otherwise-healthy response, e.g. "I'm nearing capacity, stop firing
+	// directly at me." Unlike isOverloadSignal, this response is still a
+	// real, valid answer already in hand: it's relayed to the caller as
+	// normal below, only future requests to this domain start queuing.
+	if pacingHeader(resp.Header, "Queue-Active") == "true" {
+		worker.TripBreaker(breakerCooldown(resp.Header))
 	}
 
 	body, _ := io.ReadAll(resp.Body)

@@ -27,7 +27,9 @@ Edge-gateway mode — see [Use cases](README.md#use-cases) for the deployment sh
 - **Succeeds directly** (2xx, no overload signal): the real upstream's status, headers, and body are relayed back verbatim, on this same connection. The queue is never touched.
 - **Fails or the upstream signals overload** (timeout, 5xx, `429`, or an ORCA fallback threshold): falls back to the exact same durable-queue-and-delivery path `POST /jobs` uses — the connection seamlessly becomes the same SSE stream `GET /jobs/:id/stream` provides, rather than requiring a second call.
 
-A domain that trips an overload signal has its direct attempts skipped entirely for a cooldown window — anchored to the upstream's own `Retry-After` header when it sends one (× a configurable safety multiplier, default 3), so a sustained outage doesn't cost every subsequent request the latency of a doomed direct attempt. Once the cooldown elapses, the next request is itself a real probe against the live upstream.
+A domain that trips an overload signal has its direct attempts skipped entirely — anchored to the upstream's own `Retry-After` header when it sends one (× a configurable safety multiplier, default 3) as the minimum cooldown, but direct attempts stay skipped for as long as the domain's queue actually has real backlog, even past that cooldown — a fixed timer alone doesn't know whether the traffic it caused has finished draining. Once both the cooldown has elapsed *and* the queue is genuinely empty, the next request is itself a real probe against the live upstream.
+
+The upstream can also proactively request this itself, on an otherwise-healthy response: `X-Aqueduct-Queue-Active: true` (or the product alias `X-Aquifer-Queue-Active`) trips the same breaker for future requests to that domain — without discarding the response that already came back. Useful for "I'm nearing capacity, stop firing directly at me" ahead of an actual `429`/`5xx`.
 
 Pool-routed jobs (`pool_id` instead of `url`) always fall straight to queue+stream — there's no single canonical upstream to try directly.
 

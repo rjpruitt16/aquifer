@@ -201,6 +201,86 @@ func TestBreakerOpenSkipsDirectAttemptEntirely(t *testing.T) {
 	}
 }
 
+func TestAttemptDirectHonorsQueueActiveHeaderWithoutDiscardingTheResponse(t *testing.T) {
+	app, _ := testAquiferWithLimits(t, AdmissionLimits{})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Aqueduct-Queue-Active", "true")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("still a real answer"))
+	}))
+	defer srv.Close()
+
+	req := proxyJobRequest("user-1", "key-queue-active", srv.URL)
+	outcome := app.AttemptDirect(context.Background(), req, 2*time.Second)
+
+	if !outcome.Direct {
+		t.Fatalf("expected the successful response to still be relayed directly, got fallback: %+v", outcome)
+	}
+	if outcome.Status != http.StatusOK || string(outcome.Body) != "still a real answer" {
+		t.Fatalf("expected the real response relayed verbatim, got status=%d body=%q", outcome.Status, outcome.Body)
+	}
+
+	worker := app.registry.workerFor(outcome.Job)
+	if !worker.BreakerOpen() {
+		t.Fatalf("expected X-Aqueduct-Queue-Active: true to trip the breaker for future requests")
+	}
+}
+
+func TestAttemptDirectFallsBackWhileQueueHasBacklogEvenAfterBreakerCooldownExpires(t *testing.T) {
+	t.Setenv("AQUIFER_PROXY_BREAKER_DEFAULT_COOLDOWN_SECONDS", "1")
+	app, _ := testAquiferWithLimits(t, AdmissionLimits{})
+
+	block := make(chan struct{})
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hits.Add(1) == 1 {
+			w.WriteHeader(http.StatusTooManyRequests) // trips the breaker
+			return
+		}
+		<-block // the dispatched fallback job's own request blocks here
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	defer close(block)
+
+	first := app.AttemptDirect(context.Background(), proxyJobRequest("user-1", "key-backlog-a", srv.URL), 2*time.Second)
+	if first.Direct {
+		t.Fatalf("expected first attempt to fall back and trip the breaker")
+	}
+	// Simulate what the real HTTP handler (server.go's proxyJob) does on
+	// fallback: actually enqueue the job, so the domain's AccountQueue has
+	// real backlog, not just a persisted-but-untouched job record.
+	app.Dispatch(first.Job, "")
+
+	worker := app.registry.workerFor(first.Job)
+	deadline := time.Now().Add(2 * time.Second)
+	for !worker.QueueActive() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !worker.QueueActive() {
+		t.Fatalf("expected the dispatched fallback job to show up as queue backlog")
+	}
+
+	time.Sleep(1100 * time.Millisecond) // let the breaker cooldown elapse
+	if worker.BreakerOpen() {
+		t.Fatalf("test setup: expected the breaker cooldown to have elapsed by now")
+	}
+
+	// The breaker itself is closed now, but the domain still has a real
+	// backlog draining (the blocked in-flight request from the first
+	// fallback) -- a third request should still fall back, not attempt
+	// direct, since the cooldown expiring doesn't mean the backlog it
+	// caused has actually finished.
+	third := app.AttemptDirect(context.Background(), proxyJobRequest("user-1", "key-backlog-b", srv.URL), 2*time.Second)
+	if third.Direct {
+		t.Fatalf("expected fallback while queue still has backlog, even though the breaker cooldown elapsed")
+	}
+	if hits.Load() != 2 {
+		t.Fatalf("expected no direct attempt against the upstream while backlog is active, got %d hits", hits.Load())
+	}
+}
+
 func TestAttemptDirectDuplicateSkipsSecondDirectAttempt(t *testing.T) {
 	app, _ := testAquiferWithLimits(t, AdmissionLimits{})
 
