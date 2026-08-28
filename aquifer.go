@@ -48,16 +48,35 @@ func (a *Aquifer) RegisterPoolMember(poolID, memberID, address string, declaredR
 }
 
 func (a *Aquifer) Enqueue(req JobRequest) (EnqueueResult, error) {
-	if msg := req.Validate(); msg != "" {
-		return EnqueueResult{}, errors.New(msg)
+	job, duplicate, err := a.PrepareJob(req)
+	if err != nil {
+		return EnqueueResult{}, err
+	}
+	if duplicate != nil {
+		return *duplicate, nil
 	}
 
-	job := NewJob(&req)
+	a.Dispatch(job, req.AccountQueueMode)
+	return EnqueueResult{JobID: job.ID, Status: StatusQueued}, nil
+}
+
+// PrepareJob validates, persists (idempotency-checked), and admission-checks
+// a request without dispatching it — Enqueue's first two steps, exposed
+// separately so a caller (proxy mode) can attempt a direct dispatch in
+// between persistence and the durable-queue handoff. Returns a non-nil
+// duplicate result if this idempotent_key already exists; job is nil in
+// that case. Behavior is otherwise identical to Enqueue's first half.
+func (a *Aquifer) PrepareJob(req JobRequest) (job *Job, duplicate *EnqueueResult, err error) {
+	if msg := req.Validate(); msg != "" {
+		return nil, nil, errors.New(msg)
+	}
+
+	job = NewJob(&req)
 
 	// Idempotency check comes first: a retried job that already exists must
 	// still succeed even while the system is over an admission limit.
 	if existingID, isDuplicate := a.store.CheckOrInsert(job); isDuplicate {
-		return EnqueueResult{
+		return nil, &EnqueueResult{
 			JobID:     existingID,
 			Status:    StatusQueued,
 			Duplicate: true,
@@ -70,12 +89,18 @@ func (a *Aquifer) Enqueue(req JobRequest) (EnqueueResult, error) {
 	if a.admission != nil {
 		if decision := a.admission.Check(); !decision.Allowed {
 			a.store.DeleteJob(job.ID)
-			return EnqueueResult{}, &AdmissionRejectedError{Decision: decision}
+			return nil, nil, &AdmissionRejectedError{Decision: decision}
 		}
 	}
 
-	a.registry.Enqueue(job, req.AccountQueueMode)
-	return EnqueueResult{JobID: job.ID, Status: StatusQueued}, nil
+	return job, nil, nil
+}
+
+// Dispatch hands an already-persisted, admission-approved job to the
+// durable paced queue — Enqueue's last step, exposed for a caller (proxy
+// mode) that already ran PrepareJob itself.
+func (a *Aquifer) Dispatch(job *Job, accountQueueHeader string) {
+	a.registry.Enqueue(job, accountQueueHeader)
 }
 
 // AdmissionSnapshot reports current admission pressure for /health. Returns

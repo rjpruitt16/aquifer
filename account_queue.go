@@ -1,6 +1,7 @@
 package aquifer
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -280,7 +281,7 @@ func execute(job *Job, dispatchURL, upstream string, store JobStore, broker *Bro
 		}
 
 		counts := store.Counts()
-		resp, err = makeRequest(job, currentURL, counts.TotalJobs, counts.QueueDepth, flowRate, l8)
+		resp, err = makeRequest(context.Background(), job, currentURL, counts.TotalJobs, counts.QueueDepth, flowRate, l8)
 		if err != nil {
 			reason = err.Error()
 			if pool != nil && currentMember != nil {
@@ -402,13 +403,13 @@ func pacingHeader(headers http.Header, name string) string {
 	return headers.Get("X-Aquifer-" + name)
 }
 
-func makeRequest(job *Job, dispatchURL string, totalJobs, queueDepth int64, flowRate float64, l8 *L8Registry) (*http.Response, error) {
+func makeRequest(ctx context.Context, job *Job, dispatchURL string, totalJobs, queueDepth int64, flowRate float64, l8 *L8Registry) (*http.Response, error) {
 	var bodyReader io.Reader
 	if job.Body != "" {
 		bodyReader = strings.NewReader(job.Body)
 	}
 
-	req, err := http.NewRequest(job.Method, dispatchURL, bodyReader)
+	req, err := http.NewRequestWithContext(ctx, job.Method, dispatchURL, bodyReader)
 	if err != nil {
 		return nil, err
 	}

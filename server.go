@@ -50,6 +50,7 @@ func (a *HTTPAdapter) Start(ctx context.Context, aquifer *Aquifer) error {
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /jobs", s.createJob)
+	mux.HandleFunc("POST /proxy", s.proxyJob)
 	mux.HandleFunc("GET /jobs/{id}/stream", s.streamJob)
 	mux.HandleFunc("GET /jobs/{id}", s.getJob)
 	mux.HandleFunc("GET /health", s.health)
@@ -194,7 +195,15 @@ func (s *Server) streamJob(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "job not found", http.StatusNotFound)
 		return
 	}
+	s.streamEvents(w, r, job, events, unsubscribe)
+}
 
+// streamEvents is streamJob's actual event loop, extracted so proxy mode's
+// fallback path can reuse the identical SSE behavior on the same
+// connection ("automatically start streaming") instead of reimplementing
+// it. Writes catch-up events, then loops on the events channel, a 30s
+// keepalive, and request cancellation, exactly as streamJob always has.
+func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request, job *Job, events <-chan SSEEvent, unsubscribe func()) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		jsonError(w, "streaming not supported", http.StatusInternalServerError)
@@ -209,9 +218,9 @@ func (s *Server) streamJob(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 
 	// Catchup events for states already passed before client connected
-	writeSSE(w, "queued", map[string]any{"job_id": id, "status": "queued"})
+	writeSSE(w, "queued", map[string]any{"job_id": job.ID, "status": "queued"})
 	if job.Status == StatusInFlight {
-		writeSSE(w, "dispatching", map[string]any{"job_id": id})
+		writeSSE(w, "dispatching", map[string]any{"job_id": job.ID})
 	}
 	flusher.Flush()
 
@@ -239,6 +248,99 @@ func (s *Server) streamJob(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
+}
+
+// proxyJob is proxy mode's HTTP entry point: try the upstream directly and
+// synchronously; on success, relay its response verbatim; on failure,
+// overload, or an already-open circuit breaker, fall back to the same
+// durable-queue-and-SSE path createJob/streamJob always use, on this same
+// connection.
+func (s *Server) proxyJob(w http.ResponseWriter, r *http.Request) {
+	body := r.Body
+	if maxBytes := s.aquifer.MaxBodyBytes(); maxBytes > 0 {
+		body = http.MaxBytesReader(w, r.Body, maxBytes)
+	}
+
+	var req JobRequest
+	if err := json.NewDecoder(body).Decode(&req); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			jsonErrorFields(w, "request body too large", http.StatusRequestEntityTooLarge, map[string]any{
+				"limit_bytes": maxErr.Limit,
+			})
+			return
+		}
+		jsonError(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	req.AccountQueueMode = pacingHeader(r.Header, "Account-Queue")
+
+	outcome := s.aquifer.AttemptDirect(r.Context(), req, proxyDirectAttemptTimeout())
+
+	if outcome.Err != nil {
+		var admissionErr *AdmissionRejectedError
+		if errors.As(outcome.Err, &admissionErr) {
+			w.Header().Set("Retry-After", fmt.Sprintf("%d", s.aquifer.RetryAfterSeconds()))
+			jsonErrorFields(w, outcome.Err.Error(), http.StatusTooManyRequests, map[string]any{
+				"limit_reason": admissionErr.Decision.Reason,
+				"limit":        admissionErr.Decision.Limit,
+				"current":      admissionErr.Decision.Current,
+			})
+			return
+		}
+		jsonError(w, outcome.Err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if outcome.Duplicate {
+		s.streamExistingJob(w, r, outcome.ExistingJob)
+		return
+	}
+
+	if outcome.Direct {
+		for k, vs := range outcome.Header {
+			for _, v := range vs {
+				w.Header().Add(k, v)
+			}
+		}
+		w.WriteHeader(outcome.Status)
+		w.Write(outcome.Body)
+		return
+	}
+
+	// Fallback: subscribe before dispatching, so a fast completion can't
+	// publish before anyone's listening for it.
+	_, events, unsubscribe, err := s.aquifer.SubscribeJob(outcome.Job.ID)
+	if err != nil {
+		jsonError(w, "job not found", http.StatusNotFound)
+		return
+	}
+	s.aquifer.Dispatch(outcome.Job, req.AccountQueueMode)
+	s.streamEvents(w, r, outcome.Job, events, unsubscribe)
+}
+
+// streamExistingJob handles a proxy-mode request that turned out to be a
+// duplicate of one already in flight or already finished. Job never
+// persists its upstream response body past the transient SSE/webhook
+// payload (see Job), so a duplicate of an already-terminal job has no
+// cached response to replay — opening a stream for it would just keepalive
+// forever, since its completed/failed event already fired before this
+// request ever subscribed. Return its current status synchronously
+// instead; only a still-in-flight duplicate gets a real stream.
+func (s *Server) streamExistingJob(w http.ResponseWriter, r *http.Request, job *Job) {
+	if job.Status == StatusCompleted || job.Status == StatusFailed {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"job_id": job.ID, "status": job.Status, "duplicate": true,
+		})
+		return
+	}
+	_, events, unsubscribe, err := s.aquifer.SubscribeJob(job.ID)
+	if err != nil {
+		jsonError(w, "job not found", http.StatusNotFound)
+		return
+	}
+	s.streamEvents(w, r, job, events, unsubscribe)
 }
 
 func jsonError(w http.ResponseWriter, msg string, code int) {

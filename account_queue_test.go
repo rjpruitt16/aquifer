@@ -1,6 +1,7 @@
 package aquifer
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -21,7 +22,7 @@ func TestMakeRequestRequestsOrcaMetricsByDefault(t *testing.T) {
 	defer srv.Close()
 
 	job := &Job{Method: "POST"}
-	resp, err := makeRequest(job, srv.URL, 0, 0, 0, nil)
+	resp, err := makeRequest(context.Background(), job, srv.URL, 0, 0, 0, nil)
 	if err != nil {
 		t.Fatalf("makeRequest failed: %v", err)
 	}
@@ -44,7 +45,7 @@ func TestMakeRequestDoesNotOverrideExplicitOrcaHeader(t *testing.T) {
 		Method:  "POST",
 		Headers: map[string]string{orcaRequestHeaderName: "JSON"},
 	}
-	resp, err := makeRequest(job, srv.URL, 0, 0, 0, nil)
+	resp, err := makeRequest(context.Background(), job, srv.URL, 0, 0, 0, nil)
 	if err != nil {
 		t.Fatalf("makeRequest failed: %v", err)
 	}

@@ -99,6 +99,35 @@ func (r *Registry) Enqueue(job *Job, accountQueueHeader string) {
 	r.totalJobs.Add(1)
 	r.queueDepth.Add(1)
 
+	key, w := r.resolveWorkerLocked(job)
+
+	r.metrics.JobQueued(job.UserID, key)
+
+	if accountQueueHeader != "" {
+		w.handleAccountQueueHeader(accountQueueHeader)
+	}
+
+	w.Enqueue(job)
+	r.metrics.QueueDepth(key, int(r.queueDepth.Load()))
+}
+
+// workerFor resolves (creating if necessary) the URLWorker that would
+// handle this job's dispatch, without enqueueing anything onto it or
+// touching the queue-depth/metrics counters Enqueue updates. Used by proxy
+// mode's circuit breaker to check/trip breaker state before a job is ever
+// actually queued.
+func (r *Registry) workerFor(job *Job) *URLWorker {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, w := r.resolveWorkerLocked(job)
+	return w
+}
+
+// resolveWorkerLocked must be called with r.mu held. Returns the job's
+// routing key and its (possibly newly created) URLWorker — the exact
+// key/worker resolution Enqueue already did inline, now shared with
+// workerFor.
+func (r *Registry) resolveWorkerLocked(job *Job) (string, *URLWorker) {
 	var key string
 	var pool *Pool
 	var rc RateConfig
@@ -113,7 +142,6 @@ func (r *Registry) Enqueue(job *Job, accountQueueHeader string) {
 		rc = r.cfg.ForURL(job.URL)
 	}
 
-	r.metrics.JobQueued(job.UserID, key)
 	w, ok := r.workers[key]
 	if !ok {
 		w = NewURLWorker(key, rc.RPS, rc.MaxConcurrent, pool, r.store, r.broker, r.l8, r.metrics, r.EnqueueWebhook, func(k string) {
@@ -123,13 +151,7 @@ func (r *Registry) Enqueue(job *Job, accountQueueHeader string) {
 		})
 		r.workers[key] = w
 	}
-
-	if accountQueueHeader != "" {
-		w.handleAccountQueueHeader(accountQueueHeader)
-	}
-
-	w.Enqueue(job)
-	r.metrics.QueueDepth(key, int(r.queueDepth.Load()))
+	return key, w
 }
 
 // EnqueueWebhook queues a webhook delivery through the same domain-keyed

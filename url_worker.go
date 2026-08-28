@@ -24,6 +24,28 @@ type URLWorker struct {
 	metrics          MetricsAdapter
 	enqueueWebhook   webhookEnqueuer
 	onIdle           func(string)
+	breakerUntil     time.Time // zero value means the breaker is closed
+}
+
+// BreakerOpen reports whether proxy mode should skip a direct dispatch
+// attempt to this worker's domain entirely and fall straight back to the
+// durable queue — set by TripBreaker after an overload signal, cleared
+// automatically once the cooldown elapses.
+func (w *URLWorker) BreakerOpen() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return !w.breakerUntil.IsZero() && time.Now().Before(w.breakerUntil)
+}
+
+// TripBreaker opens the breaker for cooldown. No separate half-open state
+// is needed: once breakerUntil passes, BreakerOpen naturally returns false
+// again, so the next request after the cooldown is itself a real probe
+// against the live upstream — success leaves the breaker closed, a repeat
+// overload signal re-trips it via another TripBreaker call.
+func (w *URLWorker) TripBreaker(cooldown time.Duration) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.breakerUntil = time.Now().Add(cooldown)
 }
 
 func NewURLWorker(domain string, rps float64, maxConc int, pool *Pool, store JobStore, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, enqueueWebhook webhookEnqueuer, onIdle func(string)) *URLWorker {
