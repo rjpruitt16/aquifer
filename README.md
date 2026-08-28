@@ -1,4 +1,4 @@
-# Aquifer — Agent Traffic Framework
+# Aquifer — Load balancer for agentic workloads
 
 **Increase your rate limit without DDoSing your backend.**
 
@@ -26,13 +26,19 @@ agents / clients  →  POST /jobs to Aquifer  →  your backend (at controlled R
 ```
 Agents hammering your API over HTTP? Aquifer queues their requests and drains them to your backend at a pace it can handle. Your backend returns `X-Aqueduct-Rps` headers to signal how fast it wants traffic in real time.
 
-**Outbound — respect external APIs**
+**Outbound — a durable checkpoint in front of a rate-limited resource**
 ```
-your app  →  POST /jobs to Aquifer  →  OpenAI / Stripe / any API (at controlled RPS)
+your app  →  POST /jobs to Aquifer  →  database / CI runner / OpenAI / Stripe / any rate-limited API
 ```
-Calling a rate-limited upstream? Aquifer queues the calls and dispatches them at your configured rate. If the upstream signals a slowdown via headers, Aquifer backs off automatically.
+Calling something with its own capacity limit — a database read replica, a CI runner, a third-party API? Aquifer queues the calls durably and dispatches them at your configured rate, so a burst from your own side never becomes the thing that takes the downstream down. Works especially well closed-loop: if the downstream already speaks `X-Aqueduct-*` headers, it can tell Aquifer to back off in real time instead of you guessing a static rate.
 
-In all three, the upstream can lower the dispatch pace via response headers — see [Dynamic Pacing](#dynamic-pacing) for how the ceiling, backoff, and recovery actually work.
+**Edge load balancer → gateway — pace and route at the edge**
+```
+your users  →  POST /proxy to Aquifer  →  your resources (paced, routed, at the speed you can handle)
+```
+Point Aquifer at your resources like a normal reverse proxy, close to the caller. It tries the request directly first — a healthy resource sees no queue at all — and only falls back to durable queuing when something's actually overloaded, on the same connection. For low-latency cross-region failover on top of that: Fly.io's own [`fly-replay`](https://fly.io/docs/networking/dynamic-request-routing/) is a response header *your* app returns to tell Fly's edge "redeliver this request in a different region" — your own logic in front of Aquifer can watch for the same overload signal the circuit breaker already uses (429, 5xx, an ORCA threshold) and respond with `fly-replay` instead of just falling back locally, rerouting at Fly's edge rather than adding a round trip through your own infrastructure. Not something Aquifer implements itself — the same overload classification just composes naturally with it.
+
+In all four, the upstream can lower the dispatch pace via response headers — see [Dynamic Pacing](#dynamic-pacing) for how the ceiling, backoff, and recovery actually work.
 
 Long-term protocol goal: if more services emit `X-Aqueduct-*`, agents can respond to capacity signals instead of independently guessing retry and concurrency behavior. Aquifer works today without ecosystem adoption; broader protocol adoption is the longer-term goal.
 
@@ -188,7 +194,7 @@ POST /jobs
 
 **Do not expose Aquifer directly to untrusted callers.** `url` is dispatched as a real HTTP request — if an arbitrary or untrusted party can set it, Aquifer becomes an open relay/SSRF vector, using Aquifer's own network position and identity to reach anything the machine can reach. The intended caller is **your own trusted backend or gateway code** dispatching to a destination it already knows about — not an agent, end user, or any other party choosing the destination itself.
 
-**[API.md](API.md)** has the full reference: `GET /jobs/:id`, the SSE stream, `GET /health`, webhook payload shapes, and the autoscaling headers.
+**[API.md](API.md)** has the full reference: `GET /jobs/:id`, the SSE stream, `POST /proxy` (edge-gateway mode — see [Use cases](#use-cases)), `GET /health`, webhook payload shapes, and the autoscaling headers.
 
 ---
 
@@ -289,11 +295,15 @@ Durable queue, automatic crash recovery, panic isolation per job — see [benchm
 
 ---
 
-## Drain mode
+## Partitioning strategies
 
-**Off by default**, opt-in for a specific deployment pattern: instances get handed to a tenant, absorb and drain their burst, then get freed for reassignment to a different tenant. A normal single-instance or statically-partitioned deployment is completely unaffected unless you turn this on. When idle for `AQUIFER_DRAIN_TIMER_SECONDS`, an instance flushes its deduped idempotency ledger to a webhook and clears local state, moving through an `active` → `draining` → `unassigned` state machine visible via `GET /health`.
+Running one instance for everything works fine until you have multiple tenants or multiple upstreams sharing it — then one tenant's burst, or one upstream's own rate limit, ends up affecting everyone else on that same instance. Two ways to split traffic apart so that doesn't happen, not mutually exclusive:
 
-See **[DRAIN_MODE.md](DRAIN_MODE.md)** for the full state machine, env vars, and webhook payload shape.
+**Static partitioning** — decided once, at deploy time: dedicate one instance to a single protected resource — a CI runner, a database, a GPU, or a rate-limited external API you want to be nice to — so that resource only ever sees traffic paced the way you configured, up to whatever it can actually bear. Multiple tenants can safely share that same instance: turn on [account-queue isolation](#dynamic-pacing) and each tenant gets their own independently-paced queue, so one tenant's burst doesn't starve another's, and the resource itself never sees more aggregate load than it's rated for. The mistake to avoid: pointing multiple *instances* at the *same* resource instead of routing everyone through this one pacing checkpoint — that just multiplies your total request rate against it. Same rule for pools: a given `pool_id` should belong to exactly one instance, since pool state isn't shared across instances.
+
+**Dynamic partitioning (drain mode)** — off by default, for a more specific shape: instead of deciding every assignment up front, an instance gets handed to one tenant at a time, absorbs and drains whatever burst that tenant sends, then frees itself up to be handed to a *different* tenant next — useful when you want dedicated capacity per user without hand-assigning it at deploy time. A normal single-instance or statically-partitioned deployment is completely unaffected unless you turn this on. When idle for `AQUIFER_DRAIN_TIMER_SECONDS`, the instance flushes its deduped idempotency ledger to a webhook and clears local state, moving through an `active` → `draining` → `unassigned` state machine visible via `GET /health`. See **[DRAIN_MODE.md](DRAIN_MODE.md)** for the full state machine, env vars, and webhook payload shape.
+
+The two combine: a fleet can partition statically by upstream domain, while individual instances within a partition cycle through tenants dynamically via drain mode.
 
 ---
 
@@ -306,9 +316,7 @@ People run Aquifer in front of things like: internal coding platforms (GitLab, F
 <details>
 <summary>Full deployment reference — partitioning, scaling, security note</summary>
 
-Scale by partitioning: run one instance per upstream domain or tenant, each owning a distinct key space, and total throughput scales with instance count. Multiple instances against the *same* upstream without partitioning multiplies your request rate against it instead — the one setup to avoid. The same applies to pools: a given `pool_id` should belong to exactly one instance, since pool state isn't shared across instances.
-
-This partitioning is static — decided at deploy time, fixed until you redeploy. [Drain mode](#drain-mode) is a dynamic alternative to the same problem: rather than every instance owning a fixed slice forever, an idle instance can flush what it's deduped and hand itself back for reassignment, letting an external orchestrator repartition on the fly as load shifts between tenants instead of you doing it by hand at deploy time. The two aren't mutually exclusive — a fleet can partition statically by upstream domain while individual instances within a partition cycle through tenants dynamically via drain mode.
+See [Partitioning strategies](#partitioning-strategies) above for how to assign tenants to instances, statically or dynamically.
 
 See the [security warning](API.md#post-jobs) under `POST /jobs` — the same untrusted-caller risk applies regardless of deployment shape.
 
@@ -320,7 +328,7 @@ See the [security warning](API.md#post-jobs) under `POST /jobs` — the same unt
 
 ## Writing
 
-- [Eliminate GPU Waste by Cutting the Retry Tax](https://rahmipruitt.me/content/gpu-retry-tax/) — the thesis behind [drain mode](#drain-mode) and the ORCA fallback pacing [GPU benchmark](benchmark.md#9-gpu-inference-and-the-retry-tax-runpodvllm) above.
+- [Eliminate GPU Waste by Cutting the Retry Tax](https://rahmipruitt.me/content/gpu-retry-tax/) — the thesis behind [drain mode](#partitioning-strategies) and the ORCA fallback pacing [GPU benchmark](benchmark.md#9-gpu-inference-and-the-retry-tax-runpodvllm) above.
 - [GitHub Outages Show the Limits of Reactive Scaling](https://rahmipruitt.me/content/github-outage-reactive-scaling/) — why reactive scaling and retry storms don't mix, the problem Aquifer absorbs instead.
 
 ## License
