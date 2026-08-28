@@ -1,0 +1,78 @@
+name: Contract tests (Aqueduct Runner)
+
+# Cross-repo contract tests against the real, unmodified aquifer image --
+# proves at the wire level that the shared X-Aqueduct-*/X-EZTHROTTLE-*
+# contract with ezthrottle-local still holds, not just that aquifer's own
+# unit/integration tests pass. See github.com/rjpruitt16/aqueduct-runner.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  contract-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout aquifer
+        uses: actions/checkout@v4
+        with:
+          path: aquifer
+
+      - name: Checkout aqueduct-runner
+        uses: actions/checkout@v4
+        with:
+          repository: rjpruitt16/aqueduct-runner
+          path: aqueduct-runner
+
+      - name: Contract test -- shared suite (health, lifecycle, idempotency, proxy, L8)
+        uses: dagger/dagger-for-github@v8
+        with:
+          version: "0.21.8"
+          module: ./aqueduct-runner
+          call: >-
+            test-aquifer
+            --source=./aquifer
+            --hurl-dir=./aqueduct-runner/hurl
+            --recorder-dir=./aqueduct-runner/recorder
+
+      - name: Contract test -- admission rejection
+        uses: dagger/dagger-for-github@v8
+        with:
+          version: "0.21.8"
+          module: ./aqueduct-runner
+          call: >-
+            test-aquifer-admission
+            --source=./aquifer
+            --hurl-dir=./aqueduct-runner/hurl
+            --recorder-dir=./aqueduct-runner/recorder
+
+  # Separate job so a slow drain-mode regression doesn't hold up the fast
+  # checks above -- both start immediately, no `needs:` dependency.
+  contract-test-drain:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout aquifer
+        uses: actions/checkout@v4
+        with:
+          path: aquifer
+
+      - name: Checkout aqueduct-runner
+        uses: actions/checkout@v4
+        with:
+          repository: rjpruitt16/aqueduct-runner
+          path: aqueduct-runner
+
+      # Genuinely takes ~5+ minutes -- gated by a hardcoded 5-minute idle
+      # constant in account_queue.go, not by AQUIFER_DRAIN_TIMER_SECONDS.
+      # See aqueduct-runner's README "Known caveat" section.
+      - name: Contract test -- drain-mode ledger (~5 min)
+        uses: dagger/dagger-for-github@v8
+        with:
+          version: "0.21.8"
+          module: ./aqueduct-runner
+          call: >-
+            test-aquifer-drain
+            --source=./aquifer
+            --hurl-dir=./aqueduct-runner/hurl
+            --recorder-dir=./aqueduct-runner/recorder
