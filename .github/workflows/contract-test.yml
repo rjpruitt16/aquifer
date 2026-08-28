@@ -26,7 +26,7 @@ jobs:
           path: aqueduct-runner
 
       - name: Contract test -- shared suite (health, lifecycle, idempotency, proxy, L8)
-        uses: dagger/dagger-for-github@v8
+        uses: dagger/dagger-for-github@v8.4.1
         with:
           version: "0.21.8"
           module: ./aqueduct-runner
@@ -37,7 +37,7 @@ jobs:
             --recorder-dir=./aqueduct-runner/recorder
 
       - name: Contract test -- admission rejection
-        uses: dagger/dagger-for-github@v8
+        uses: dagger/dagger-for-github@v8.4.1
         with:
           version: "0.21.8"
           module: ./aqueduct-runner
@@ -67,7 +67,7 @@ jobs:
       # constant in account_queue.go, not by AQUIFER_DRAIN_TIMER_SECONDS.
       # See aqueduct-runner's README "Known caveat" section.
       - name: Contract test -- drain-mode ledger (~5 min)
-        uses: dagger/dagger-for-github@v8
+        uses: dagger/dagger-for-github@v8.4.1
         with:
           version: "0.21.8"
           module: ./aqueduct-runner
