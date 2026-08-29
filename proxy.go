@@ -29,6 +29,18 @@ type ProxyOutcome struct {
 	Status      int
 	Header      http.Header
 	Body        []byte
+
+	// FallbackReason and FallbackStatus are set whenever Job is set but
+	// Direct is false — a short, stable label for why a direct attempt
+	// wasn't completed, surfaced to the caller as a proxy_fallback SSE
+	// event before the normal queued/dispatching/terminal sequence, so a
+	// client watching the stream (a browser, an agent with no server of
+	// its own to explain this some other way) knows it's in the queue
+	// because something specific happened, not just "queued" with no
+	// context. FallbackStatus is the upstream's real status code when one
+	// was actually received (0 for a skipped or timed-out attempt).
+	FallbackReason string
+	FallbackStatus int
 }
 
 // AttemptDirect is proxy mode's entry point: persist the job (same
@@ -53,12 +65,12 @@ func (a *Aquifer) AttemptDirect(ctx context.Context, req JobRequest, timeout tim
 	// straight back to queue+stream, same as any other job the caller
 	// couldn't attempt directly.
 	if job.PoolID != "" {
-		return ProxyOutcome{Job: job}
+		return ProxyOutcome{Job: job, FallbackReason: "pool_routed"}
 	}
 
 	worker := a.registry.workerFor(job)
 	if worker.BreakerOpen() || worker.QueueActive() {
-		return ProxyOutcome{Job: job}
+		return ProxyOutcome{Job: job, FallbackReason: "domain_degraded"}
 	}
 
 	attemptCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -67,13 +79,13 @@ func (a *Aquifer) AttemptDirect(ctx context.Context, req JobRequest, timeout tim
 	counts := a.store.Counts()
 	resp, attemptErr := makeRequest(attemptCtx, job, job.URL, counts.TotalJobs, counts.QueueDepth, 0, a.l8)
 	if attemptErr != nil {
-		return ProxyOutcome{Job: job}
+		return ProxyOutcome{Job: job, FallbackReason: "upstream_unreachable"}
 	}
 	defer resp.Body.Close()
 
 	if overloadCooldown, overloaded := isOverloadSignal(resp); overloaded {
 		worker.TripBreaker(overloadCooldown)
-		return ProxyOutcome{Job: job}
+		return ProxyOutcome{Job: job, FallbackReason: "upstream_overloaded", FallbackStatus: resp.StatusCode}
 	}
 
 	// The upstream can proactively ask to be routed through the durable

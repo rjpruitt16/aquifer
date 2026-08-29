@@ -242,7 +242,6 @@ func TestAttemptDirectFallsBackWhileQueueHasBacklogEvenAfterBreakerCooldownExpir
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
-	defer close(block)
 
 	first := app.AttemptDirect(context.Background(), proxyJobRequest("user-1", "key-backlog-a", srv.URL), 2*time.Second)
 	if first.Direct {
@@ -278,6 +277,22 @@ func TestAttemptDirectFallsBackWhileQueueHasBacklogEvenAfterBreakerCooldownExpir
 	}
 	if hits.Load() != 2 {
 		t.Fatalf("expected no direct attempt against the upstream while backlog is active, got %d hits", hits.Load())
+	}
+
+	// Release the blocked in-flight request and wait for the AccountQueue's
+	// dispatch goroutine to actually finish (not just for the HTTP call to
+	// return, but for it to write its result back through the store) before
+	// the test ends -- otherwise that goroutine can still be touching the
+	// per-test SQLite tmpdir after t.Cleanup starts tearing it down, which
+	// shows up as an intermittent "database is closed" or tmpdir
+	// "directory not empty" failure under -count>1 or full-suite runs.
+	close(block)
+	deadline = time.Now().Add(2 * time.Second)
+	for worker.QueueActive() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if worker.QueueActive() {
+		t.Fatalf("expected the backlog to drain after releasing the blocked request")
 	}
 }
 
@@ -418,5 +433,51 @@ func TestProxyJobHTTPFallsBackAndStreamsToEventualCompletion(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "eventually ok") {
 		t.Fatalf("expected the real upstream body once it succeeded, got: %s", rec.Body.String())
+	}
+}
+
+func TestProxyJobHTTPFallbackStreamsAProxyFallbackEventFirst(t *testing.T) {
+	oldSleep := retrySleepFunc.Load()
+	retrySleepFunc.Store(func(time.Duration) {})
+	t.Cleanup(func() { retrySleepFunc.Store(oldSleep) })
+
+	app, _ := testAquiferWithLimits(t, AdmissionLimits{})
+	srv := NewServer(app)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer upstream.Close()
+
+	body, _ := json.Marshal(proxyJobRequest("user-1", "http-key-proxy-fallback-event", upstream.URL))
+	req := httptest.NewRequest(http.MethodPost, "/proxy", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		srv.Routes().ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("fallback request never completed")
+	}
+
+	out := rec.Body.String()
+	if !strings.Contains(out, "event: proxy_fallback") {
+		t.Fatalf("expected a proxy_fallback event before the normal queued/dispatching sequence, got: %s", out)
+	}
+	if !strings.Contains(out, `"reason":"upstream_overloaded"`) {
+		t.Fatalf("expected reason=upstream_overloaded for a 503, got: %s", out)
+	}
+	if !strings.Contains(out, `"upstream_status":503`) {
+		t.Fatalf("expected the real upstream status code included, got: %s", out)
+	}
+	// proxy_fallback must come before queued, not after — a client
+	// shouldn't see "you're queued" before it sees why.
+	if strings.Index(out, "event: proxy_fallback") > strings.Index(out, "event: queued") {
+		t.Fatalf("expected proxy_fallback before queued, got: %s", out)
 	}
 }

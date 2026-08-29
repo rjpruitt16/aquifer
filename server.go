@@ -188,6 +188,16 @@ func (s *Server) l8Spec(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(l8SpecDocument))
 }
 
+// ProxyFallbackInfo carries the one extra SSE event proxy mode's fallback
+// path emits before the normal queued/dispatching/terminal sequence — see
+// streamEvents. Status is 0 when a real upstream status was never received
+// (a skipped attempt or a timeout), non-zero when the upstream actually
+// responded (e.g. 429/503).
+type ProxyFallbackInfo struct {
+	Reason string
+	Status int
+}
+
 func (s *Server) streamJob(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	job, events, unsubscribe, err := s.aquifer.SubscribeJob(id)
@@ -195,7 +205,7 @@ func (s *Server) streamJob(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "job not found", http.StatusNotFound)
 		return
 	}
-	s.streamEvents(w, r, job, events, unsubscribe)
+	s.streamEvents(w, r, job, events, unsubscribe, nil)
 }
 
 // streamEvents is streamJob's actual event loop, extracted so proxy mode's
@@ -203,7 +213,14 @@ func (s *Server) streamJob(w http.ResponseWriter, r *http.Request) {
 // connection ("automatically start streaming") instead of reimplementing
 // it. Writes catch-up events, then loops on the events channel, a 30s
 // keepalive, and request cancellation, exactly as streamJob always has.
-func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request, job *Job, events <-chan SSEEvent, unsubscribe func()) {
+//
+// proxyFallback is nil for a plain /jobs/:id/stream — this job never had a
+// direct attempt to explain. When non-nil (proxy mode's fallback path
+// only), one extra event is written first: a client watching the stream
+// (a browser, an agent with no server of its own to learn this any other
+// way) sees explicitly why it's in the queue instead of just "queued"
+// with no context.
+func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request, job *Job, events <-chan SSEEvent, unsubscribe func(), proxyFallback *ProxyFallbackInfo) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		jsonError(w, "streaming not supported", http.StatusInternalServerError)
@@ -216,6 +233,14 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request, job *Job, 
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
+
+	if proxyFallback != nil {
+		data := map[string]any{"job_id": job.ID, "reason": proxyFallback.Reason}
+		if proxyFallback.Status != 0 {
+			data["upstream_status"] = proxyFallback.Status
+		}
+		writeSSE(w, "proxy_fallback", data)
+	}
 
 	// Catchup events for states already passed before client connected
 	writeSSE(w, "queued", map[string]any{"job_id": job.ID, "status": "queued"})
@@ -316,7 +341,10 @@ func (s *Server) proxyJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.aquifer.Dispatch(outcome.Job, req.AccountQueueMode)
-	s.streamEvents(w, r, outcome.Job, events, unsubscribe)
+	s.streamEvents(w, r, outcome.Job, events, unsubscribe, &ProxyFallbackInfo{
+		Reason: outcome.FallbackReason,
+		Status: outcome.FallbackStatus,
+	})
 }
 
 // streamExistingJob handles a proxy-mode request that turned out to be a
@@ -340,7 +368,7 @@ func (s *Server) streamExistingJob(w http.ResponseWriter, r *http.Request, job *
 		jsonError(w, "job not found", http.StatusNotFound)
 		return
 	}
-	s.streamEvents(w, r, job, events, unsubscribe)
+	s.streamEvents(w, r, job, events, unsubscribe, nil)
 }
 
 func jsonError(w http.ResponseWriter, msg string, code int) {
