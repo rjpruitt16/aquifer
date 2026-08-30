@@ -34,8 +34,9 @@ guarantee that never happens, enforce it on your own end before routing traffic 
 | Var | Default | Notes |
 |---|---|---|
 | `AQUIFER_DRAIN_ENABLED` | `false` | The real gate — the other two vars are only read when this is `true`. |
-| `AQUIFER_DRAIN_TIMER_SECONDS` | `45` | How long the whole instance must be idle before flushing. Deliberately separate from the unrelated 5-minute per-tenant-queue self-GC timer, which reclaims one queue's memory and has nothing to do with instance-wide handoff. |
+| `AQUIFER_DRAIN_TIMER_SECONDS` | `45` | How long the whole instance must be idle before flushing. Deliberately separate from the per-tenant-queue self-GC timer below, which reclaims one queue's memory and has nothing to do with instance-wide handoff — but drain mode's own countdown only starts once every queue has already self-torn-down via that timer, so a real drain flush is gated by both. |
 | `AQUIFER_DRAIN_WEBHOOK_URL` | *(none)* | Required if enabled — if unset, drain mode logs a warning and stays off rather than flushing with nowhere to send it. |
+| `AQUIFER_IDLE_TIMEOUT_SECONDS` | `300` (5min) | The per-tenant-queue self-GC timer itself. Exists mainly so contract tests don't have to burn 5+ real minutes to prove a real drain flush — leave this at the default in production. |
 
 **Webhook payload:**
 

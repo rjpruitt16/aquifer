@@ -143,8 +143,20 @@ func (q *AccountQueue) supervise(rps float64, maxConc int, onIdle func(string)) 
 	}
 }
 
+const defaultAccountQueueIdleTimeoutSeconds = 300
+
+// accountQueueIdleTimeout is how long a queue can sit genuinely idle
+// before self-terminating -- 5 minutes by default, overridable via
+// AQUIFER_IDLE_TIMEOUT_SECONDS. Exists mainly so contract tests
+// (aqueduct-runner) don't have to burn 5+ real minutes per drain-mode
+// run; production should leave this at the default.
+func accountQueueIdleTimeout() time.Duration {
+	return time.Duration(envInt64("AQUIFER_IDLE_TIMEOUT_SECONDS", defaultAccountQueueIdleTimeoutSeconds)) * time.Second
+}
+
 func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int) {
-	idle := time.NewTimer(5 * time.Minute)
+	idleTimeout := accountQueueIdleTimeout()
+	idle := time.NewTimer(idleTimeout)
 	defer idle.Stop()
 
 	positionTicker := time.NewTicker(2 * time.Second)
@@ -234,7 +246,7 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int) {
 			queue = append(queue, job)
 			q.metrics.QueueDepth(q.upstream, len(queue))
 			q.backlog.Store(int32(len(queue) + inFlight))
-			idle.Reset(5 * time.Minute)
+			idle.Reset(idleTimeout)
 
 		case msg := <-q.done:
 			inFlight--
@@ -252,7 +264,7 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int) {
 			if rps != prevRPS {
 				q.metrics.FlowRate(q.upstream, rps)
 			}
-			idle.Reset(5 * time.Minute)
+			idle.Reset(idleTimeout)
 
 		case <-positionTicker.C:
 			for i, j := range queue {
@@ -266,7 +278,7 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int) {
 			if len(queue) == 0 && inFlight == 0 {
 				return
 			}
-			idle.Reset(5 * time.Minute)
+			idle.Reset(idleTimeout)
 		}
 	}
 }
