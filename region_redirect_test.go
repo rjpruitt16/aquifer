@@ -2,6 +2,7 @@ package aquifer
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -369,5 +370,25 @@ func TestRedirectExhaustionReturnsHardErrorNotLocalQueue(t *testing.T) {
 	n, _ := resp.Body.Read(body)
 	if !strings.Contains(string(body[:n]), `"limit_reason":"redirect_exhausted"`) {
 		t.Fatalf("expected limit_reason=redirect_exhausted in the error body, got: %s", body[:n])
+	}
+}
+
+func TestTryRedirectHopSetsAccountQueueHeader(t *testing.T) {
+	var gotHeader string
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeader = r.Header.Get("X-Aquifer-Account-Queue")
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer target.Close()
+
+	origin, _ := testAquiferWithLimits(t, AdmissionLimits{})
+	origin.redirectTargetURL = func(string) string { return target.URL + "/proxy" }
+
+	job := NewJob(&JobRequest{UserID: "user-1", IdempotentKey: "hop-header-key", URL: "http://example.com", Method: "GET"})
+
+	origin.tryRedirectHop(context.Background(), job, "target-region", "tenant-42", time.Second, true)
+
+	if gotHeader != "tenant-42" {
+		t.Fatalf("expected the hop to carry X-Aquifer-Account-Queue: tenant-42, got %q", gotHeader)
 	}
 }

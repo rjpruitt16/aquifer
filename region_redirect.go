@@ -343,6 +343,15 @@ func (a *Aquifer) tryRedirectHop(ctx context.Context, job *Job, region, accountQ
 		return nil, false
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	// AccountQueueMode is always specified by the caller's own header
+	// (server.go re-derives it fresh from the incoming request's headers,
+	// never trusting a body field) -- without this, target's own
+	// re-derivation finds nothing and silently drops the caller's explicit
+	// per-tenant isolation choice, even though hopReq's AccountQueueMode
+	// field carries it correctly in the body the whole way.
+	if accountQueueHeader != "" {
+		httpReq.Header.Set("X-Aquifer-Account-Queue", accountQueueHeader)
+	}
 
 	resp, err := (&http.Client{}).Do(httpReq)
 	if err != nil {
