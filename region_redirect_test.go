@@ -204,6 +204,9 @@ func TestRedirectSucceedsDirectlyOnTargetRegion(t *testing.T) {
 	if string(body[:n]) != "served by target region" {
 		t.Fatalf("expected the target region's body relayed verbatim, got: %s", body[:n])
 	}
+	if got := resp.Header.Get("X-Aquifer-Served-By-Region"); got != "target-region" {
+		t.Fatalf("expected X-Aquifer-Served-By-Region: target-region so the client can tell this was rerouted, got %q", got)
+	}
 }
 
 func TestRedirectFallsBackToTargetsQueueWhenNoRegionCanDispatchDirectly(t *testing.T) {
@@ -252,6 +255,17 @@ func TestRedirectFallsBackToTargetsQueueWhenNoRegionCanDispatchDirectly(t *testi
 	}
 	if !strings.Contains(out, "event: queued") {
 		t.Fatalf("expected the relayed stream to include target's own queued event, got: %s", out)
+	}
+
+	reroutedIdx := strings.Index(out, "event: rerouted")
+	if reroutedIdx == -1 {
+		t.Fatalf("expected origin to announce the reroute before relaying target's stream, got: %s", out)
+	}
+	if !strings.Contains(out, `"region":"target-region"`) {
+		t.Fatalf("expected the rerouted event to name which region the job actually landed on, got: %s", out)
+	}
+	if fallbackIdx := strings.Index(out, "event: proxy_fallback"); reroutedIdx > fallbackIdx {
+		t.Fatalf("expected rerouted to be announced BEFORE target's own proxy_fallback event, not after, got: %s", out)
 	}
 }
 

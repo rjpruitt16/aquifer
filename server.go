@@ -347,7 +347,7 @@ func (s *Server) proxyJob(w http.ResponseWriter, r *http.Request) {
 	// connection so the original caller sees one continuous stream
 	// regardless of which region actually ends up handling the job.
 	if outcome.RelayFrom != nil {
-		s.relaySSE(w, r, outcome.RelayFrom)
+		s.relaySSE(w, r, outcome.RelayFrom, outcome.RerouteRegion)
 		return
 	}
 
@@ -388,7 +388,14 @@ func (s *Server) proxyJob(w http.ResponseWriter, r *http.Request) {
 // found a sibling region that accepted the job into its own durable
 // queue; the caller sees one continuous stream regardless of which region
 // actually ends up handling the job. Owns closing resp.Body.
-func (s *Server) relaySSE(w http.ResponseWriter, r *http.Request, resp *http.Response) {
+//
+// region, when non-empty, is announced via a synthetic "rerouted" event
+// before the relay starts — same rationale as proxy_fallback: a client
+// with no server of its own to explain this (a browser, an agent) should
+// know why its connection is still open and where the response is
+// actually coming from, not just start seeing target's own queued/
+// dispatching events with no context.
+func (s *Server) relaySSE(w http.ResponseWriter, r *http.Request, resp *http.Response, region string) {
 	defer resp.Body.Close()
 
 	flusher, ok := w.(http.Flusher)
@@ -403,6 +410,9 @@ func (s *Server) relaySSE(w http.ResponseWriter, r *http.Request, resp *http.Res
 		}
 	}
 	w.WriteHeader(http.StatusOK)
+	if region != "" {
+		writeSSE(w, "rerouted", map[string]any{"region": region})
+	}
 	flusher.Flush()
 
 	done := make(chan struct{})

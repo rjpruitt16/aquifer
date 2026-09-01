@@ -352,14 +352,21 @@ func (a *Aquifer) tryRedirectHop(ctx context.Context, job *Job, region, accountQ
 	if strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
 		// Target accepted it into its own durable queue — relay its
 		// stream live. server.go's proxyJob owns closing resp.Body once
-		// the stream ends.
-		return &ProxyOutcome{RelayFrom: resp}, true
+		// the stream ends. RerouteRegion tells it to announce this via a
+		// "rerouted" event before relaying target's own stream.
+		return &ProxyOutcome{RelayFrom: resp, RerouteRegion: region}, true
 	}
 	defer resp.Body.Close()
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return &ProxyOutcome{Direct: true, Status: resp.StatusCode, Header: resp.Header, Body: respBody}, true
+		// Direct success via redirect isn't a held-open connection the way
+		// RelayFrom is, but the region info is just as cheap to surface --
+		// a response header, not a body/status change, so it can't affect
+		// anything a caller is already parsing.
+		respHeader := resp.Header
+		respHeader.Set("X-Aquifer-Served-By-Region", region)
+		return &ProxyOutcome{Direct: true, Status: resp.StatusCode, Header: respHeader, Body: respBody}, true
 	}
 
 	// A clean, well-formed rejection (DirectOnly's 503, an admission 429,

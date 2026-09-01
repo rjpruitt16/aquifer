@@ -52,8 +52,14 @@ type ProxyOutcome struct {
 	// now lives on the target region under its own ID — the caller learns
 	// it from the relayed stream itself, the same place it always would
 	// for any fallback. The caller owns closing RelayFrom.Body once the
-	// stream ends.
-	RelayFrom *http.Response
+	// stream ends. RerouteRegion is always set alongside it — which region
+	// actually ended up owning the job — so the caller can tell the client
+	// via a synthetic "rerouted" event before relaying, same rationale as
+	// FallbackReason/proxy_fallback: a client with no server of its own to
+	// explain this (a browser, an agent) shouldn't have to wonder why its
+	// connection is still open or where the response actually came from.
+	RelayFrom     *http.Response
+	RerouteRegion string
 }
 
 // AttemptDirect is proxy mode's entry point: persist the job (same
