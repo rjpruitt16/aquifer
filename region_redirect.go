@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"math/rand"
 	"net/http"
 	"os"
@@ -195,6 +196,8 @@ func (a *Aquifer) attemptRedirect(ctx context.Context, job *Job, accountQueueHea
 		return ProxyOutcome{}, false
 	}
 
+	log.Printf("[region_redirect] job %s: origin=%s trying candidates %v", job.ID, self, candidates)
+
 	anyReached := false
 
 	// Phase 1: try every live candidate for a fast direct success only —
@@ -207,6 +210,7 @@ func (a *Aquifer) attemptRedirect(ctx context.Context, job *Job, accountQueueHea
 			anyReached = true
 		}
 		if outcome != nil {
+			log.Printf("[region_redirect] job %s: %s succeeded directly", job.ID, region)
 			a.store.DeleteJob(job.ID) // our own local row is now moot
 			return *outcome, true
 		}
@@ -222,11 +226,13 @@ func (a *Aquifer) attemptRedirect(ctx context.Context, job *Job, accountQueueHea
 		anyReached = true
 	}
 	if outcome != nil {
+		log.Printf("[region_redirect] job %s: %s accepted it into its own queue", job.ID, final)
 		a.store.DeleteJob(job.ID)
 		return *outcome, true
 	}
 
 	if anyReached {
+		log.Printf("[region_redirect] job %s: every candidate tried, none could help — gating redirect for %s", job.ID, redirectGateCooldown())
 		a.redirectGate.Trip(redirectGateCooldown())
 	}
 	return ProxyOutcome{}, false
