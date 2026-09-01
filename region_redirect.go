@@ -16,7 +16,10 @@ import (
 	"time"
 )
 
-const defaultRedirectGateCooldownSeconds = 500
+const (
+	defaultRedirectGateCooldownSeconds        = 500
+	defaultRedirectExhaustedRetryAfterSeconds = 900
+)
 
 // defaultRedirectTargetURL is the real, production URL builder for a
 // redirect hop — the region-prefixed internal DNS form,
@@ -162,6 +165,49 @@ func orderedRedirectCandidates(live, visited []string, self, idempotentKey strin
 	return append([]string{preferred}, rest...)
 }
 
+// redirectResult distinguishes "this feature has nothing to say about this
+// request" from "this feature was tried and every region it knows about
+// failed" — attemptRedirect's caller (proxy.go's fallbackOutcome) needs
+// that distinction because the two cases mean opposite things: the former
+// falls through to today's existing local-fallback behavior, unchanged;
+// the latter is a hard error (RedirectExhaustedError), not a silent local
+// queue. See attemptRedirect's own doc comment for why.
+type redirectResult int
+
+const (
+	redirectNotApplicable redirectResult = iota
+	redirectSucceeded
+	redirectExhausted
+)
+
+// RedirectExhaustedError is returned by Aquifer.AttemptDirect (via
+// fallbackOutcome) when cross-region redirect is configured and was
+// actually attempted (or is still within its post-exhaustion gate cooldown
+// — see redirectGate) but no known-live region could serve the request
+// directly or accept it into its own queue. Callers (the HTTP server)
+// type-assert on this to build a 429 with a long Retry-After, the same way
+// AdmissionRejectedError already does for admission control.
+//
+// This is deliberately NOT the same as "queue it locally instead" —
+// queueing on total redirect exhaustion was never actually decided; the
+// default is to fail loudly so a caller (or its own retry/alerting logic)
+// knows the whole fleet is degraded, not just this one instance. A future
+// per-deployment option to queue locally instead (e.g. for an Aquifer
+// instance dedicated to a single customer, where "queue and eventually
+// deliver" might be preferable to erroring) is a real possibility, just
+// not the default and not built here.
+type RedirectExhaustedError struct {
+	JobID string
+}
+
+func (e *RedirectExhaustedError) Error() string {
+	return fmt.Sprintf("job %s: cross-region redirect exhausted, no known-live region could help", e.JobID)
+}
+
+func redirectExhaustedRetryAfterSeconds() int64 {
+	return envInt64("AQUIFER_REDIRECT_EXHAUSTED_RETRY_AFTER_SECONDS", defaultRedirectExhaustedRetryAfterSeconds)
+}
+
 // attemptRedirect is called from AttemptDirect's local-fallback points
 // (proxy.go) — never for a request already inside someone else's redirect
 // tour, checked as this function's first line. It tours other known-live
@@ -169,36 +215,36 @@ func orderedRedirectCandidates(live, visited []string, self, idempotentKey strin
 // back to its own local queue, mirroring what AttemptDirect already does
 // for the local upstream, just aimed at sibling Aquifer instances.
 //
-// Returns ok=false when redirect isn't configured, is gated, or every
-// candidate was tried without success — the caller proceeds with its own
-// existing local-fallback behavior, completely unchanged. Redirect can
-// only ever produce a BETTER outcome than today's baseline (a sibling
-// served it instead of a local queue), never a worse one — a deliberate
-// v1 simplification over "error the call on total exhaustion," which
-// would need to reuse the admission-rejection response contract more
-// invasively; left as a documented follow-up rather than risked here.
-func (a *Aquifer) attemptRedirect(ctx context.Context, job *Job, accountQueueHeader string, timeout time.Duration) (ProxyOutcome, bool) {
+// Returns redirectNotApplicable when the feature isn't configured at all
+// (no RegionAdapter ever set) or this request is itself someone else's
+// redirect hop — the caller proceeds with its own existing local-fallback
+// behavior, completely unchanged. Returns redirectExhausted when the
+// feature IS configured but couldn't help — zero known-live regions right
+// now, still within the post-exhaustion gate cooldown, or every candidate
+// was actually tried and none succeeded — the caller must hard-error
+// (RedirectExhaustedError), not silently fall back to a local queue.
+func (a *Aquifer) attemptRedirect(ctx context.Context, job *Job, accountQueueHeader string, timeout time.Duration) (ProxyOutcome, redirectResult) {
 	if job.OriginMachineID != "" {
-		return ProxyOutcome{}, false
+		return ProxyOutcome{}, redirectNotApplicable
+	}
+	if a.regionAdapter == nil {
+		return ProxyOutcome{}, redirectNotApplicable
 	}
 
 	adapter := a.regionAdapterOrDefault()
-	live := adapter.LiveRegions()
-	if len(live) == 0 {
-		return ProxyOutcome{}, false
-	}
 
 	if a.redirectGate.Open() {
-		return ProxyOutcome{}, false
+		return ProxyOutcome{}, redirectExhausted
 	}
 
 	self := adapter.SelfRegion()
+	live := adapter.LiveRegions()
 	job.OriginMachineID = selfMachineID()
 	job.OriginRegion = self
 
 	candidates := orderedRedirectCandidates(live, job.VisitedRegions, self, job.IdempotentKey)
 	if len(candidates) == 0 {
-		return ProxyOutcome{}, false
+		return ProxyOutcome{}, redirectExhausted
 	}
 
 	log.Printf("[region_redirect] job %s: origin=%s trying candidates %v", job.ID, self, candidates)
@@ -217,7 +263,7 @@ func (a *Aquifer) attemptRedirect(ctx context.Context, job *Job, accountQueueHea
 		if outcome != nil {
 			log.Printf("[region_redirect] job %s: %s succeeded directly", job.ID, region)
 			a.store.DeleteJob(job.ID) // our own local row is now moot
-			return *outcome, true
+			return *outcome, redirectSucceeded
 		}
 	}
 
@@ -233,14 +279,14 @@ func (a *Aquifer) attemptRedirect(ctx context.Context, job *Job, accountQueueHea
 	if outcome != nil {
 		log.Printf("[region_redirect] job %s: %s accepted it into its own queue", job.ID, final)
 		a.store.DeleteJob(job.ID)
-		return *outcome, true
+		return *outcome, redirectSucceeded
 	}
 
 	if anyReached {
 		log.Printf("[region_redirect] job %s: every candidate tried, none could help — gating redirect for %s", job.ID, redirectGateCooldown())
 		a.redirectGate.Trip(redirectGateCooldown())
 	}
-	return ProxyOutcome{}, false
+	return ProxyOutcome{}, redirectExhausted
 }
 
 // tryRedirectHop dials one candidate region directly over Fly's private 6PN

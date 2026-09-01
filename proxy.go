@@ -152,9 +152,18 @@ func (a *Aquifer) AttemptDirect(ctx context.Context, req JobRequest, timeout tim
 // which is attemptRedirect's own first check.)
 func (a *Aquifer) fallbackOutcome(ctx context.Context, req JobRequest, job *Job, reason string, status int, timeout time.Duration, tryRedirect bool) ProxyOutcome {
 	if tryRedirect {
-		if outcome, ok := a.attemptRedirect(ctx, job, req.AccountQueueMode, timeout); ok {
+		outcome, result := a.attemptRedirect(ctx, job, req.AccountQueueMode, timeout)
+		switch result {
+		case redirectSucceeded:
 			return outcome
+		case redirectExhausted:
+			// Nothing was committed anywhere -- this instance's own row is
+			// moot, same as the DirectOnly-rejection cleanup below.
+			a.store.DeleteJob(job.ID)
+			return ProxyOutcome{Err: &RedirectExhaustedError{JobID: job.ID}}
 		}
+		// redirectNotApplicable: fall through to today's existing
+		// local-fallback behavior, completely unchanged.
 	}
 	if req.DirectOnly {
 		a.store.DeleteJob(job.ID)

@@ -129,7 +129,8 @@ upstreams:
 | `AQUIFER_ALLOWED_URL_DOMAINS` | _(none, unrestricted)_ | Comma-separated hostnames `url`-routed jobs are permitted to target — see [`POST /jobs`](API.md#post-jobs) |
 | `AQUIFER_FLY_REGIONS` | _(none, feature off)_ | Comma-separated Fly region codes this app is deployed to — enables `/proxy`'s cross-region redirect on Fly. See [`POST /proxy`](API.md#post-proxy) |
 | `AQUIFER_FLY_POLL_INTERVAL_SECONDS` | `30` | How often to poll sibling regions over Fly's private network for liveness |
-| `AQUIFER_REDIRECT_GATE_COOLDOWN_SECONDS` | `500` | How long to stop attempting cross-region redirect after a tour finds no reachable region at all, before trying again |
+| `AQUIFER_REDIRECT_GATE_COOLDOWN_SECONDS` | `500` | How long to stop attempting cross-region redirect after a tour finds no reachable region at all, before trying again — internal probe throttling, not what's told to the caller |
+| `AQUIFER_REDIRECT_EXHAUSTED_RETRY_AFTER_SECONDS` | `900` (15min) | `Retry-After` sent to the caller when cross-region redirect is configured but exhausted — no known-live region could serve or queue the request. Request is rejected (429), not queued locally. See [`POST /proxy`](API.md#post-proxy) |
 
 Body-size and DB-size admission are on by default; memory admission stays off until you set a limit, since a safe default depends on your own deployment, not Aquifer's disk usage. Retry-After backs off exponentially under sustained rejection (5s → 10s → 20s → 40s → capped at 60s, resets on the next allowed request). See [CONFIGURATION.md](CONFIGURATION.md) for the full rationale and [benchmark.md](benchmark.md) for the numbers behind these defaults.
 
