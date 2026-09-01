@@ -481,3 +481,81 @@ func TestProxyJobHTTPFallbackStreamsAProxyFallbackEventFirst(t *testing.T) {
 		t.Fatalf("expected proxy_fallback before queued, got: %s", out)
 	}
 }
+
+func TestFallbackOutcomeDeletesJobWhenDirectOnly(t *testing.T) {
+	app, store := testAquiferWithLimits(t, AdmissionLimits{})
+
+	req := proxyJobRequest("user-1", "key-direct-only-cleanup", "http://example.invalid")
+	req.DirectOnly = true
+	job, _, err := app.PrepareJob(req)
+	if err != nil {
+		t.Fatalf("unexpected error preparing job: %v", err)
+	}
+
+	outcome := app.fallbackOutcome(context.Background(), req, job, "upstream_unreachable", 0, time.Second, true)
+	if outcome.FallbackReason != "upstream_unreachable" {
+		t.Fatalf("expected the reason to be preserved, got %q", outcome.FallbackReason)
+	}
+
+	if got := store.GetJob(job.ID); got != nil {
+		t.Fatalf("expected DirectOnly to delete the job row it had inserted, but it still exists: %+v", got)
+	}
+}
+
+func TestFallbackOutcomeKeepsJobWhenNotDirectOnly(t *testing.T) {
+	app, store := testAquiferWithLimits(t, AdmissionLimits{})
+
+	req := proxyJobRequest("user-1", "key-normal-fallback-keeps-job", "http://example.invalid")
+	job, _, err := app.PrepareJob(req)
+	if err != nil {
+		t.Fatalf("unexpected error preparing job: %v", err)
+	}
+
+	app.fallbackOutcome(context.Background(), req, job, "upstream_unreachable", 0, time.Second, true)
+
+	if got := store.GetJob(job.ID); got == nil {
+		t.Fatalf("expected a normal (non-DirectOnly) fallback to leave the job row intact for the caller to Dispatch")
+	}
+}
+
+func TestProxyJobHTTPDirectOnlyReturnsCleanRejectionWithoutStreaming(t *testing.T) {
+	app, store := testAquiferWithLimits(t, AdmissionLimits{})
+	srv := NewServer(app)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer upstream.Close()
+
+	reqBody := proxyJobRequest("user-1", "key-direct-only-http", upstream.URL)
+	reqBody.DirectOnly = true
+	body, _ := json.Marshal(reqBody)
+	req := httptest.NewRequest(http.MethodPost, "/proxy", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("expected a synchronous JSON response, not a stream, got Content-Type %q", ct)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &decoded); err != nil {
+		t.Fatalf("expected valid JSON, got: %s", rec.Body.String())
+	}
+	if decoded["reason"] != "upstream_overloaded" {
+		t.Fatalf("expected reason=upstream_overloaded, got: %v", decoded["reason"])
+	}
+
+	// The whole point of DirectOnly: no ghost queued row left behind, and
+	// nothing was ever actually dispatched.
+	jobs := store.GetQueuedJobs()
+	for _, j := range jobs {
+		if j.IdempotentKey == "key-direct-only-http" {
+			t.Fatalf("expected no job row left behind for a DirectOnly request that couldn't succeed, found: %+v", j)
+		}
+	}
+}

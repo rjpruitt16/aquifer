@@ -333,6 +333,31 @@ func (s *Server) proxyJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// RelayFrom is set when AttemptDirect redirected this request to
+	// another region (region_redirect.go) and that region accepted it
+	// into its own durable queue -- relay its live SSE stream onto this
+	// connection so the original caller sees one continuous stream
+	// regardless of which region actually ends up handling the job.
+	if outcome.RelayFrom != nil {
+		s.relaySSE(w, r, outcome.RelayFrom)
+		return
+	}
+
+	// DirectOnly is only ever set on an internal cross-region redirect hop
+	// (region_redirect.go) -- a real caller never sets it. It means "try
+	// direct, but if you can't, tell me cleanly, don't commit to your own
+	// queue" -- AttemptDirect already deleted the job row it inserted
+	// (fallbackOutcome, proxy.go) for exactly this case, so it's safe to
+	// just report the reason back synchronously here, no streaming, no
+	// Dispatch call.
+	if req.DirectOnly {
+		jsonErrorFields(w, "could not complete directly", http.StatusServiceUnavailable, map[string]any{
+			"reason":          outcome.FallbackReason,
+			"upstream_status": outcome.FallbackStatus,
+		})
+		return
+	}
+
 	// Fallback: subscribe before dispatching, so a fast completion can't
 	// publish before anyone's listening for it.
 	_, events, unsubscribe, err := s.aquifer.SubscribeJob(outcome.Job.ID)
@@ -345,6 +370,57 @@ func (s *Server) proxyJob(w http.ResponseWriter, r *http.Request) {
 		Reason: outcome.FallbackReason,
 		Status: outcome.FallbackStatus,
 	})
+}
+
+// relaySSE forwards a redirected region's own SSE response byte-for-byte
+// onto the original caller's connection in real time — a pure relay, not a
+// re-parse/re-emit, since preserving the target's own event framing
+// exactly is both simpler and more faithful than reconstructing it. Used
+// only when AttemptDirect's cross-region redirect (region_redirect.go)
+// found a sibling region that accepted the job into its own durable
+// queue; the caller sees one continuous stream regardless of which region
+// actually ends up handling the job. Owns closing resp.Body.
+func (s *Server) relaySSE(w http.ResponseWriter, r *http.Request, resp *http.Response) {
+	defer resp.Body.Close()
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		jsonError(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	for k, vs := range resp.Header {
+		for _, v := range vs {
+			w.Header().Add(k, v)
+		}
+	}
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		buf := make([]byte, 4096)
+		for {
+			n, err := resp.Body.Read(buf)
+			if n > 0 {
+				if _, werr := w.Write(buf[:n]); werr != nil {
+					return
+				}
+				flusher.Flush()
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-r.Context().Done():
+		// Caller disconnected — resp.Body.Close() (deferred above) unblocks
+		// the read goroutine, which exits shortly after via its own error.
+	}
 }
 
 // streamExistingJob handles a proxy-mode request that turned out to be a

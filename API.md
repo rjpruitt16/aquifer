@@ -16,6 +16,8 @@
 
 **Do not expose Aquifer directly to untrusted callers.** `url` is dispatched as a real HTTP request — if an arbitrary or untrusted party can set it, Aquifer becomes an open relay/SSRF vector: it can be pointed at your internal network, cloud metadata endpoints (`169.254.169.254`), or anything else the machine Aquifer runs on can reach, using Aquifer's own network position and identity. The intended caller is **your own trusted backend or gateway code** dispatching to a destination it already knows about — not an agent, end user, or any other party choosing the destination itself. Run Aquifer on a private network, not bound to a public address, and put your own authorization and destination allow-listing in front if agents need to reach it indirectly.
 
+As a second, narrower layer on top of that — `AQUIFER_ALLOWED_URL_DOMAINS` (comma-separated hostnames, e.g. `api.openai.com,internal.yourapp.com`) restricts which domains `url` is allowed to target at all; a subdomain of an allowed entry is permitted (`api.example.com` matches an allowlisted `example.com`). Unset by default — unrestricted, unchanged behavior — this doesn't replace the network/authorization guidance above, it's what Aquifer itself can enforce regardless of who's calling it. Applies to `url`-routed jobs only; pool-routed jobs (`pool_id`) have no caller-supplied destination to check.
+
 Idempotent — duplicate `idempotent_key` per `user_id` returns the existing job.
 
 **201** new job queued · **200 + `"duplicate": true`** already exists
@@ -36,6 +38,14 @@ Pool-routed jobs (`pool_id` instead of `url`) always fall straight to queue+stre
 ```bash
 curl -N -X POST http://localhost:8080/proxy -d '{ ... same shape as POST /jobs ... }'
 ```
+
+### Cross-region redirect (Fly.io)
+
+If `AQUIFER_FLY_REGIONS` is set, a `domain_degraded`/`upstream_unreachable`/`upstream_overloaded` fallback tries other regions Aquifer is deployed to — live, over Fly's private network — before falling back to this instance's own local queue. Off by default; unset, `/proxy` behaves exactly as described above with zero change.
+
+When it triggers: every known-live region is tried for a fast direct success first (in an order that's consistent across instances for the same request, so two callers racing the same job tend to try the same regions in the same order); if none can serve it directly, exactly one region is chosen — deterministically, from the job's `idempotent_key` — to accept it into its own durable queue, and its live event stream is relayed back onto your original connection, so you see one continuous stream regardless of which region actually ends up handling the job. If literally no known-live region can help either, this instance falls back to its own local queue exactly as it would with the feature off — cross-region redirect can only ever produce a *better* outcome than the baseline, never a worse one.
+
+**Honest limitation, not silently glossed over:** Aquifer's idempotency check remains per-instance (local SQLite/Pebble), unchanged by this feature. If the exact same `idempotent_key` is independently submitted to two different regions at nearly the same moment (a real scenario — a caller's own client retrying after a timeout can land on a different region via Fly's anycast), each region may independently begin its own redirect tour, and in rare cases the job could end up durably queued in two places. The deterministic region selection above narrows this window but does not close it. During cross-region redirect specifically, treat delivery as at-least-once, not exactly-once — standard practice for any webhook consumer, just worth calling out plainly here since it's a real, if narrow, exception to Aquifer's otherwise-exactly-once idempotency guarantee.
 
 ## GET /jobs/:id
 

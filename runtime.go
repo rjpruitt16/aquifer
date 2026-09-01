@@ -23,6 +23,12 @@ type RuntimeOptions struct {
 	// the Registry reads AQUIFER_DRAIN_* env vars itself — disabled unless
 	// AQUIFER_DRAIN_ENABLED is explicitly set to true.
 	DrainConfig *DrainConfig
+	// RegionAdapter backs /proxy's cross-region redirect (proxy.go,
+	// region_adapter.go). If nil, NewRuntime tries NewFlyRegionAdapter,
+	// which itself only activates if AQUIFER_FLY_REGIONS is set — same
+	// zero-code, env-var-only activation pattern as AQUIFER_DRAIN_ENABLED.
+	// Set this to plug in a RegionAdapter for a different platform.
+	RegionAdapter RegionAdapter
 }
 
 type Runtime struct {
@@ -77,6 +83,16 @@ func NewRuntime(opts RuntimeOptions) *Runtime {
 	}
 	admission := NewAdmissionController(*admissionLimits, dbPath)
 	app := NewAquifer(store, registry, broker, l8, admission, pools)
+
+	regionAdapter := opts.RegionAdapter
+	if regionAdapter == nil {
+		if fly := NewFlyRegionAdapter(); fly != nil {
+			regionAdapter = fly
+		}
+	}
+	if regionAdapter != nil {
+		app.SetRegionAdapter(regionAdapter)
+	}
 
 	return &Runtime{
 		Aquifer:   app,

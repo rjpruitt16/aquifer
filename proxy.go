@@ -41,6 +41,19 @@ type ProxyOutcome struct {
 	// was actually received (0 for a skipped or timed-out attempt).
 	FallbackReason string
 	FallbackStatus int
+
+	// RelayFrom is set when this request was redirected to another region
+	// (region_redirect.go) and that region accepted it into its own
+	// durable queue rather than completing directly — the caller
+	// (server.go's proxyJob) should relay every SSE event read from this
+	// response body onto the original caller's connection in real time,
+	// rather than subscribing to a local job's events the normal way.
+	// Job/Direct/FallbackReason are meaningless in this case; the real job
+	// now lives on the target region under its own ID — the caller learns
+	// it from the relayed stream itself, the same place it always would
+	// for any fallback. The caller owns closing RelayFrom.Body once the
+	// stream ends.
+	RelayFrom *http.Response
 }
 
 // AttemptDirect is proxy mode's entry point: persist the job (same
@@ -65,12 +78,16 @@ func (a *Aquifer) AttemptDirect(ctx context.Context, req JobRequest, timeout tim
 	// straight back to queue+stream, same as any other job the caller
 	// couldn't attempt directly.
 	if job.PoolID != "" {
-		return ProxyOutcome{Job: job, FallbackReason: "pool_routed"}
+		// Pool-routed jobs also skip cross-region redirect consideration:
+		// a redirected target instance has no reason to share the same
+		// pool membership, so there's no single canonical destination to
+		// even try there either.
+		return a.fallbackOutcome(ctx, req, job, "pool_routed", 0, timeout, false)
 	}
 
 	worker := a.registry.workerFor(job)
 	if worker.BreakerOpen() || worker.QueueActive() {
-		return ProxyOutcome{Job: job, FallbackReason: "domain_degraded"}
+		return a.fallbackOutcome(ctx, req, job, "domain_degraded", 0, timeout, true)
 	}
 
 	attemptCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -79,13 +96,13 @@ func (a *Aquifer) AttemptDirect(ctx context.Context, req JobRequest, timeout tim
 	counts := a.store.Counts()
 	resp, attemptErr := makeRequest(attemptCtx, job, job.URL, counts.TotalJobs, counts.QueueDepth, 0, a.l8)
 	if attemptErr != nil {
-		return ProxyOutcome{Job: job, FallbackReason: "upstream_unreachable"}
+		return a.fallbackOutcome(ctx, req, job, "upstream_unreachable", 0, timeout, true)
 	}
 	defer resp.Body.Close()
 
 	if overloadCooldown, overloaded := isOverloadSignal(resp); overloaded {
 		worker.TripBreaker(overloadCooldown)
-		return ProxyOutcome{Job: job, FallbackReason: "upstream_overloaded", FallbackStatus: resp.StatusCode}
+		return a.fallbackOutcome(ctx, req, job, "upstream_overloaded", resp.StatusCode, timeout, true)
 	}
 
 	// The upstream can proactively ask to be routed through the durable
@@ -110,6 +127,39 @@ func (a *Aquifer) AttemptDirect(ctx context.Context, req JobRequest, timeout tim
 	}
 
 	return ProxyOutcome{Job: job, Direct: true, Status: resp.StatusCode, Header: resp.Header, Body: body}
+}
+
+// fallbackOutcome builds AttemptDirect's local-fallback result — but tries
+// cross-region redirect first (region_redirect.go) when tryRedirect is
+// true, so a caller only ever falls back to its own local queue after a
+// sibling region genuinely couldn't take the job either (or redirect isn't
+// configured/available/gated at all, in which case attemptRedirect returns
+// immediately with no side effects). tryRedirect is false only for
+// pool-routed jobs, which have no single canonical destination for a
+// redirected target to even try.
+//
+// When req.DirectOnly is set (only ever true on an internal cross-region
+// redirect hop — a real caller never sets it), this instance has been
+// explicitly told not to commit to its own local queue: it deletes the job
+// row PrepareJob already inserted, mirroring exactly how PrepareJob itself
+// cleans up an admission-rejected job, so a DirectOnly hop that couldn't
+// succeed doesn't leave a ghost "queued" row that's never actually
+// dispatched. Without this, an origin's redirect tour trying several
+// regions in sequence could leave the SAME job durably committed in more
+// than one place — the earlier candidate queuing locally while the tour
+// moves on to try the next. (attemptRedirect itself never runs for a
+// DirectOnly request — job.OriginMachineID is already set by construction,
+// which is attemptRedirect's own first check.)
+func (a *Aquifer) fallbackOutcome(ctx context.Context, req JobRequest, job *Job, reason string, status int, timeout time.Duration, tryRedirect bool) ProxyOutcome {
+	if tryRedirect {
+		if outcome, ok := a.attemptRedirect(ctx, job, req.AccountQueueMode, timeout); ok {
+			return outcome
+		}
+	}
+	if req.DirectOnly {
+		a.store.DeleteJob(job.ID)
+	}
+	return ProxyOutcome{Job: job, FallbackReason: reason, FallbackStatus: status}
 }
 
 // isOverloadSignal reports whether a direct-dispatch response means "hand

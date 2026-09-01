@@ -20,10 +20,45 @@ type Aquifer struct {
 	l8        *L8Registry
 	admission *AdmissionController
 	pools     *PoolRegistry
+	// regionAdapter backs /proxy's cross-region redirect (proxy.go). Left
+	// nil by NewAquifer deliberately -- SetRegionAdapter is how it gets
+	// wired in, so every existing NewAquifer caller (tests included) is
+	// unaffected by this feature's existence. regionAdapterOrDefault()
+	// falls back to NoopRegionAdapter, matching ensureMetrics' pattern.
+	regionAdapter RegionAdapter
+	// redirectGate answers "is attempting cross-region redirect itself
+	// worth trying right now" -- see region_redirect.go. Always
+	// initialized (not nil-checked elsewhere), since it's cheap and every
+	// Aquifer instance can carry one regardless of whether redirect is
+	// ever actually configured.
+	redirectGate *redirectGate
+	// redirectTargetURL builds the URL a redirect hop dials for a given
+	// region. Set to the real .internal DNS builder by NewAquifer;
+	// overridable in tests (which can't resolve real Fly private-network
+	// DNS) to point at local httptest servers instead -- same
+	// injectable-for-testability pattern as FlyRegionAdapter.healthCheckURL.
+	redirectTargetURL func(region string) string
 }
 
 func NewAquifer(store JobStore, registry *Registry, broker *Broker, l8 *L8Registry, admission *AdmissionController, pools *PoolRegistry) *Aquifer {
-	return &Aquifer{store: store, registry: registry, broker: broker, l8: l8, admission: admission, pools: pools}
+	return &Aquifer{
+		store: store, registry: registry, broker: broker, l8: l8, admission: admission, pools: pools,
+		redirectGate:      &redirectGate{},
+		redirectTargetURL: defaultRedirectTargetURL,
+	}
+}
+
+// SetRegionAdapter wires in a RegionAdapter after construction -- kept
+// separate from NewAquifer's constructor so adding this opt-in feature
+// doesn't change NewAquifer's signature for every existing caller. A nil
+// Aquifer.regionAdapter (the default) behaves as NoopRegionAdapter via
+// regionAdapterOrDefault.
+func (a *Aquifer) SetRegionAdapter(adapter RegionAdapter) {
+	a.regionAdapter = adapter
+}
+
+func (a *Aquifer) regionAdapterOrDefault() RegionAdapter {
+	return ensureRegionAdapter(a.regionAdapter)
 }
 
 // RegisterPoolMember adds or refreshes (heartbeats) a member of a pool.
