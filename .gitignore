@@ -11,3 +11,9 @@ data/
 # L8 protocol — generated keys and trust cache
 .l8-key
 l8-trust/
+
+# region-redirect e2e test — deployment state, local to whoever ran it
+tests/region-redirect/.state
+tests/region-redirect/.aquifer_proxy.*
+tests/region-redirect/.recorder_proxy.*
+/fly.region-redirect-test.toml
