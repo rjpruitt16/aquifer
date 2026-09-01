@@ -49,6 +49,47 @@ A reroute is never silent to the caller — same principle as `proxy_fallback` a
 - **Direct success via redirect:** the response carries an `X-Aquifer-Served-By-Region` header naming which region actually served it, alongside the relayed status/headers/body — purely additive, doesn't change anything you're already parsing.
 - **Queued on another region:** before relaying that region's own stream, origin fires `event: rerouted`, `data: {"region"}` — so it arrives *before* that region's own `proxy_fallback`/`queued`/`dispatching` sequence, the same ordering `proxy_fallback` itself uses relative to `queued`.
 
+**A full queued-on-reroute sequence, start to finish** — this is what actually crosses the wire (Go's JSON encoder sorts map keys, so this is the literal byte-for-byte shape, not approximated). `position` fires every ~2s for as long as the job is genuinely still queued — real backpressure ticking down, not a fixed animation:
+
+```
+event: rerouted
+data: {"region":"ord"}
+
+event: proxy_fallback
+data: {"job_id":"b7e2...","reason":"domain_degraded"}
+
+event: queued
+data: {"job_id":"b7e2...","status":"queued"}
+
+event: position
+data: {"job_id":"b7e2...","position":3}
+
+event: position
+data: {"job_id":"b7e2...","position":2}
+
+event: position
+data: {"job_id":"b7e2...","position":1}
+
+event: dispatching
+data: {"job_id":"b7e2..."}
+
+event: completed
+data: {"body":"...","job_id":"b7e2...","response_status":200}
+```
+
+`job_id` throughout is **target's** ID, not origin's — origin deletes its own local row the instant redirect succeeds (`fallbackOutcome`), so there's no origin-side ID for the client to have seen and compare against. `proxy_fallback` has no `upstream_status` field here because `domain_degraded` always passes status `0`; that field only appears on an `upstream_overloaded`/`upstream_unreachable` fallback, where a real (or attempted) upstream response actually came back. Terminal event is `completed` on success or `failed` (`{"job_id","reason","response_status","body"}`) on failure — same shape `GET /jobs/:id/stream` uses, because this literally *is* that stream, just relayed from `target` through `origin`'s connection.
+
+If the original request set `webhook_url`, a webhook fires too — but separately, from **target** (whichever region actually completed the job), as its own independently-paced, durably-queued POST, not inline in this stream:
+
+```
+POST https://yourapp.com/webhooks/aquifer
+Content-Type: application/json
+
+{"job_id":"b7e2...","status":"completed","response_status":200,"body":"..."}
+```
+
+Both happen on success — the SSE `completed` event and the webhook — exactly the same contract every non-rerouted job already has (see [Webhooks](#webhooks) below). Reroute doesn't change that, it just changes which instance ends up firing it.
+
 If literally no known-live region can help either — none live at all, or every one tried and failed — the request is **rejected**, not queued locally: **429**, `Retry-After` set to `AQUIFER_REDIRECT_EXHAUSTED_RETRY_AFTER_SECONDS` (default 900 — a real regional outage, not a transient blip), `limit_reason: "redirect_exhausted"`, same response shape as an admission-control rejection. This is deliberate: queueing locally instead was never actually decided, so a caller (or its own retry/alerting logic) finds out the whole fleet is degraded rather than the request silently landing on one struggling instance's queue. A future per-deployment option to queue locally instead — plausible for an Aquifer instance dedicated to a single customer, where "queue and eventually deliver" might beat erroring — is a real possibility, just not the default and not built yet. This is separate from `AQUIFER_REDIRECT_GATE_COOLDOWN_SECONDS` (default 500), which is purely internal — how long this instance avoids re-running the whole candidate tour after finding nothing live, independent of what it tells the caller.
 
 **Honest limitation, not silently glossed over:** Aquifer's idempotency check remains per-instance (local SQLite/Pebble), unchanged by this feature. If the exact same `idempotent_key` is independently submitted to two different regions at nearly the same moment (a real scenario — a caller's own client retrying after a timeout can land on a different region via Fly's anycast), each region may independently begin its own redirect tour, and in rare cases the job could end up durably queued in two places. The deterministic region selection above narrows this window but does not close it. During cross-region redirect specifically, treat delivery as at-least-once, not exactly-once — standard practice for any webhook consumer, just worth calling out plainly here since it's a real, if narrow, exception to Aquifer's otherwise-exactly-once idempotency guarantee.
