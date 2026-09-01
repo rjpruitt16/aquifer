@@ -101,6 +101,36 @@ func TestFlyRegionAdapterPollOncePopulatesLiveRegionsExcludingUnhealthyAndSelf(t
 	}
 }
 
+func TestFlyRegionAdapterPollOnceOrdersLiveRegionsByLatencyAscending(t *testing.T) {
+	fast := fakeRegionServer(true)
+	defer fast.Close()
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(150 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer slow.Close()
+
+	servers := map[string]string{
+		"fast-region": fast.URL,
+		"slow-region": slow.URL,
+	}
+
+	a := &FlyRegionAdapter{
+		regions:    []string{"slow-region", "fast-region"}, // deliberately not already in latency order
+		httpClient: &http.Client{Timeout: 2 * time.Second},
+		healthCheckURL: func(region string) string {
+			return servers[region] + "/health"
+		},
+	}
+
+	a.pollOnce()
+
+	live := a.LiveRegions()
+	if len(live) != 2 || live[0] != "fast-region" || live[1] != "slow-region" {
+		t.Fatalf("expected LiveRegions() ordered nearest-first by measured RTT [fast-region slow-region], got %v", live)
+	}
+}
+
 func TestFlyRegionAdapterPollOnceTreatsUnreachableAsUnhealthy(t *testing.T) {
 	a := &FlyRegionAdapter{
 		regions:    []string{"xyz"},

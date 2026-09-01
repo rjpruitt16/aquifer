@@ -303,3 +303,57 @@ func TestRedirectDoesNotOriginateFromAnAlreadyRedirectedRequest(t *testing.T) {
 		t.Fatalf("expected origin's own domain_degraded fallback reason (not a redirected outcome), got: %s", out)
 	}
 }
+
+func TestRedirectExhaustionReturnsHardErrorNotLocalQueue(t *testing.T) {
+	oldSleep := retrySleepFunc.Load()
+	retrySleepFunc.Store(func(time.Duration) {})
+	t.Cleanup(func() { retrySleepFunc.Store(oldSleep) })
+	t.Setenv("AQUIFER_REDIRECT_EXHAUSTED_RETRY_AFTER_SECONDS", "123")
+
+	origin, _ := testAquiferWithLimits(t, AdmissionLimits{})
+	origin.SetRegionAdapter(fakeRegionAdapter{live: []string{"target-region"}, self: "origin-region"})
+	// Deliberately unreachable -- nothing listens here, so every hop in
+	// both phases comes back reached=false, forcing total exhaustion.
+	origin.redirectTargetURL = func(region string) string { return "http://127.0.0.1:1/proxy" }
+
+	originServer := NewServer(origin)
+	originHTTP := httptest.NewServer(originServer.Routes())
+	t.Cleanup(originHTTP.Close)
+
+	// origin's own local upstream is also broken, so AttemptDirect takes
+	// the domain_degraded fallback path and attemptRedirect actually runs
+	// -- exactly the real-world trigger, not a synthetic direct call.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer upstream.Close()
+	throwawayJob := NewJob(&JobRequest{UserID: "user-1", IdempotentKey: "throwaway4", URL: upstream.URL, Method: "GET"})
+	origin.registry.workerFor(throwawayJob).TripBreaker(time.Minute)
+
+	reqBody, _ := json.Marshal(JobRequest{
+		UserID:        "user-1",
+		IdempotentKey: "redirect-exhausted-key",
+		URL:           upstream.URL,
+		Method:        "GET",
+		WebhookURL:    "https://example.com/callback",
+	})
+
+	resp, err := http.Post(originHTTP.URL+"/proxy", "application/json", bytes.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("request to origin failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 on total redirect exhaustion, got %d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Retry-After"); got != "123" {
+		t.Fatalf("expected Retry-After to use AQUIFER_REDIRECT_EXHAUSTED_RETRY_AFTER_SECONDS (123), got %q", got)
+	}
+
+	body := make([]byte, 1024)
+	n, _ := resp.Body.Read(body)
+	if !strings.Contains(string(body[:n]), `"limit_reason":"redirect_exhausted"`) {
+		t.Fatalf("expected limit_reason=redirect_exhausted in the error body, got: %s", body[:n])
+	}
+}
