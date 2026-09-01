@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"math/rand"
 	"net/http"
 	"os"
 	"strings"
@@ -122,12 +121,19 @@ func rendezvousScore(candidate, key string) string {
 
 // orderedRedirectCandidates builds the tour order for a job: live regions
 // minus self and anything already visited, with the rendezvous-preferred
-// region always first (see rendezvousPick) and the rest randomized. There's
-// no real latency/distance data available to do genuine nearest-first
-// ordering, and a single fixed order for "second choice" candidates risks
-// every origin piling onto the same region during a correlated outage —
-// randomizing the remainder avoids that while still giving every origin
-// racing the same job a shared first choice.
+// region always first (see rendezvousPick, for cross-origin collision
+// avoidance — see attemptRedirect's doc comment) and everything else in
+// the order LiveRegions() already provided it in. For FlyRegionAdapter that
+// order is nearest-first by measured health-check round-trip time (see
+// region_adapter_fly.go's pollOnce) — the only real proximity signal
+// available, since Fly doesn't publish a region distance/latency table.
+// Earlier versions of this function randomized the non-preferred
+// candidates instead, reasoning that a fixed order risked every origin
+// piling onto the same "second choice" region during a correlated outage
+// — but phase 1 of attemptRedirect already probes every live candidate
+// regardless of order (DirectOnly, non-committing), so order only affects
+// which one wins the race to respond first, and biasing that toward the
+// fastest region is strictly better than leaving it random.
 func orderedRedirectCandidates(live, visited []string, self, idempotentKey string) []string {
 	visitedSet := make(map[string]bool, len(visited))
 	for _, v := range visited {
@@ -152,7 +158,6 @@ func orderedRedirectCandidates(live, visited []string, self, idempotentKey strin
 			rest = append(rest, region)
 		}
 	}
-	rand.Shuffle(len(rest), func(i, j int) { rest[i], rest[j] = rest[j], rest[i] })
 
 	return append([]string{preferred}, rest...)
 }

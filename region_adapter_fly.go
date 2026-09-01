@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -112,10 +113,22 @@ func (a *FlyRegionAdapter) pollLoop() {
 // pollOnce checks every configured region concurrently -- a real
 // improvement over sequential polling (cheap in Go; one slow/unreachable
 // region no longer delays finding out about the rest) -- and atomically
-// replaces the live list with this cycle's results.
+// replaces the live list with this cycle's results, ordered nearest-first
+// by the round-trip time this same health check just measured. There's no
+// separate "latency API" or static distance table involved: the health
+// check Aquifer already has to make to know a region is alive doubles as
+// the only real proximity signal available, without adding a second
+// mechanism just to rank regions. This ordering flows straight through to
+// region_redirect.go's orderedRedirectCandidates, which uses it as-is for
+// every candidate after the rendezvous-preferred pick.
 func (a *FlyRegionAdapter) pollOnce() {
+	type result struct {
+		region string
+		rtt    time.Duration
+	}
+
 	var wg sync.WaitGroup
-	results := make(chan string, len(a.regions))
+	results := make(chan result, len(a.regions))
 
 	for _, region := range a.regions {
 		if region == a.selfRegion {
@@ -124,8 +137,8 @@ func (a *FlyRegionAdapter) pollOnce() {
 		wg.Add(1)
 		go func(region string) {
 			defer wg.Done()
-			if a.regionHealthy(region) {
-				results <- region
+			if rtt, ok := a.regionRTT(region); ok {
+				results <- result{region: region, rtt: rtt}
 			}
 		}(region)
 	}
@@ -135,9 +148,15 @@ func (a *FlyRegionAdapter) pollOnce() {
 		close(results)
 	}()
 
-	var live []string
-	for region := range results {
-		live = append(live, region)
+	var collected []result
+	for r := range results {
+		collected = append(collected, r)
+	}
+	sort.Slice(collected, func(i, j int) bool { return collected[i].rtt < collected[j].rtt })
+
+	live := make([]string, len(collected))
+	for i, r := range collected {
+		live[i] = r.region
 	}
 
 	a.mu.Lock()
@@ -145,18 +164,25 @@ func (a *FlyRegionAdapter) pollOnce() {
 	a.mu.Unlock()
 }
 
-// regionHealthy checks one region. In production this hits the
-// region-prefixed internal DNS form -- <region>.$FLY_APP_NAME.internal,
-// confirmed against Fly's own docs to resolve directly to that region's
-// machines over the private 6PN network, bypassing the edge proxy entirely.
-// No header needed for addressing, unlike the public-proxy fly-prefer-region
-// trick some reference implementations use. See healthCheckURL's doc
-// comment for how tests substitute a reachable target.
-func (a *FlyRegionAdapter) regionHealthy(region string) bool {
+// regionRTT checks one region and reports whether it's healthy plus how
+// long the check took, standing in for real latency since Fly doesn't
+// publish a region-to-region distance/latency table. In production this
+// hits the region-prefixed internal DNS form --
+// <region>.$FLY_APP_NAME.internal, confirmed against Fly's own docs to
+// resolve directly to that region's machines over the private 6PN network,
+// bypassing the edge proxy entirely. No header needed for addressing,
+// unlike the public-proxy fly-prefer-region trick some reference
+// implementations use. See healthCheckURL's doc comment for how tests
+// substitute a reachable target.
+func (a *FlyRegionAdapter) regionRTT(region string) (time.Duration, bool) {
+	start := time.Now()
 	resp, err := a.httpClient.Get(a.healthCheckURL(region))
 	if err != nil {
-		return false
+		return 0, false
 	}
 	defer resp.Body.Close()
-	return resp.StatusCode == http.StatusOK
+	if resp.StatusCode != http.StatusOK {
+		return 0, false
+	}
+	return time.Since(start), true
 }
