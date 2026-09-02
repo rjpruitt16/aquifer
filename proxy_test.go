@@ -28,13 +28,22 @@ func TestIsOverloadSignal(t *testing.T) {
 		status   int
 		headers  map[string]string
 		overload bool
+		kind     string
 	}{
-		{"200 plain", 200, nil, false},
-		{"429", 429, nil, true},
-		{"500", 500, nil, true},
-		{"503", 503, nil, true},
-		{"200 with orca overload header", 200, map[string]string{orcaHeaderName: "TEXT named_metrics.kv_cache_usage_perc=0.95"}, true},
-		{"200 with orca healthy header", 200, map[string]string{orcaHeaderName: "TEXT named_metrics.kv_cache_usage_perc=0.10"}, false},
+		{"200 plain", 200, nil, false, ""},
+		{"429 defaults to queue", 429, nil, true, "queue"},
+		{"503 defaults to reroute", 503, nil, true, "reroute"},
+		// Deliberate narrowing from earlier behavior (every 5xx used to
+		// mean the same thing): 500/502/504 aren't in either default set,
+		// so they're not overload signals at all unless the upstream
+		// configures them explicitly -- relayed to the caller as a
+		// normal, if unfortunate, direct response.
+		{"500 not overload by default", 500, nil, false, ""},
+		{"502 not overload by default", 502, nil, false, ""},
+		{"200 with orca overload header is reroute-eligible", 200, map[string]string{orcaHeaderName: "TEXT named_metrics.kv_cache_usage_perc=0.95"}, true, "reroute"},
+		{"200 with orca healthy header", 200, map[string]string{orcaHeaderName: "TEXT named_metrics.kv_cache_usage_perc=0.10"}, false, ""},
+		{"upstream widens reroute codes to 5xx", 500, map[string]string{"X-Aqueduct-Reroute-Codes": "5xx"}, true, "reroute"},
+		{"upstream configures a custom queue code", 529, map[string]string{"X-Aqueduct-Queue-Codes": "429,529"}, true, "queue"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -42,9 +51,12 @@ func TestIsOverloadSignal(t *testing.T) {
 			for k, v := range c.headers {
 				resp.Header.Set(k, v)
 			}
-			_, overloaded := isOverloadSignal(resp)
+			_, kind, overloaded := isOverloadSignal(resp)
 			if overloaded != c.overload {
 				t.Fatalf("expected overloaded=%v, got %v", c.overload, overloaded)
+			}
+			if kind != c.kind {
+				t.Fatalf("expected kind=%q, got %q", c.kind, kind)
 			}
 		})
 	}
@@ -102,11 +114,14 @@ func TestAttemptDirectSuccessBypassesQueue(t *testing.T) {
 	}
 }
 
-func TestAttemptDirectFallsBackOn5xxWithoutCompletingTheJob(t *testing.T) {
+func TestAttemptDirectFallsBackOn503WithoutCompletingTheJob(t *testing.T) {
 	app, store := testAquiferWithLimits(t, AdmissionLimits{})
 
+	// 503 is the default reroute-eligible code (classifyOverload,
+	// proxy.go) -- a plain 500 deliberately no longer triggers fallback by
+	// default, see TestIsOverloadSignal.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
+		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
 	defer srv.Close()
 
@@ -117,7 +132,7 @@ func TestAttemptDirectFallsBackOn5xxWithoutCompletingTheJob(t *testing.T) {
 		t.Fatalf("unexpected error: %v", outcome.Err)
 	}
 	if outcome.Direct {
-		t.Fatalf("expected fallback on 500, got a direct completion: %+v", outcome)
+		t.Fatalf("expected fallback on 503, got a direct completion: %+v", outcome)
 	}
 	if outcome.Job == nil {
 		t.Fatalf("expected a persisted job to fall back with, got nil")
@@ -126,6 +141,32 @@ func TestAttemptDirectFallsBackOn5xxWithoutCompletingTheJob(t *testing.T) {
 	job := store.GetJob(outcome.Job.ID)
 	if job.Status != StatusQueued {
 		t.Fatalf("expected job left in queued state for the caller to Dispatch, got %q", job.Status)
+	}
+}
+
+func TestAttemptDirectDoesNotFallBackOnPlain500ByDefault(t *testing.T) {
+	// Deliberate narrowing from earlier behavior: a bare 500 isn't in
+	// either default classification set (queue: 429, reroute: 503), so
+	// it's relayed to the caller as a normal, if unfortunate, direct
+	// response -- not treated as an overload signal at all.
+	app, _ := testAquiferWithLimits(t, AdmissionLimits{})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	req := proxyJobRequest("user-1", "key-2-plain-500", srv.URL)
+	outcome := app.AttemptDirect(context.Background(), req, 2*time.Second)
+
+	if outcome.Err != nil {
+		t.Fatalf("unexpected error: %v", outcome.Err)
+	}
+	if !outcome.Direct {
+		t.Fatalf("expected a plain 500 to relay directly (not overload by default), got: %+v", outcome)
+	}
+	if outcome.Status != http.StatusInternalServerError {
+		t.Fatalf("expected status 500 relayed verbatim, got %d", outcome.Status)
 	}
 }
 
@@ -399,9 +440,12 @@ func TestProxyJobHTTPFallsBackAndStreamsToEventualCompletion(t *testing.T) {
 		// Fails the direct attempt (hit 1) and the queue's own first retry
 		// (hit 2), then succeeds — well within maxRetries — so the job
 		// reaches a real "completed" event via the normal AccountQueue path
-		// this test is proving proxy mode falls back into correctly.
+		// this test is proving proxy mode falls back into correctly. 503
+		// (not 500) for the direct attempt specifically, since that's the
+		// default reroute-eligible/overload code now (classifyOverload,
+		// proxy.go) — a plain 500 no longer triggers fallback by default.
 		if hits.Add(1) <= 2 {
-			w.WriteHeader(http.StatusInternalServerError)
+			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
 		w.WriteHeader(http.StatusOK)

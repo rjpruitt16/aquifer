@@ -176,7 +176,7 @@ func TestRedirectSucceedsDirectlyOnTargetRegion(t *testing.T) {
 	defer upstream.Close()
 
 	throwawayJob := NewJob(&JobRequest{UserID: "user-1", IdempotentKey: "throwaway", URL: upstream.URL, Method: "GET"})
-	origin.registry.workerFor(throwawayJob).TripBreaker(time.Minute)
+	origin.registry.workerFor(throwawayJob).TripBreaker(time.Minute, "reroute")
 	_ = target
 
 	reqBody, _ := json.Marshal(JobRequest{
@@ -227,7 +227,7 @@ func TestRedirectFallsBackToTargetsQueueWhenNoRegionCanDispatchDirectly(t *testi
 	defer upstream.Close()
 
 	throwawayJob := NewJob(&JobRequest{UserID: "user-1", IdempotentKey: "throwaway2", URL: upstream.URL, Method: "GET"})
-	origin.registry.workerFor(throwawayJob).TripBreaker(time.Minute)
+	origin.registry.workerFor(throwawayJob).TripBreaker(time.Minute, "reroute")
 	_ = target
 
 	reqBody, _ := json.Marshal(JobRequest{
@@ -283,7 +283,7 @@ func TestRedirectDoesNotOriginateFromAnAlreadyRedirectedRequest(t *testing.T) {
 	defer upstream.Close()
 
 	throwawayJob := NewJob(&JobRequest{UserID: "user-1", IdempotentKey: "throwaway3", URL: upstream.URL, Method: "GET"})
-	origin.registry.workerFor(throwawayJob).TripBreaker(time.Minute)
+	origin.registry.workerFor(throwawayJob).TripBreaker(time.Minute, "reroute")
 
 	// This request already carries OriginMachineID -- as if it were itself
 	// a redirect hop from some OTHER instance. origin must not try to
@@ -319,6 +319,57 @@ func TestRedirectDoesNotOriginateFromAnAlreadyRedirectedRequest(t *testing.T) {
 	}
 }
 
+func TestQueueKindBreakerDoesNotAttemptRedirect(t *testing.T) {
+	oldSleep := retrySleepFunc.Load()
+	retrySleepFunc.Store(func(time.Duration) {})
+	t.Cleanup(func() { retrySleepFunc.Store(oldSleep) })
+
+	origin, originHTTP, target := buildRedirectTestPair(t)
+	_ = target
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer upstream.Close()
+
+	// A "queue" kind trip (e.g. a 429, or X-Aqueduct-Queue-Active) must
+	// never attempt redirect on a later retry during that same cooldown —
+	// only a "reroute" kind trip does (see url_worker.go's BreakerKind).
+	// target is live and reachable (buildRedirectTestPair), so if this
+	// wrongly tried redirect, it would succeed directly against target
+	// instead of falling to origin's own local queue.
+	throwawayJob := NewJob(&JobRequest{UserID: "user-1", IdempotentKey: "throwaway-queue-kind", URL: upstream.URL, Method: "GET"})
+	origin.registry.workerFor(throwawayJob).TripBreaker(time.Minute, "queue")
+
+	reqBody, _ := json.Marshal(JobRequest{
+		UserID:        "user-1",
+		IdempotentKey: "queue-kind-key",
+		URL:           upstream.URL,
+		Method:        "GET",
+		WebhookURL:    "https://example.com/callback",
+	})
+
+	resp, err := http.Post(originHTTP.URL+"/proxy", "application/json", bytes.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("request to origin failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if ct := resp.Header.Get("Content-Type"); ct != "text/event-stream" {
+		t.Fatalf("expected origin's OWN local fallback stream (queue-kind trip must not redirect), got Content-Type %q", ct)
+	}
+
+	buf := make([]byte, 4096)
+	n, _ := io.ReadFull(io.LimitReader(resp.Body, 4096), buf)
+	out := string(buf[:n])
+	if !strings.Contains(out, `"reason":"domain_degraded"`) {
+		t.Fatalf("expected origin's own domain_degraded fallback reason (not a redirected outcome), got: %s", out)
+	}
+	if strings.Contains(out, "event: rerouted") {
+		t.Fatalf("expected no rerouted event -- a queue-kind breaker trip must never redirect, got: %s", out)
+	}
+}
+
 func TestRedirectExhaustionReturnsHardErrorNotLocalQueue(t *testing.T) {
 	oldSleep := retrySleepFunc.Load()
 	retrySleepFunc.Store(func(time.Duration) {})
@@ -343,7 +394,7 @@ func TestRedirectExhaustionReturnsHardErrorNotLocalQueue(t *testing.T) {
 	}))
 	defer upstream.Close()
 	throwawayJob := NewJob(&JobRequest{UserID: "user-1", IdempotentKey: "throwaway4", URL: upstream.URL, Method: "GET"})
-	origin.registry.workerFor(throwawayJob).TripBreaker(time.Minute)
+	origin.registry.workerFor(throwawayJob).TripBreaker(time.Minute, "reroute")
 
 	reqBody, _ := json.Marshal(JobRequest{
 		UserID:        "user-1",

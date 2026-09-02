@@ -25,6 +25,7 @@ type URLWorker struct {
 	enqueueWebhook   webhookEnqueuer
 	onIdle           func(string)
 	breakerUntil     time.Time // zero value means the breaker is closed
+	breakerKind      string    // "queue" or "reroute" — which kind of signal tripped it, see classifyOverload
 }
 
 // BreakerOpen reports whether proxy mode should skip a direct dispatch
@@ -37,15 +38,30 @@ func (w *URLWorker) BreakerOpen() bool {
 	return !w.breakerUntil.IsZero() && time.Now().Before(w.breakerUntil)
 }
 
-// TripBreaker opens the breaker for cooldown. No separate half-open state
-// is needed: once breakerUntil passes, BreakerOpen naturally returns false
+// BreakerKind reports which kind of signal tripped the breaker last —
+// "queue" or "reroute" (see classifyOverload) — only meaningful while
+// BreakerOpen is true. A subsequent request arriving while the breaker is
+// still open has no fresh response of its own to classify, so it reuses
+// whichever kind actually tripped it: a domain breaker-tripped by a 429
+// stays queue-only on every retry during that cooldown, not
+// reroute-eligible just because SOME overload happened.
+func (w *URLWorker) BreakerKind() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.breakerKind
+}
+
+// TripBreaker opens the breaker for cooldown, recording which kind of
+// signal caused it (see BreakerKind). No separate half-open state is
+// needed: once breakerUntil passes, BreakerOpen naturally returns false
 // again, so the next request after the cooldown is itself a real probe
 // against the live upstream — success leaves the breaker closed, a repeat
 // overload signal re-trips it via another TripBreaker call.
-func (w *URLWorker) TripBreaker(cooldown time.Duration) {
+func (w *URLWorker) TripBreaker(cooldown time.Duration, kind string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.breakerUntil = time.Now().Add(cooldown)
+	w.breakerKind = kind
 }
 
 // QueueActive reports whether any of this domain's account queues currently

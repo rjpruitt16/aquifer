@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -12,6 +13,8 @@ const (
 	defaultProxyBreakerRetryMultiplier   = 3
 	defaultProxyBreakerCooldownSeconds   = 5
 	defaultProxyDirectAttemptTimeoutSecs = 3
+	defaultQueueCodes                    = "429"
+	defaultRerouteCodes                  = "503"
 )
 
 // ProxyOutcome is AttemptDirect's result. Exactly one of the following
@@ -91,9 +94,21 @@ func (a *Aquifer) AttemptDirect(ctx context.Context, req JobRequest, timeout tim
 		return a.fallbackOutcome(ctx, req, job, "pool_routed", 0, timeout, false)
 	}
 
+	// BreakerOpen and QueueActive are checked separately, not OR'd together
+	// into one branch: QueueActive alone (breaker closed) is routine
+	// pacing under a configured rps limit -- Aquifer working exactly as
+	// designed, not a signal anything needs rerouting -- so it never tries
+	// redirect, only ever falls back to this instance's own queue exactly
+	// as it always has. BreakerOpen means an actual overload signal
+	// tripped it; whether THAT retry also tries redirect depends on which
+	// kind of signal tripped it (BreakerKind), decided below the same way
+	// a fresh overload response decides it.
 	worker := a.registry.workerFor(job)
-	if worker.BreakerOpen() || worker.QueueActive() {
-		return a.fallbackOutcome(ctx, req, job, "domain_degraded", 0, timeout, true)
+	if worker.BreakerOpen() {
+		return a.fallbackOutcome(ctx, req, job, "domain_degraded", 0, timeout, worker.BreakerKind() == "reroute")
+	}
+	if worker.QueueActive() {
+		return a.fallbackOutcome(ctx, req, job, "domain_degraded", 0, timeout, false)
 	}
 
 	attemptCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -106,9 +121,9 @@ func (a *Aquifer) AttemptDirect(ctx context.Context, req JobRequest, timeout tim
 	}
 	defer resp.Body.Close()
 
-	if overloadCooldown, overloaded := isOverloadSignal(resp); overloaded {
-		worker.TripBreaker(overloadCooldown)
-		return a.fallbackOutcome(ctx, req, job, "upstream_overloaded", resp.StatusCode, timeout, true)
+	if overloadCooldown, kind, overloaded := isOverloadSignal(resp); overloaded {
+		worker.TripBreaker(overloadCooldown, kind)
+		return a.fallbackOutcome(ctx, req, job, "upstream_overloaded", resp.StatusCode, timeout, kind == "reroute")
 	}
 
 	// The upstream can proactively ask to be routed through the durable
@@ -116,9 +131,10 @@ func (a *Aquifer) AttemptDirect(ctx context.Context, req JobRequest, timeout tim
 	// otherwise-healthy response, e.g. "I'm nearing capacity, stop firing
 	// directly at me." Unlike isOverloadSignal, this response is still a
 	// real, valid answer already in hand: it's relayed to the caller as
-	// normal below, only future requests to this domain start queuing.
+	// normal below, only future requests to this domain start queuing --
+	// always "queue" kind, never reroute, matching its own name.
 	if pacingHeader(resp.Header, "Queue-Active") == "true" {
-		worker.TripBreaker(breakerCooldown(resp.Header))
+		worker.TripBreaker(breakerCooldown(resp.Header), "queue")
 	}
 
 	body, _ := io.ReadAll(resp.Body)
@@ -178,24 +194,102 @@ func (a *Aquifer) fallbackOutcome(ctx context.Context, req JobRequest, job *Job,
 }
 
 // isOverloadSignal reports whether a direct-dispatch response means "hand
-// this off to the durable, paced queue instead" — 429, any 5xx, or an ORCA
-// endpoint-load-metrics header indicating overload (orcaRps returning
-// non-nil, i.e. >=70% KV-cache utilization). Distinct from execute()'s own
+// this off to the durable, paced queue instead" — classifyOverload decides
+// which of two ways: "queue" locally, or also try cross-region redirect
+// first (region_redirect.go) before queueing. Distinct from execute()'s own
 // >=500-only retry classification (account_queue.go): a direct attempt has
-// no retry loop of its own, so any of these means fall back, not retry
+// no retry loop of its own, so either kind means fall back, not retry
 // inline. When true, the second return value is how long to trip this
 // upstream's circuit breaker for — anchored to the upstream's own
 // Retry-After header when it sends one (times a configurable safety
 // multiplier), falling back to a fixed configured default otherwise, since
 // 5xx/timeout/ORCA signals don't carry that header.
-func isOverloadSignal(resp *http.Response) (cooldown time.Duration, overloaded bool) {
-	isOverload := resp.StatusCode == http.StatusTooManyRequests ||
-		resp.StatusCode >= 500 ||
-		orcaRps(resp.Header) != nil
-	if !isOverload {
-		return 0, false
+func isOverloadSignal(resp *http.Response) (cooldown time.Duration, kind string, overloaded bool) {
+	kind, overloaded = classifyOverload(resp.Header, resp.StatusCode)
+	if !overloaded {
+		return 0, "", false
 	}
-	return breakerCooldown(resp.Header), true
+	return breakerCooldown(resp.Header), kind, true
+}
+
+// classifyOverload decides whether a status code means "queue locally" or
+// "try cross-region redirect first" — a real, deliberate scope narrowing
+// from earlier behavior (every 5xx used to mean the same thing): 429 is
+// usually a global per-key rate limit, not a regional one, so rerouting to
+// a sibling region wouldn't even help — reroute is reserved for signals
+// that plausibly ARE regional (503 by default). A status matching neither
+// configured set isn't treated as overload at all — relayed to the caller
+// as a normal, if unfortunate, direct response, exactly like any other
+// non-2xx status an upstream might legitimately return.
+//
+// AQUIFER_QUEUE_CODES / AQUIFER_REROUTE_CODES (as X-Aqueduct-Queue-Codes /
+// X-Aqueduct-Reroute-Codes response headers, same dual-namespace lookup as
+// every other Aqueduct header) let the upstream configure its own sets,
+// comma-separated, each entry either a literal code ("502") or an HTTP
+// status class ("5xx") — due diligence is on the upstream to say so if it
+// uses something nonstandard; defaults are deliberately narrow
+// (429 → queue, 503 → reroute) rather than sweeping in every 5xx.
+//
+// An ORCA overload signal (orcaRps returning non-nil) is always
+// reroute-eligible — sustained backend load reported this way is commonly
+// instance/pool-specific, unlike a generic rate limit.
+func classifyOverload(headers http.Header, status int) (kind string, overloaded bool) {
+	if orcaRps(headers) != nil {
+		return "reroute", true
+	}
+	if codeListMatches(parseCodeList(headerOrDefault(headers, "Reroute-Codes", defaultRerouteCodes)), status) {
+		return "reroute", true
+	}
+	if codeListMatches(parseCodeList(headerOrDefault(headers, "Queue-Codes", defaultQueueCodes)), status) {
+		return "queue", true
+	}
+	return "", false
+}
+
+func headerOrDefault(headers http.Header, name, def string) string {
+	if v := pacingHeader(headers, name); v != "" {
+		return v
+	}
+	return def
+}
+
+// codeMatcher matches either one literal status code or a whole HTTP
+// status class ("5xx" matches every 500-599 code).
+type codeMatcher struct {
+	literal int
+	class   int // 1-5 for 1xx-5xx; 0 means this matcher is a literal, not a class
+}
+
+func (m codeMatcher) matches(status int) bool {
+	if m.class != 0 {
+		return status/100 == m.class
+	}
+	return status == m.literal
+}
+
+func parseCodeList(raw string) []codeMatcher {
+	var matchers []codeMatcher
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if len(part) == 3 && (part[1] == 'x' || part[1] == 'X') && (part[2] == 'x' || part[2] == 'X') &&
+			part[0] >= '1' && part[0] <= '5' {
+			matchers = append(matchers, codeMatcher{class: int(part[0] - '0')})
+			continue
+		}
+		if n, err := strconv.Atoi(part); err == nil {
+			matchers = append(matchers, codeMatcher{literal: n})
+		}
+	}
+	return matchers
+}
+
+func codeListMatches(matchers []codeMatcher, status int) bool {
+	for _, m := range matchers {
+		if m.matches(status) {
+			return true
+		}
+	}
+	return false
 }
 
 func breakerCooldown(headers http.Header) time.Duration {
