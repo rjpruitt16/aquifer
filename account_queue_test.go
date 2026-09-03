@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 // TestMakeRequestRequestsOrcaMetricsByDefault guards the exact casing sent:
@@ -84,5 +85,66 @@ func TestSetLoadHeaderWritesBothNamespaces(t *testing.T) {
 	}
 	if got := headers.Get("X-Aquifer-Queue-Depth"); got != "42" {
 		t.Fatalf("expected Aquifer header, got %q", got)
+	}
+}
+
+// TestSlowStartBeginsAtMinRPS proves a queue constructed with slowStart=true
+// starts dispatching at minRPS regardless of how high its configured
+// ceiling is, rather than firing at the full configured rate immediately --
+// a fresh queue's first request has no prior response to read a pacing
+// signal from, so the starting point has to be decided up front, not
+// adjusted reactively the way ordinary header-driven pacing is.
+func TestSlowStartBeginsAtMinRPS(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(dir + "/aquifer.db")
+	t.Cleanup(func() {
+		store.Close()
+		time.Sleep(20 * time.Millisecond)
+	})
+	broker := NewBroker()
+	l8 := NewL8Registry(dir+"/.l8-key", dir+"/l8-trust")
+
+	const configuredRPS = 100.0
+	q := NewAccountQueue("tenant-1", "https://example.com", configuredRPS, 5, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, map[string]any) {}, func(string) {}, true, func(bool) {})
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if q.RPS() > 0 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	if got := q.RPS(); got != minRPS {
+		t.Fatalf("expected slow-start queue to begin at minRPS (%v), got %v", minRPS, got)
+	}
+}
+
+// TestSlowStartOffByDefaultStartsAtConfiguredRPS confirms the inverse: a
+// queue that never opts in fires at its full configured rate immediately,
+// same as before slow start existed.
+func TestSlowStartOffByDefaultStartsAtConfiguredRPS(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(dir + "/aquifer.db")
+	t.Cleanup(func() {
+		store.Close()
+		time.Sleep(20 * time.Millisecond)
+	})
+	broker := NewBroker()
+	l8 := NewL8Registry(dir+"/.l8-key", dir+"/l8-trust")
+
+	const configuredRPS = 12.0
+	q := NewAccountQueue("tenant-1", "https://example.com", configuredRPS, 5, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, map[string]any) {}, func(string) {}, false, func(bool) {})
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if q.RPS() > 0 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	if got := q.RPS(); got != configuredRPS {
+		t.Fatalf("expected non-slow-start queue to begin at configuredRPS (%v), got %v", configuredRPS, got)
 	}
 }

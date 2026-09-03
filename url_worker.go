@@ -17,6 +17,7 @@ type URLWorker struct {
 	maxConc          int
 	pool             *Pool // nil unless this worker dispatches into a registered pool instead of a fixed domain
 	accountQueueMode bool
+	slowStart        bool // set by an upstream's X-Aqueduct-Slow-Start response header; applies to the *next* new queue created for this domain, not retroactively
 	queues           map[string]*AccountQueue
 	store            JobStore
 	broker           *Broker
@@ -200,6 +201,10 @@ func (w *URLWorker) Enqueue(job *Job) {
 			if empty && w.onIdle != nil {
 				w.onIdle(w.domain)
 			}
+		}, w.slowStart, func(v bool) {
+			w.mu.Lock()
+			w.slowStart = v
+			w.mu.Unlock()
 		})
 		w.queues[key] = q
 	}

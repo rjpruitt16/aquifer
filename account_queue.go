@@ -39,6 +39,7 @@ type jobDoneMsg struct {
 	rps           *float64
 	maxConcurrent *int
 	accountQueue  *string
+	slowStart     *bool
 }
 
 // webhookEnqueuer queues a webhook delivery through the same account-queue
@@ -92,7 +93,7 @@ func (q *AccountQueue) Throttle(rps float64) {
 	}
 }
 
-func NewAccountQueue(key, upstream string, rps float64, maxConc int, pool *Pool, store JobStore, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, enqueueWebhook webhookEnqueuer, onIdle func(string)) *AccountQueue {
+func NewAccountQueue(key, upstream string, rps float64, maxConc int, pool *Pool, store JobStore, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, enqueueWebhook webhookEnqueuer, onIdle func(string), slowStart bool, onSlowStartSignal func(bool)) *AccountQueue {
 	q := &AccountQueue{
 		key:            key,
 		upstream:       upstream,
@@ -105,7 +106,7 @@ func NewAccountQueue(key, upstream string, rps float64, maxConc int, pool *Pool,
 		metrics:        ensureMetrics(metrics),
 		enqueueWebhook: enqueueWebhook,
 	}
-	go q.supervise(rps, maxConc, onIdle)
+	go q.supervise(rps, maxConc, onIdle, slowStart, onSlowStartSignal)
 	return q
 }
 
@@ -114,7 +115,7 @@ func (q *AccountQueue) Enqueue(job *Job) {
 	q.cmds <- job
 }
 
-func (q *AccountQueue) supervise(rps float64, maxConc int, onIdle func(string)) {
+func (q *AccountQueue) supervise(rps float64, maxConc int, onIdle func(string), slowStart bool, onSlowStartSignal func(bool)) {
 	for {
 		panicked := false
 		func() {
@@ -124,7 +125,7 @@ func (q *AccountQueue) supervise(rps float64, maxConc int, onIdle func(string)) 
 					panicked = true
 				}
 			}()
-			q.run(rps, maxConc)
+			q.run(rps, maxConc, slowStart, onSlowStartSignal)
 		}()
 
 		if panicked {
@@ -154,7 +155,7 @@ func accountQueueIdleTimeout() time.Duration {
 	return time.Duration(envInt64("AQUIFER_IDLE_TIMEOUT_SECONDS", defaultAccountQueueIdleTimeoutSeconds)) * time.Second
 }
 
-func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int) {
+func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowStart bool, onSlowStartSignal func(bool)) {
 	idleTimeout := accountQueueIdleTimeout()
 	idle := time.NewTimer(idleTimeout)
 	defer idle.Stop()
@@ -163,6 +164,13 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int) {
 	defer positionTicker.Stop()
 
 	rps := configuredRPS
+	if slowStart {
+		// Start below the configured ceiling instead of firing at it
+		// immediately -- the existing creep-back-up-toward-configuredRPS
+		// behavior below (msg.rps == nil branch) is the ramp; slow start
+		// only changes the starting point, not the mechanism.
+		rps = minRPS
+	}
 	maxConc := configuredMaxConc
 	lastRequestAt := time.Time{}
 	inFlight := 0
@@ -263,6 +271,9 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int) {
 			q.currentRPS.Store(int64(rps * 100))
 			if rps != prevRPS {
 				q.metrics.FlowRate(q.upstream, rps)
+			}
+			if msg.slowStart != nil && onSlowStartSignal != nil {
+				onSlowStartSignal(*msg.slowStart)
 			}
 			idle.Reset(idleTimeout)
 
@@ -417,6 +428,10 @@ func execute(job *Job, dispatchURL, upstream string, store JobStore, broker *Bro
 	}
 	if val := pacingHeader(resp.Header, "Account-Queue"); val != "" {
 		msg.accountQueue = &val
+	}
+	if val := pacingHeader(resp.Header, "Slow-Start"); val == "true" || val == "false" {
+		enabled := val == "true"
+		msg.slowStart = &enabled
 	}
 	return msg
 }

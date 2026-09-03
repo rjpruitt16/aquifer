@@ -1,6 +1,8 @@
 package aquifer
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
@@ -120,6 +122,86 @@ func TestAccountQueueHeaderOmittedSharesQueue(t *testing.T) {
 	}
 	if _, ok := w.queues[sharedKey]; !ok {
 		t.Errorf("expected both jobs to land in the shared queue, found none (queues: %v)", queueKeys(w.queues))
+	}
+}
+
+// TestSlowStartHeaderAppliesToNextNewQueueOnly proves the persistence and
+// timing this feature depends on: an upstream's X-Aqueduct-Slow-Start
+// response header updates the domain's URLWorker, and that update applies
+// to the *next* queue created for that domain -- not the queue whose
+// response actually carried the header (which is already running, past the
+// point where a starting rate matters), and not retroactively.
+func TestSlowStartHeaderAppliesToNextNewQueueOnly(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Aqueduct-Slow-Start", "true")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	r := testRegistry(t)
+
+	first := jobFor("tenant-first", "key-first")
+	first.URL = srv.URL
+	first.WebhookURL = ""
+	r.Enqueue(first, "enabled")
+
+	key := domainKey(first.URL)
+
+	// Wait for the first job's response (carrying the header) to be
+	// processed and the worker's slowStart flag flipped.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		r.mu.Lock()
+		w, ok := r.workers[key]
+		r.mu.Unlock()
+		if ok {
+			w.mu.Lock()
+			flipped := w.slowStart
+			w.mu.Unlock()
+			if flipped {
+				break
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	r.mu.Lock()
+	w, ok := r.workers[key]
+	r.mu.Unlock()
+	if !ok {
+		t.Fatalf("expected a worker for domain %q", key)
+	}
+
+	w.mu.Lock()
+	if !w.slowStart {
+		w.mu.Unlock()
+		t.Fatalf("expected worker.slowStart to be true after a response carrying X-Aqueduct-Slow-Start: true")
+	}
+	w.mu.Unlock()
+
+	second := jobFor("tenant-second", "key-second")
+	second.URL = srv.URL
+	second.WebhookURL = ""
+	r.Enqueue(second, "enabled")
+
+	secondKey := jobQueueKey(second)
+	var q *AccountQueue
+	deadline = time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		w.mu.Lock()
+		q = w.queues[secondKey]
+		w.mu.Unlock()
+		if q != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if q == nil {
+		t.Fatalf("expected a dedicated queue for the second tenant")
+	}
+
+	if got := q.RPS(); got != minRPS {
+		t.Fatalf("expected the second tenant's fresh queue to start at minRPS (%v) after the domain saw the slow-start signal, got %v", minRPS, got)
 	}
 }
 
