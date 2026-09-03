@@ -7,18 +7,19 @@ import (
 )
 
 type Registry struct {
-	mu         sync.Mutex
-	workers    map[string]*URLWorker
-	store      JobStore
-	cfg        *Config
-	broker     *Broker
-	l8         *L8Registry
-	metrics    MetricsAdapter
-	pools      *PoolRegistry
-	totalJobs  atomic.Int64
-	queueDepth atomic.Int64
-	drainCfg   DrainConfig
-	drainState atomic.Value // DrainState, read from Health() concurrently with the watchdog goroutine writing it
+	mu              sync.Mutex
+	workers         map[string]*URLWorker
+	store           JobStore
+	cfg             *Config
+	broker          *Broker
+	l8              *L8Registry
+	metrics         MetricsAdapter
+	pools           *PoolRegistry
+	totalJobs       atomic.Int64
+	queueDepth      atomic.Int64
+	drainCfg        DrainConfig
+	drainState      atomic.Value // DrainState, read from Health() concurrently with the watchdog goroutine writing it
+	registrationCfg RegistrationConfig
 }
 
 // NewRegistry reads drain mode's config from AQUIFER_DRAIN_* env vars
@@ -28,14 +29,15 @@ type Registry struct {
 // (RuntimeOptions.DrainConfig) call ConfigureDrain after construction.
 func NewRegistry(store JobStore, cfg *Config, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, pools *PoolRegistry) *Registry {
 	r := &Registry{
-		workers:  make(map[string]*URLWorker),
-		store:    store,
-		cfg:      cfg,
-		broker:   broker,
-		l8:       l8,
-		metrics:  ensureMetrics(metrics),
-		pools:    pools,
-		drainCfg: LoadDrainConfig(),
+		workers:         make(map[string]*URLWorker),
+		store:           store,
+		cfg:             cfg,
+		broker:          broker,
+		l8:              l8,
+		metrics:         ensureMetrics(metrics),
+		pools:           pools,
+		drainCfg:        LoadDrainConfig(),
+		registrationCfg: LoadRegistrationConfig(),
 	}
 	counts := store.Counts()
 	r.totalJobs.Store(counts.TotalJobs)
@@ -43,6 +45,9 @@ func NewRegistry(store JobStore, cfg *Config, broker *Broker, l8 *L8Registry, me
 	r.drainState.Store(DrainStateActive)
 	if r.drainCfg.Enabled {
 		go r.drainWatchdogLoop()
+	}
+	if r.registrationCfg.Enabled() {
+		go r.registrationLoop()
 	}
 	return r
 }

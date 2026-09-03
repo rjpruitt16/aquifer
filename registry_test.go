@@ -200,8 +200,30 @@ func TestSlowStartHeaderAppliesToNextNewQueueOnly(t *testing.T) {
 		t.Fatalf("expected a dedicated queue for the second tenant")
 	}
 
-	if got := q.RPS(); got != minRPS {
-		t.Fatalf("expected the second tenant's fresh queue to start at minRPS (%v) after the domain saw the slow-start signal, got %v", minRPS, got)
+	// The queue exists in the map synchronously (URLWorker.Enqueue adds it
+	// before returning), but its run() goroutine hasn't necessarily reached
+	// its first currentRPS.Store() yet -- same race the other two
+	// slow-start tests already guard against by polling until non-zero
+	// rather than reading immediately.
+	deadline = time.Now().Add(time.Second)
+	for q.RPS() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Not an exact-equality check against minRPS: this queue's very first
+	// dispatch has a zero-value lastRequestAt, so it fires with no pacing
+	// delay at all, and against a fast local httptest.Server the whole
+	// round trip (dispatch -> response -> the existing creep-up-by-1.05x
+	// mechanism) can legitimately complete before this assertion runs --
+	// confirmed by reproducing exactly that: an observed value of 0.52
+	// (minRPS * 1.05, one real creep tick), not a bug, just a transient
+	// value this test was asserting too precisely against. The meaningful,
+	// non-racy property is "started near the floor," not "== minRPS at
+	// this exact instant" -- comfortably below configuredRPS (100) proves
+	// slow start engaged; several creep ticks would still be nowhere close
+	// to that ceiling.
+	if got := q.RPS(); got < minRPS || got > minRPS*1.2 {
+		t.Fatalf("expected the second tenant's fresh queue to start near minRPS (%v), got %v", minRPS, got)
 	}
 }
 
