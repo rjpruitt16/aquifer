@@ -76,3 +76,36 @@ jobs:
             --source=./aquifer
             --hurl-dir=./aqueduct-runner/hurl
             --recorder-dir=./aqueduct-runner/recorder
+
+  # Separate job, same reasoning as contract-test-drain above: this one
+  # depends on a third repo (canalis-rs) and its own container build, no
+  # reason to hold up the faster checks on it.
+  contract-test-registration:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout aquifer
+        uses: actions/checkout@v4
+        with:
+          path: aquifer
+
+      - name: Checkout canalis-rs
+        uses: actions/checkout@v4
+        with:
+          repository: rjpruitt16/canalis-rs
+          path: canalis-rs
+
+      - name: Checkout aqueduct-runner
+        uses: actions/checkout@v4
+        with:
+          repository: rjpruitt16/aqueduct-runner
+          path: aqueduct-runner
+
+      - name: Contract test -- real Aquifer -> Canalis -> Valkey registration ping
+        uses: dagger/dagger-for-github@v8.4.1
+        with:
+          version: "0.21.8"
+          module: ./aqueduct-runner
+          call: >-
+            test-registration
+            --aquifer-source=./aquifer
+            --canalis-source=./canalis-rs
