@@ -318,6 +318,8 @@ Running one instance for everything works fine until you have multiple tenants o
 
 The two combine: a fleet can partition statically by upstream domain, while individual instances within a partition cycle through tenants dynamically via drain mode.
 
+**External registration** — off by default, and orthogonal to the above: `AQUIFER_REGISTRY_URL` makes an instance periodically report its own listening port to an external control plane (deciding tenant assignment, scaling, etc. is entirely that service's job, not Aquifer's). See **[REGISTRATION.md](REGISTRATION.md)** for the env vars and ping payload shape.
+
 ---
 
 ## Deployment model
