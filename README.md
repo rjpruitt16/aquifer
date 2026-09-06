@@ -6,6 +6,8 @@ Distributed agents call tools and APIs in bursts. Your backend gets overwhelmed 
 
 Aquifer gives those agents a coordination layer: a self-hosted load balancer that absorbs the burst, queues requests durably (SQLite by default, or Pebble — see below), and releases them at a rate you configure — or a slower one, if the destination service asks for it.
 
+What's usually behind that backend can't scale instantly either — a GPU, a database, a CI runner. Aquifer buys time for more of it to come online; it's overkill if that ceiling is fixed for good.
+
 Exposed through pluggable adapters — an MCP server for agent tool-calling, a plain HTTP API, or an A2A (Agent2Agent protocol) agent — with cryptographic agent identity via the L8 protocol for trustless webhook delivery.
 
 **Benchmarked:** 10x traffic spikes absorbed with zero failures, 30/30 jobs surviving a `kill -9` mid-drain, and clean `429` admission shedding under sustained overload — including a real GPU under load, where the ORCA fallback signal cut peak backend queue depth from 449 to 8 waiting requests. See [benchmark.md](benchmark.md) for throughput ceilings, crash recovery, memory behavior, capacity by machine size, and the [GPU/vLLM run](benchmark.md#9-gpu-inference-and-the-retry-tax-runpodvllm).
