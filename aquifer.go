@@ -6,6 +6,7 @@ import (
 )
 
 var ErrJobNotFound = errors.New("job not found")
+var ErrJobResultNotFound = errors.New("job result not found")
 
 type EnqueueResult struct {
 	JobID     string `json:"job_id"`
@@ -219,6 +220,20 @@ func (a *Aquifer) GetJob(id string) (*Job, error) {
 		return nil, ErrJobNotFound
 	}
 	return job, nil
+}
+
+func (a *Aquifer) GetJobResult(userID, idempotentKey string) (JobResult, error) {
+	if userID == "" || idempotentKey == "" {
+		return JobResult{}, errors.New("user_id and idempotent_key are required")
+	}
+	reader, ok := a.remote.(JobResultReader)
+	if !ok {
+		return JobResult{}, ErrJobResultNotFound
+	}
+	if result, found := reader.LookupResult(hashKey(userID + ":" + idempotentKey)); found {
+		return result, nil
+	}
+	return JobResult{}, ErrJobResultNotFound
 }
 
 func (a *Aquifer) SubscribeJob(id string) (*Job, <-chan SSEEvent, func(), error) {

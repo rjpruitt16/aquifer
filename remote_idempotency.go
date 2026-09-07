@@ -50,6 +50,10 @@ type JobResultRecorder interface {
 	RecordResult(hash string, result JobResult) (string, bool)
 }
 
+type JobResultReader interface {
+	LookupResult(hash string) (JobResult, bool)
+}
+
 type RemoteIdempotencyConfig struct {
 	Enabled        bool
 	URL            string
@@ -188,6 +192,26 @@ func (v *ValkeyRemoteIdempotency) RecordResult(hash string, result JobResult) (s
 		return "", false
 	}
 	return key, true
+}
+
+func (v *ValkeyRemoteIdempotency) LookupResult(hash string) (JobResult, bool) {
+	raw, err := v.command("GET", v.cfg.ResultPrefix+hash)
+	if err != nil {
+		log.Printf("remote result: lookup failed: %v", err)
+		return JobResult{}, false
+	}
+	if raw == "" {
+		return JobResult{}, false
+	}
+	var result JobResult
+	if err := json.Unmarshal([]byte(raw), &result); err != nil {
+		log.Printf("remote result: invalid entry for %s: %v", hash, err)
+		return JobResult{}, false
+	}
+	if result.JobID == "" {
+		return JobResult{}, false
+	}
+	return result, true
 }
 
 func truncateStringBytes(s string, maxBytes int64) (string, bool) {

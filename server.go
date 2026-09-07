@@ -54,6 +54,7 @@ func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /jobs", s.createJob)
 	mux.HandleFunc("POST /proxy", s.proxyJob)
+	mux.HandleFunc("GET /results", s.getJobResult)
 	mux.HandleFunc("GET /jobs/{id}/stream", s.streamJob)
 	mux.HandleFunc("GET /jobs/{id}", s.getJob)
 	mux.HandleFunc("GET /health", s.health)
@@ -163,6 +164,21 @@ func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
 		"method":     job.Method,
 		"created_at": job.CreatedAt,
 	})
+}
+
+func (s *Server) getJobResult(w http.ResponseWriter, r *http.Request) {
+	result, err := s.aquifer.GetJobResult(r.URL.Query().Get("user_id"), r.URL.Query().Get("idempotent_key"))
+	if err != nil {
+		if errors.Is(err, ErrJobResultNotFound) {
+			jsonError(w, "job result not found", http.StatusNotFound)
+			return
+		}
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {

@@ -268,6 +268,31 @@ Value:
 
 The result body is capped before writing to Valkey. This is meant for replaying or inspecting bounded API responses, not for storing large artifacts or unbounded streams. Use object storage or your own durable result store for large outputs.
 
+## GET /results
+
+Retrieves a bounded remote result snapshot by the same logical idempotency key used to create the job:
+
+```bash
+curl "http://localhost:8080/results?user_id=user-123&idempotent_key=invoice-42-notify"
+```
+
+**200**
+
+```json
+{
+  "job_id": "a3f9...",
+  "status": "completed",
+  "response_status": 200,
+  "content_type": "application/json",
+  "body": "{\"ok\":true}",
+  "body_truncated": false,
+  "recorded_at": 1798053731000,
+  "source": "aquifer"
+}
+```
+
+Returns **404** if remote result recording is disabled, the result has expired, or the job has not reached a terminal state yet.
+
 ## Autoscaling
 
 | Header                    | Value                                              |

@@ -12,6 +12,9 @@ type fakeRemoteIdempotency struct {
 	found      bool
 	recorded   []DrainEvent
 	recordOK   bool
+	resultHash string
+	result     JobResult
+	resultOK   bool
 }
 
 func (f *fakeRemoteIdempotency) Lookup(hash string) (RemoteIdempotencyEntry, bool) {
@@ -22,6 +25,11 @@ func (f *fakeRemoteIdempotency) Lookup(hash string) (RemoteIdempotencyEntry, boo
 func (f *fakeRemoteIdempotency) Record(events []DrainEvent) bool {
 	f.recorded = append([]DrainEvent(nil), events...)
 	return f.recordOK
+}
+
+func (f *fakeRemoteIdempotency) LookupResult(hash string) (JobResult, bool) {
+	f.resultHash = hash
+	return f.result, f.resultOK
 }
 
 func TestRemoteIdempotencyDuplicateDeletesLocalAcceptedJob(t *testing.T) {
@@ -57,6 +65,34 @@ func TestRemoteIdempotencyDuplicateDeletesLocalAcceptedJob(t *testing.T) {
 	}
 	if entries := store.ListIdempotentKeys(); len(entries) != 0 {
 		t.Fatalf("expected local speculative insert deleted after remote duplicate, got %+v", entries)
+	}
+}
+
+func TestGetJobResultLooksUpRemoteByIdempotencyHash(t *testing.T) {
+	app, _ := testAquiferWithLimits(t, AdmissionLimits{})
+	remote := &fakeRemoteIdempotency{
+		result: JobResult{
+			JobID:          "remote-job",
+			Status:         StatusCompleted,
+			ResponseStatus: 200,
+			ContentType:    "application/json",
+			Body:           `{"ok":true}`,
+			RecordedAt:     123,
+			Source:         "test",
+		},
+		resultOK: true,
+	}
+	app.SetRemoteIdempotency(remote)
+
+	result, err := app.GetJobResult("user-1", "key-1")
+	if err != nil {
+		t.Fatalf("expected remote result, got error: %v", err)
+	}
+	if remote.resultHash != hashKey("user-1:key-1") {
+		t.Fatalf("expected lookup by idempotency hash, got %q", remote.resultHash)
+	}
+	if result.JobID != "remote-job" || result.Body != `{"ok":true}` {
+		t.Fatalf("unexpected result: %+v", result)
 	}
 }
 
