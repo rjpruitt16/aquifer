@@ -24,7 +24,9 @@ Idempotent — duplicate `idempotent_key` per `user_id` returns the existing job
 
 ## Static cluster routing
 
-Static cluster routing is optional HTTP-level partitioning for `POST /jobs` and `POST /proxy`. When enabled, every node builds the same consistent-hash partition map and routes by `user_id`: if the receiving node owns the key, it handles the request locally; if another node owns it, the receiver forwards the request to that owner and relays the owner's response back to the caller. Callers can hit any node; they do not need to know the topology.
+Static cluster routing is optional HTTP-level partitioning for `POST /jobs` and `POST /proxy`. When enabled, every node builds the same rendezvous-hash ranking by `user_id`: if the receiving node is the highest-ranked healthy owner, it handles the request locally; otherwise it forwards to the highest-ranked peer and relays that peer's response back to the caller. Callers can hit any node; they do not need to know the topology.
+
+If a peer cannot be reached during forwarding, Aquifer temporarily soft-prunes that member from this node's local routing view and tries the next ranked candidate. This is not gossip or consensus: the configured member list remains the source of truth, and the failed peer rejoins this node's routing view automatically when the prune TTL expires.
 
 Configuration:
 
@@ -34,9 +36,7 @@ Configuration:
 | `AQUIFER_CLUSTER_SELF_ID` | _(required when enabled)_ | Stable id for this node |
 | `AQUIFER_CLUSTER_SELF_ADDR` | _(required when enabled)_ | Base HTTP URL other nodes use to reach this node |
 | `AQUIFER_CLUSTER_MEMBERS` | _(none)_ | Comma-separated `id=http://host:port` entries for the other known nodes; `SELF` is added automatically if omitted |
-| `AQUIFER_CLUSTER_PARTITIONS` | `16384` | Number of fixed hash partitions |
-| `AQUIFER_CLUSTER_REPLICATION_FACTOR` | `20` | Virtual replicas per member in the hash ring |
-| `AQUIFER_CLUSTER_LOAD` | `1.25` | Bounded-load factor for partition distribution |
+| `AQUIFER_CLUSTER_PRUNE_TTL_SECONDS` | `30` | How long this node excludes an unreachable peer before trying it again |
 
 Example:
 
@@ -47,7 +47,7 @@ AQUIFER_CLUSTER_SELF_ADDR=http://aquifer-a:8080
 AQUIFER_CLUSTER_MEMBERS=aquifer-b=http://aquifer-b:8080,aquifer-c=http://aquifer-c:8080
 ```
 
-This is not a distributed database or a Redis Cluster clone. Aquifer still stores idempotency and account-queue state locally. Consistent hashing reduces tenant fragmentation during normal routing, but membership changes can move a `user_id` to a node that does not have that user's previous idempotency records. During that window, duplicate execution is possible unless a shared control plane such as Canalis owns cross-node idempotency.
+This is not a distributed database or a Redis Cluster clone. Aquifer still stores idempotency and account-queue state locally. Rendezvous ranking reduces tenant fragmentation during normal routing, but membership changes or soft pruning can move a `user_id` to a node that does not have that user's previous idempotency records. During that window, duplicate execution is possible unless a shared control plane such as Canalis or Valkey remote idempotency owns cross-node idempotency.
 
 Membership changes can also temporarily create duplicate account queues for the same upstream URL on different nodes: old work may still be draining on the previous owner while new work hashes to the new owner. That is expected during rebalance/reconfiguration and should be short-lived under normal TTL/drain cleanup. If that tradeoff is unacceptable, keep membership stable or put a shared assignment/control plane in front.
 

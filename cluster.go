@@ -1,21 +1,18 @@
 package aquifer
 
 import (
-	"hash/fnv"
 	"log"
 	"net/http"
 	"os"
-	"strconv"
+	"sort"
 	"strings"
-
-	"github.com/buraksezer/consistent"
+	"sync"
+	"time"
 )
 
 const (
-	defaultClusterPartitionCount    = 16384
-	defaultClusterReplicationFactor = 20
-	defaultClusterLoad              = 1.25
-	clusterForwardedHeader          = "X-Aquifer-Cluster-Forwarded"
+	defaultClusterPruneTTLSeconds = 30
+	clusterForwardedHeader        = "X-Aquifer-Cluster-Forwarded"
 )
 
 type ClusterMember struct {
@@ -28,48 +25,29 @@ func (m ClusterMember) String() string {
 }
 
 type ClusterConfig struct {
-	Enabled           bool
-	Self              ClusterMember
-	Members           []ClusterMember
-	PartitionCount    int
-	ReplicationFactor int
-	Load              float64
-}
-
-type fnvHasher struct{}
-
-func (fnvHasher) Sum64(data []byte) uint64 {
-	h := fnv.New64a()
-	h.Write(data)
-	return h.Sum64()
+	Enabled  bool
+	Self     ClusterMember
+	Members  []ClusterMember
+	PruneTTL time.Duration
 }
 
 type ClusterRouter struct {
-	self              ClusterMember
-	members           map[string]ClusterMember
-	ring              *consistent.Consistent
-	partitionCount    int
-	replicationFactor int
-	load              float64
+	self        ClusterMember
+	members     map[string]ClusterMember
+	pruneTTL    time.Duration
+	mu          sync.Mutex
+	prunedUntil map[string]time.Time
 }
 
 func LoadClusterConfig() ClusterConfig {
 	cfg := ClusterConfig{
-		Enabled:           envBool("AQUIFER_CLUSTER_ENABLED", false),
-		Self:              ClusterMember{ID: os.Getenv("AQUIFER_CLUSTER_SELF_ID"), Address: os.Getenv("AQUIFER_CLUSTER_SELF_ADDR")},
-		Members:           parseClusterMembers(os.Getenv("AQUIFER_CLUSTER_MEMBERS")),
-		PartitionCount:    int(envInt64("AQUIFER_CLUSTER_PARTITIONS", defaultClusterPartitionCount)),
-		ReplicationFactor: int(envInt64("AQUIFER_CLUSTER_REPLICATION_FACTOR", defaultClusterReplicationFactor)),
-		Load:              envFloat64("AQUIFER_CLUSTER_LOAD", defaultClusterLoad),
+		Enabled:  envBool("AQUIFER_CLUSTER_ENABLED", false),
+		Self:     ClusterMember{ID: os.Getenv("AQUIFER_CLUSTER_SELF_ID"), Address: os.Getenv("AQUIFER_CLUSTER_SELF_ADDR")},
+		Members:  parseClusterMembers(os.Getenv("AQUIFER_CLUSTER_MEMBERS")),
+		PruneTTL: time.Duration(envInt64("AQUIFER_CLUSTER_PRUNE_TTL_SECONDS", defaultClusterPruneTTLSeconds)) * time.Second,
 	}
-	if cfg.PartitionCount <= 0 {
-		cfg.PartitionCount = defaultClusterPartitionCount
-	}
-	if cfg.ReplicationFactor <= 0 {
-		cfg.ReplicationFactor = defaultClusterReplicationFactor
-	}
-	if cfg.Load < 1 {
-		cfg.Load = defaultClusterLoad
+	if cfg.PruneTTL < 0 {
+		cfg.PruneTTL = defaultClusterPruneTTLSeconds * time.Second
 	}
 	return cfg
 }
@@ -92,39 +70,24 @@ func NewClusterRouter(cfg ClusterConfig) *ClusterRouter {
 	}
 	membersByID[cfg.Self.ID] = cfg.Self
 
-	members := make([]consistent.Member, 0, len(membersByID))
-	for _, m := range membersByID {
-		members = append(members, m)
-	}
-	if len(members) == 0 {
+	if len(membersByID) == 0 {
 		return nil
 	}
 
 	return &ClusterRouter{
-		self:    cfg.Self,
-		members: membersByID,
-		ring: consistent.New(members, consistent.Config{
-			PartitionCount:    cfg.PartitionCount,
-			ReplicationFactor: cfg.ReplicationFactor,
-			Load:              cfg.Load,
-			Hasher:            fnvHasher{},
-		}),
-		partitionCount:    cfg.PartitionCount,
-		replicationFactor: cfg.ReplicationFactor,
-		load:              cfg.Load,
+		self:        cfg.Self,
+		members:     membersByID,
+		pruneTTL:    cfg.PruneTTL,
+		prunedUntil: make(map[string]time.Time),
 	}
 }
 
 func (r *ClusterRouter) OwnerFor(key string) (ClusterMember, bool) {
-	if r == nil || key == "" || r.ring == nil {
+	ranked := r.RankedOwners(key)
+	if len(ranked) == 0 {
 		return ClusterMember{}, false
 	}
-	member := r.ring.LocateKey([]byte(key))
-	if member == nil {
-		return ClusterMember{}, false
-	}
-	owner, ok := r.members[member.String()]
-	return owner, ok
+	return ranked[0], true
 }
 
 func (r *ClusterRouter) IsOwner(key string) bool {
@@ -132,16 +95,85 @@ func (r *ClusterRouter) IsOwner(key string) bool {
 	return ok && owner.ID == r.self.ID
 }
 
+func (r *ClusterRouter) RankedOwners(key string) []ClusterMember {
+	if r == nil || key == "" {
+		return nil
+	}
+
+	now := time.Now()
+	r.mu.Lock()
+	r.expirePrunedLocked(now)
+	pruned := make(map[string]bool, len(r.prunedUntil))
+	for id, until := range r.prunedUntil {
+		if now.Before(until) {
+			pruned[id] = true
+		}
+	}
+	r.mu.Unlock()
+
+	type rankedMember struct {
+		member ClusterMember
+		score  string
+	}
+	ranked := make([]rankedMember, 0, len(r.members))
+	for _, member := range r.members {
+		if pruned[member.ID] {
+			continue
+		}
+		ranked = append(ranked, rankedMember{
+			member: member,
+			score:  rendezvousScore(member.ID, key),
+		})
+	}
+	sort.Slice(ranked, func(i, j int) bool {
+		if ranked[i].score == ranked[j].score {
+			return ranked[i].member.ID < ranked[j].member.ID
+		}
+		return ranked[i].score > ranked[j].score
+	})
+
+	owners := make([]ClusterMember, 0, len(ranked))
+	for _, item := range ranked {
+		owners = append(owners, item.member)
+	}
+	return owners
+}
+
+func (r *ClusterRouter) PruneMember(id string) {
+	if r == nil || id == "" || id == r.self.ID || r.pruneTTL <= 0 {
+		return
+	}
+	r.mu.Lock()
+	r.prunedUntil[id] = time.Now().Add(r.pruneTTL)
+	r.mu.Unlock()
+}
+
+func (r *ClusterRouter) expirePrunedLocked(now time.Time) {
+	for id, until := range r.prunedUntil {
+		if !now.Before(until) {
+			delete(r.prunedUntil, id)
+		}
+	}
+}
+
+func (r *ClusterRouter) prunedCount() int {
+	now := time.Now()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.expirePrunedLocked(now)
+	return len(r.prunedUntil)
+}
+
 func (r *ClusterRouter) Snapshot() map[string]any {
 	if r == nil {
 		return nil
 	}
 	return map[string]any{
-		"self":               r.self,
-		"members":            len(r.members),
-		"partition_count":    r.partitionCount,
-		"replication_factor": r.replicationFactor,
-		"load":               r.load,
+		"self":              r.self,
+		"members":           len(r.members),
+		"algorithm":         "rendezvous",
+		"prune_ttl_seconds": int64(r.pruneTTL / time.Second),
+		"pruned_members":    r.prunedCount(),
 	}
 }
 
@@ -165,19 +197,6 @@ func parseClusterMembers(raw string) []ClusterMember {
 		members = append(members, ClusterMember{ID: id, Address: address})
 	}
 	return members
-}
-
-func envFloat64(key string, def float64) float64 {
-	v := os.Getenv(key)
-	if v == "" {
-		return def
-	}
-	n, err := strconv.ParseFloat(v, 64)
-	if err != nil {
-		log.Printf("cluster: invalid %s=%q, using default %v", key, v, def)
-		return def
-	}
-	return n
 }
 
 func clusterRoutingKey(req JobRequest) string {

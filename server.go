@@ -498,8 +498,8 @@ func (s *Server) forwardClusterRequest(w http.ResponseWriter, r *http.Request, p
 	}
 
 	key := clusterRoutingKey(req)
-	owner, ok := s.aquifer.clusterRouter.OwnerFor(key)
-	if !ok || s.aquifer.clusterRouter.IsOwner(key) {
+	owners := s.aquifer.clusterRouter.RankedOwners(key)
+	if len(owners) == 0 {
 		return false
 	}
 
@@ -509,54 +509,65 @@ func (s *Server) forwardClusterRequest(w http.ResponseWriter, r *http.Request, p
 		return true
 	}
 
-	target := strings.TrimRight(owner.Address, "/") + path
-	outbound, err := http.NewRequestWithContext(r.Context(), http.MethodPost, target, bytes.NewReader(body))
-	if err != nil {
-		jsonError(w, err.Error(), http.StatusBadRequest)
-		return true
-	}
-	outbound.Header.Set("Content-Type", "application/json")
-	outbound.Header.Set(clusterForwardedHeader, "true")
-	if accountQueue := pacingHeader(r.Header, "Account-Queue"); accountQueue != "" {
-		setLoadHeader(outbound.Header, "Account-Queue", accountQueue)
-	}
-
-	resp, err := (&http.Client{}).Do(outbound)
-	if err != nil {
-		jsonErrorFields(w, "cluster owner unavailable", http.StatusBadGateway, map[string]any{
-			"owner_id": owner.ID,
-		})
-		return true
-	}
-	defer resp.Body.Close()
-
-	for k, vs := range resp.Header {
-		for _, v := range vs {
-			w.Header().Add(k, v)
+	var tried []string
+	for _, owner := range owners {
+		if owner.ID == s.aquifer.clusterRouter.self.ID {
+			return false
 		}
-	}
-	w.Header().Set("X-Aquifer-Cluster-Owner", owner.ID)
-	w.WriteHeader(resp.StatusCode)
+		tried = append(tried, owner.ID)
 
-	flusher, stream := w.(http.Flusher)
-	buf := make([]byte, 4096)
-	for {
-		n, readErr := resp.Body.Read(buf)
-		if n > 0 {
-			if _, writeErr := w.Write(buf[:n]); writeErr != nil {
-				return true
-			}
-			if stream {
-				flusher.Flush()
-			}
-		}
-		if readErr != nil {
-			if readErr != io.EOF {
-				return true
-			}
+		target := strings.TrimRight(owner.Address, "/") + path
+		outbound, err := http.NewRequestWithContext(r.Context(), http.MethodPost, target, bytes.NewReader(body))
+		if err != nil {
+			jsonError(w, err.Error(), http.StatusBadRequest)
 			return true
 		}
+		outbound.Header.Set("Content-Type", "application/json")
+		outbound.Header.Set(clusterForwardedHeader, "true")
+		if accountQueue := pacingHeader(r.Header, "Account-Queue"); accountQueue != "" {
+			setLoadHeader(outbound.Header, "Account-Queue", accountQueue)
+		}
+
+		resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(outbound)
+		if err != nil {
+			s.aquifer.clusterRouter.PruneMember(owner.ID)
+			continue
+		}
+		defer resp.Body.Close()
+
+		for k, vs := range resp.Header {
+			for _, v := range vs {
+				w.Header().Add(k, v)
+			}
+		}
+		w.Header().Set("X-Aquifer-Cluster-Owner", owner.ID)
+		w.WriteHeader(resp.StatusCode)
+
+		flusher, stream := w.(http.Flusher)
+		buf := make([]byte, 4096)
+		for {
+			n, readErr := resp.Body.Read(buf)
+			if n > 0 {
+				if _, writeErr := w.Write(buf[:n]); writeErr != nil {
+					return true
+				}
+				if stream {
+					flusher.Flush()
+				}
+			}
+			if readErr != nil {
+				if readErr != io.EOF {
+					return true
+				}
+				return true
+			}
+		}
 	}
+
+	jsonErrorFields(w, "cluster owner unavailable", http.StatusBadGateway, map[string]any{
+		"tried_owner_ids": tried,
+	})
+	return true
 }
 
 func jsonError(w http.ResponseWriter, msg string, code int) {
