@@ -9,6 +9,7 @@ import (
 	"math/rand"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -29,6 +30,21 @@ func init() {
 
 func sleepBeforeRetry(d time.Duration) {
 	retrySleepFunc.Load().(func(time.Duration))(d)
+}
+
+func sleepBeforeRetryContext(ctx context.Context, d time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		sleepBeforeRetry(d)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func sleepWhilePoolEmpty(d time.Duration) {
@@ -63,6 +79,12 @@ type AccountQueue struct {
 	enqueueWebhook webhookEnqueuer
 	currentRPS     atomic.Int64 // stored as rps * 100
 	backlog        atomic.Int32 // len(queue) + inFlight, live — see run()
+	stop           chan struct{}
+	stopped        chan struct{}
+	stopOnce       sync.Once
+	wg             sync.WaitGroup
+	ctx            context.Context
+	cancel         context.CancelFunc
 }
 
 func (q *AccountQueue) RPS() float64 {
@@ -105,17 +127,34 @@ func NewAccountQueue(key, upstream string, rps float64, maxConc int, pool *Pool,
 		l8:             l8,
 		metrics:        ensureMetrics(metrics),
 		enqueueWebhook: enqueueWebhook,
+		stop:           make(chan struct{}),
+		stopped:        make(chan struct{}),
 	}
+	q.ctx, q.cancel = context.WithCancel(context.Background())
 	go q.supervise(rps, maxConc, onIdle, slowStart, onSlowStartSignal)
 	return q
 }
 
 func (q *AccountQueue) Enqueue(job *Job) {
 	q.store.SetQueueKey(job.ID, q.key)
-	q.cmds <- job
+	select {
+	case q.cmds <- job:
+	case <-q.stop:
+	}
+}
+
+func (q *AccountQueue) Stop() {
+	q.stopOnce.Do(func() {
+		q.cancel()
+		close(q.stop)
+		<-q.stopped
+		q.wg.Wait()
+	})
 }
 
 func (q *AccountQueue) supervise(rps float64, maxConc int, onIdle func(string), slowStart bool, onSlowStartSignal func(bool)) {
+	defer close(q.stopped)
+
 	for {
 		panicked := false
 		func() {
@@ -128,11 +167,21 @@ func (q *AccountQueue) supervise(rps float64, maxConc int, onIdle func(string), 
 			q.run(rps, maxConc, slowStart, onSlowStartSignal)
 		}()
 
+		select {
+		case <-q.stop:
+			return
+		default:
+		}
+
 		if panicked {
 			recovered := q.store.RecoverInFlight(q.key)
 			for _, j := range recovered {
 				log.Printf("[AccountQueue] recovered in_flight job %s after panic", j.ID)
-				q.cmds <- j
+				select {
+				case q.cmds <- j:
+				case <-q.stop:
+					return
+				}
 			}
 			continue
 		}
@@ -229,7 +278,9 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 			}
 
 			currentRPS := rps
+			q.wg.Add(1)
 			go func(j *Job, url string, m *PoolMember, flowRate float64) {
+				defer q.wg.Done()
 				defer func() {
 					if r := recover(); r != nil {
 						log.Printf("[AccountQueue] panic executing job %s: %v", j.ID, r)
@@ -242,10 +293,17 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 								"reason": "internal panic",
 							})
 						}
-						q.done <- jobDoneMsg{}
+						select {
+						case q.done <- jobDoneMsg{}:
+						case <-q.stop:
+						}
 					}
 				}()
-				q.done <- execute(j, url, q.upstream, q.store, q.broker, q.l8, q.metrics, q.pool, m, flowRate, q.enqueueWebhook)
+				msg := execute(q.ctx, j, url, q.upstream, q.store, q.broker, q.l8, q.metrics, q.pool, m, flowRate, q.enqueueWebhook)
+				select {
+				case q.done <- msg:
+				case <-q.stop:
+				}
 			}(job, dispatchURL, member, currentRPS)
 		}
 
@@ -290,11 +348,15 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 				return
 			}
 			idle.Reset(idleTimeout)
+
+		case <-q.stop:
+			q.backlog.Store(0)
+			return
 		}
 	}
 }
 
-func execute(job *Job, dispatchURL, upstream string, store JobStore, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, pool *Pool, member *PoolMember, flowRate float64, enqueueWebhook webhookEnqueuer) jobDoneMsg {
+func execute(ctx context.Context, job *Job, dispatchURL, upstream string, store JobStore, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, pool *Pool, member *PoolMember, flowRate float64, enqueueWebhook webhookEnqueuer) jobDoneMsg {
 	metrics = ensureMetrics(metrics)
 	startedAt := time.Now()
 
@@ -313,12 +375,19 @@ func execute(job *Job, dispatchURL, upstream string, store JobStore, broker *Bro
 		if attempt > 0 {
 			backoff := time.Duration(math.Pow(2, float64(attempt-1))) * time.Second
 			log.Printf("[AccountQueue] retry %d/%d for %s in %s", attempt, maxRetries, currentURL, backoff)
-			sleepBeforeRetry(backoff)
+			if !sleepBeforeRetryContext(ctx, backoff) {
+				store.UpdateStatus(job.ID, StatusQueued)
+				return jobDoneMsg{}
+			}
 		}
 
 		counts := store.Counts()
-		resp, err = makeRequest(context.Background(), job, currentURL, counts.TotalJobs, counts.QueueDepth, flowRate, l8)
+		resp, err = makeRequest(ctx, job, currentURL, counts.TotalJobs, counts.QueueDepth, flowRate, l8)
 		if err != nil {
+			if ctx.Err() != nil {
+				store.UpdateStatus(job.ID, StatusQueued)
+				return jobDoneMsg{}
+			}
 			reason = err.Error()
 			if pool != nil && currentMember != nil {
 				pool.RecordFailure(currentMember.ID)

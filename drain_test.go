@@ -18,21 +18,21 @@ type recordingMetrics struct {
 	failed    atomic.Int64
 }
 
-func (m *recordingMetrics) DrainFlushSucceeded(instanceKey string, ledgerSize int) { m.succeeded.Add(1) }
-func (m *recordingMetrics) DrainFlushFailed(instanceKey string, ledgerSize int)    { m.failed.Add(1) }
+func (m *recordingMetrics) DrainFlushSucceeded(instanceKey string, ledgerSize int) {
+	m.succeeded.Add(1)
+}
+func (m *recordingMetrics) DrainFlushFailed(instanceKey string, ledgerSize int) { m.failed.Add(1) }
 
 func drainTestRegistry(t *testing.T, metrics MetricsAdapter) *Registry {
 	t.Helper()
 	dir := t.TempDir()
 	store := NewStore(filepath.Join(dir, "aquifer.db"))
-	t.Cleanup(func() {
-		store.Close()
-		time.Sleep(20 * time.Millisecond)
-	})
 	broker := NewBroker()
 	l8 := NewL8Registry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"))
 	cfg := &Config{Defaults: RateConfig{RPS: 100, MaxConcurrent: 1}}
-	return NewRegistry(store, cfg, broker, l8, metrics, nil)
+	r := NewRegistry(store, cfg, broker, l8, metrics, nil)
+	t.Cleanup(r.Close)
+	return r
 }
 
 // skipL8Probe reports whether this request is deliverWebhookSync's own
@@ -55,6 +55,7 @@ func seedLedgerEntry(t *testing.T, r *Registry) {
 		Status: StatusQueued, CreatedAt: time.Now().UnixMilli(),
 	}
 	r.store.CheckOrInsert(job)
+	r.store.UpdateStatus(job.ID, StatusCompleted)
 }
 
 // TestDrainDisabledNeverTransitionsState is the test proving "opt-in," not
@@ -344,5 +345,48 @@ func TestAttemptDrainFlushSucceedsWithinRetryBudget(t *testing.T) {
 	}
 	if metrics.succeeded.Load() != 1 {
 		t.Fatalf("expected DrainFlushSucceeded to fire once, got %d", metrics.succeeded.Load())
+	}
+}
+
+func TestFlushDrainEventBatchDeliversAndAcknowledges(t *testing.T) {
+	var attempts atomic.Int64
+	var payload map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if skipL8Probe(w, r) {
+			return
+		}
+		attempts.Add(1)
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode payload: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	r := drainTestRegistry(t, NoopMetricsAdapter{})
+	r.drainCfg = DrainConfig{Enabled: true, TimerSeconds: 1, WebhookURL: srv.URL, BatchMaxEvents: 10}
+	seedLedgerEntry(t, r)
+
+	events, ok := r.flushDrainEventBatch("ledger_batch")
+	if !ok {
+		t.Fatalf("expected batch flush to succeed")
+	}
+	if attempts.Load() != 1 {
+		t.Fatalf("expected exactly 1 delivery attempt, got %d", attempts.Load())
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 flushed event, got %d", len(events))
+	}
+	if payload["event"] != "ledger_batch" {
+		t.Fatalf("expected event=ledger_batch, got %v", payload["event"])
+	}
+	if payload["sequence_start"] == nil || payload["sequence_end"] == nil || payload["batch_id"] == nil {
+		t.Fatalf("expected sequence metadata in payload, got %+v", payload)
+	}
+	if remaining := r.store.ListDrainEvents(10); len(remaining) != 0 {
+		t.Fatalf("expected acknowledged drain events to be deleted, got %+v", remaining)
+	}
+	if entries := r.store.ListIdempotentKeys(); len(entries) != 1 {
+		t.Fatalf("expected idempotency ledger to remain until final idle clear, got %d entries", len(entries))
 	}
 }

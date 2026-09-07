@@ -123,10 +123,25 @@ type JobStore interface {
     Counts() StoreCounts
     GetJob(jobID string) *Job
     GetQueuedJobs() []*Job
+    ListIdempotentKeys() []LedgerEntry
+    ClearIdempotentKeys()
+    ListDrainEvents(limit int) []DrainEvent
+    AcknowledgeDrainEventsThrough(sequence int64)
 }
 ```
 
-Implement it against your own backend (Postgres, rqlite, or anything else that can give you atomic check-and-set) and pass it via `RuntimeOptions.Store` — no need to bypass `NewRuntime`/`RunAdapter` or hand-wire the lower-level constructors. Two things a custom backend should be aware of: `CheckOrInsert` needs the same atomicity guarantee SQLite's `INSERT OR IGNORE` and Pebble's own store give it today (a non-atomic check-then-write reintroduces the exact idempotency race this project has already found and fixed twice — once in each language); and `AQUIFER_DB_MAX_BYTES` admission control does a local `os.Stat` on `DB_PATH`, which is meaningless for a networked backend — set it to `0` to disable that check if your store isn't a local file or directory.
+Implement it against your own backend (Postgres, rqlite, or anything else that can give you atomic check-and-set) and pass it via `RuntimeOptions.Store` — no need to bypass `NewRuntime`/`RunAdapter` or hand-wire the lower-level constructors. Three things a custom backend should be aware of: `CheckOrInsert` needs the same atomicity guarantee SQLite's `INSERT OR IGNORE` and Pebble's own store give it today (a non-atomic check-then-write reintroduces the exact idempotency race this project has already found and fixed twice — once in each language); drain mode expects final `completed`/`failed` status updates to become ordered `DrainEvent` rows that are deleted only after `AcknowledgeDrainEventsThrough`; and `AQUIFER_DB_MAX_BYTES` admission control does a local `os.Stat` on `DB_PATH`, which is meaningless for a networked backend — set it to `0` to disable that check if your store isn't a local file or directory.
+
+Remote idempotency is a separate extension point:
+
+```go
+type RemoteIdempotency interface {
+    Lookup(hash string) (RemoteIdempotencyEntry, bool)
+    Record(events []DrainEvent) bool
+}
+```
+
+Pass one with `RuntimeOptions.RemoteIdempotency` if you want something other than the built-in Valkey implementation.
 
 Aquifer doesn't ship a Postgres or rqlite backend itself — this is documented as an extension point for anyone who wants multi-instance durability without local-disk-per-instance, not a promise one exists yet.
 

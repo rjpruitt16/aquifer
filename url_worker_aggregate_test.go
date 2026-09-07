@@ -16,15 +16,16 @@ import (
 func TestAggregateBudgetThrottlesSiblingQueues(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(filepath.Join(dir, "aquifer.db"))
-	t.Cleanup(func() {
-		store.Close()
-		time.Sleep(20 * time.Millisecond)
-	})
 	broker := NewBroker()
 	l8 := NewL8Registry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"))
+	t.Cleanup(func() {
+		l8.Close()
+		store.Close()
+	})
 
 	const ceiling = 10.0
 	w := NewURLWorker("https://example.com", ceiling, 5, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, map[string]any) {}, func(string) {})
+	t.Cleanup(w.Stop)
 
 	// Three tenant queues, each spawned with the worker's full ceiling —
 	// this exact call shape (w.rps, unchanged, per queue) is what
@@ -68,15 +69,16 @@ func TestAggregateBudgetThrottlesSiblingQueues(t *testing.T) {
 func TestAggregateBudgetLeavesSingleQueueAlone(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(filepath.Join(dir, "aquifer.db"))
-	t.Cleanup(func() {
-		store.Close()
-		time.Sleep(20 * time.Millisecond)
-	})
 	broker := NewBroker()
 	l8 := NewL8Registry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"))
+	t.Cleanup(func() {
+		l8.Close()
+		store.Close()
+	})
 
 	const ceiling = 10.0
 	w := NewURLWorker("https://example.com", ceiling, 5, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, map[string]any) {}, func(string) {})
+	t.Cleanup(w.Stop)
 	q1 := NewAccountQueue("tenant-1", w.domain, ceiling, 5, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, map[string]any) {}, func(string) {}, false, func(bool) {})
 
 	time.Sleep(20 * time.Millisecond)

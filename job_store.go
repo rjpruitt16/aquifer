@@ -31,6 +31,8 @@ type JobStore interface {
 	// a deployment that never enables it is never reached.
 	ListIdempotentKeys() []LedgerEntry
 	ClearIdempotentKeys()
+	ListDrainEvents(limit int) []DrainEvent
+	AcknowledgeDrainEventsThrough(sequence int64)
 }
 
 // NewJobStore constructs whichever backend AQUIFER_STORE_BACKEND names.

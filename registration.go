@@ -60,8 +60,13 @@ func (r *Registry) registrationLoop() {
 	defer ticker.Stop()
 
 	r.pingRegistry()
-	for range ticker.C {
-		r.pingRegistry()
+	for {
+		select {
+		case <-ticker.C:
+			r.pingRegistry()
+		case <-r.stop:
+			return
+		}
 	}
 }
 

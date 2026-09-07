@@ -291,15 +291,18 @@ func (p *Pool) Snapshot() []map[string]any {
 
 // PoolRegistry owns every named pool. One registry per Aquifer instance.
 type PoolRegistry struct {
-	mu    sync.Mutex
-	pools map[string]*Pool
-	stop  chan struct{}
+	mu        sync.Mutex
+	pools     map[string]*Pool
+	closeOnce sync.Once
+	stop      chan struct{}
+	done      chan struct{}
 }
 
 func NewPoolRegistry() *PoolRegistry {
 	pr := &PoolRegistry{
 		pools: make(map[string]*Pool),
 		stop:  make(chan struct{}),
+		done:  make(chan struct{}),
 	}
 	go pr.heartbeatSweepLoop()
 	return pr
@@ -335,6 +338,8 @@ func (pr *PoolRegistry) Get(poolID string) *Pool {
 }
 
 func (pr *PoolRegistry) heartbeatSweepLoop() {
+	defer close(pr.done)
+
 	ticker := time.NewTicker(heartbeatSweepInterval)
 	defer ticker.Stop()
 	for {
@@ -356,7 +361,10 @@ func (pr *PoolRegistry) heartbeatSweepLoop() {
 }
 
 func (pr *PoolRegistry) Stop() {
-	close(pr.stop)
+	pr.closeOnce.Do(func() {
+		close(pr.stop)
+		<-pr.done
+	})
 }
 
 func (pr *PoolRegistry) Snapshot() map[string]any {

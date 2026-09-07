@@ -22,6 +22,35 @@ Idempotent — duplicate `idempotent_key` per `user_id` returns the existing job
 
 **201** new job queued · **200 + `"duplicate": true`** already exists
 
+## Static cluster routing
+
+Static cluster routing is optional HTTP-level partitioning for `POST /jobs` and `POST /proxy`. When enabled, every node builds the same consistent-hash partition map and routes by `user_id`: if the receiving node owns the key, it handles the request locally; if another node owns it, the receiver forwards the request to that owner and relays the owner's response back to the caller. Callers can hit any node; they do not need to know the topology.
+
+Configuration:
+
+| Env var | Default | Description |
+|---|---|---|
+| `AQUIFER_CLUSTER_ENABLED` | `false` | Enables HTTP cluster routing |
+| `AQUIFER_CLUSTER_SELF_ID` | _(required when enabled)_ | Stable id for this node |
+| `AQUIFER_CLUSTER_SELF_ADDR` | _(required when enabled)_ | Base HTTP URL other nodes use to reach this node |
+| `AQUIFER_CLUSTER_MEMBERS` | _(none)_ | Comma-separated `id=http://host:port` entries for the other known nodes; `SELF` is added automatically if omitted |
+| `AQUIFER_CLUSTER_PARTITIONS` | `16384` | Number of fixed hash partitions |
+| `AQUIFER_CLUSTER_REPLICATION_FACTOR` | `20` | Virtual replicas per member in the hash ring |
+| `AQUIFER_CLUSTER_LOAD` | `1.25` | Bounded-load factor for partition distribution |
+
+Example:
+
+```bash
+AQUIFER_CLUSTER_ENABLED=true
+AQUIFER_CLUSTER_SELF_ID=aquifer-a
+AQUIFER_CLUSTER_SELF_ADDR=http://aquifer-a:8080
+AQUIFER_CLUSTER_MEMBERS=aquifer-b=http://aquifer-b:8080,aquifer-c=http://aquifer-c:8080
+```
+
+This is not a distributed database or a Redis Cluster clone. Aquifer still stores idempotency and account-queue state locally. Consistent hashing reduces tenant fragmentation during normal routing, but membership changes can move a `user_id` to a node that does not have that user's previous idempotency records. During that window, duplicate execution is possible unless a shared control plane such as Canalis owns cross-node idempotency.
+
+Membership changes can also temporarily create duplicate account queues for the same upstream URL on different nodes: old work may still be draining on the previous owner while new work hashes to the new owner. That is expected during rebalance/reconfiguration and should be short-lived under normal TTL/drain cleanup. If that tradeoff is unacceptable, keep membership stable or put a shared assignment/control plane in front.
+
 ## POST /proxy
 
 Edge-gateway mode — see [Use cases](README.md#use-cases) for the deployment shape this is for. Same request body as `POST /jobs`, same idempotency/admission rules, but tries the upstream directly and synchronously first:
@@ -177,7 +206,40 @@ curl -N http://localhost:8080/jobs/<id>/stream
 - Retries trigger on `5xx` responses (not every non-`2xx`), matching forward dispatch's own retry condition — up to 4 attempts, exponential backoff 1 s · 2 s · 4 s · 8 s.
 - L8 signing (see [README.md](README.md#l8-protocol--trustless-webhook-delivery)) still applies exactly as before — trust is established and delivery is signed the same way, just from inside the paced dispatch path instead of a separate one-shot retry loop.
 
-Delivery is still at-least-once — see [Delivery semantics](README.md#how-it-works). (Drain mode's own ledger-flush webhook is unaffected — it stays synchronous, confirming delivery before clearing the local idempotency ledger.)
+Delivery is still at-least-once — see [Delivery semantics](README.md#how-it-works). Drain mode's own ledger webhook is separate: it sends acknowledged batches from the local drain-event journal and deletes only the events confirmed by a `2xx` response. See [DRAIN_MODE.md](DRAIN_MODE.md) for that payload contract.
+
+## Remote idempotency
+
+Remote idempotency is optional and generic. When `AQUIFER_REMOTE_IDEMPOTENCY_ENABLED=true`, Aquifer still checks its local SQLite/Pebble store first. If the key is new locally, Aquifer performs a bounded lookup against Valkey before dispatching the job. A remote hit returns `duplicate:true` and deletes the speculative local row; a timeout or Valkey error falls back to local-only behavior so Aquifer stays on the hot path.
+
+Configuration:
+
+| Env var | Default | Description |
+|---|---|---|
+| `AQUIFER_REMOTE_IDEMPOTENCY_ENABLED` | `false` | Enables pre-dispatch Valkey duplicate lookup |
+| `AQUIFER_VALKEY_URL` | _(none)_ | `redis://` or `valkey://` URL |
+| `AQUIFER_REMOTE_IDEMPOTENCY_TIMEOUT_MS` | `25` | Lookup/write timeout budget |
+| `AQUIFER_REMOTE_IDEMPOTENCY_PREFIX` | `aqueduct:idempotency:` | Key prefix |
+| `AQUIFER_REMOTE_IDEMPOTENCY_TTL_SECONDS` | `7200` | TTL for entries written by Valkey drain sink |
+
+Key:
+
+```txt
+{AQUIFER_REMOTE_IDEMPOTENCY_PREFIX}{sha256(user_id + ":" + idempotent_key)}
+```
+
+Value:
+
+```json
+{
+  "job_id": "a3f9...",
+  "status": "completed",
+  "recorded_at": 1798053731000,
+  "source": "aquifer"
+}
+```
+
+`AQUIFER_DRAIN_SINK=valkey` uses the same prefix/value contract for completed and failed job records.
 
 ## Autoscaling
 

@@ -14,21 +14,12 @@ func testRegistry(t *testing.T) *Registry {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "aquifer.db")
 	store := NewStore(dbPath)
-	t.Cleanup(func() {
-		store.Close()
-		// Enqueue starts a real background dispatch goroutine that can
-		// still be mid-flight (holding a WAL file handle) the instant this
-		// test function returns — Close() waits for in-flight queries, but
-		// modernc.org/sqlite's own file release can trail Close() returning
-		// by a beat. Without this, t.TempDir()'s cleanup (registered before
-		// this one, so it runs right after) occasionally races it with a
-		// "directory not empty" error.
-		time.Sleep(20 * time.Millisecond)
-	})
 	broker := NewBroker()
 	l8 := NewL8Registry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"))
 	cfg := &Config{Defaults: RateConfig{RPS: 100, MaxConcurrent: 1}}
-	return NewRegistry(store, cfg, broker, l8, NoopMetricsAdapter{}, nil)
+	r := NewRegistry(store, cfg, broker, l8, NoopMetricsAdapter{}, nil)
+	t.Cleanup(r.Close)
+	return r
 }
 
 func jobFor(userID, apiKey string) *Job {

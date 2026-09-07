@@ -29,6 +29,14 @@ type RuntimeOptions struct {
 	// zero-code, env-var-only activation pattern as AQUIFER_DRAIN_ENABLED.
 	// Set this to plug in a RegionAdapter for a different platform.
 	RegionAdapter RegionAdapter
+	// ClusterRouter optionally routes HTTP /jobs and /proxy requests to the
+	// Aquifer node that owns the request's partition. If nil, NewRuntime
+	// loads static env config from AQUIFER_CLUSTER_*.
+	ClusterRouter *ClusterRouter
+	// RemoteIdempotency optionally checks a shared remote ledger after the
+	// local store accepts a new key but before the job is dispatched. If
+	// nil, NewRuntime loads AQUIFER_REMOTE_IDEMPOTENCY_* env config.
+	RemoteIdempotency RemoteIdempotency
 }
 
 type Runtime struct {
@@ -81,8 +89,16 @@ func NewRuntime(opts RuntimeOptions) *Runtime {
 	if opts.DrainConfig != nil {
 		registry.ConfigureDrain(*opts.DrainConfig)
 	}
+	remote := opts.RemoteIdempotency
+	if remote == nil {
+		remote = NewValkeyRemoteIdempotency(LoadRemoteIdempotencyConfig())
+	}
+	registry.SetDrainRemote(remote)
 	admission := NewAdmissionController(*admissionLimits, dbPath)
 	app := NewAquifer(store, registry, broker, l8, admission, pools)
+	if remote != nil {
+		app.SetRemoteIdempotency(remote)
+	}
 
 	regionAdapter := opts.RegionAdapter
 	if regionAdapter == nil {
@@ -92,6 +108,14 @@ func NewRuntime(opts RuntimeOptions) *Runtime {
 	}
 	if regionAdapter != nil {
 		app.SetRegionAdapter(regionAdapter)
+	}
+
+	clusterRouter := opts.ClusterRouter
+	if clusterRouter == nil {
+		clusterRouter = NewClusterRouter(LoadClusterConfig())
+	}
+	if clusterRouter != nil {
+		app.SetClusterRouter(clusterRouter)
 	}
 
 	return &Runtime{
@@ -122,6 +146,7 @@ func (r *Runtime) RecoverQueuedJobs(dbPath string) {
 
 func RunAdapter(ctx context.Context, adapter FrameworkAdapter, opts RuntimeOptions) error {
 	runtime := NewRuntime(opts)
+	defer runtime.Close()
 	runtime.RecoverQueuedJobs(runtime.DBPath())
 	return adapter.Start(ctx, runtime.Aquifer)
 }
@@ -131,4 +156,17 @@ func (r *Runtime) DBPath() string {
 		return ""
 	}
 	return r.Store.Path()
+}
+
+func (r *Runtime) Close() {
+	if r == nil {
+		return
+	}
+	if r.Aquifer != nil {
+		r.Aquifer.Close()
+		return
+	}
+	if r.Registry != nil {
+		r.Registry.Close()
+	}
 }

@@ -13,13 +13,14 @@ func testAquiferWithLimits(t *testing.T, limits AdmissionLimits) (*Aquifer, *Sto
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "aquifer.db")
 	store := NewStore(dbPath)
-	t.Cleanup(func() { store.Close() })
 	broker := NewBroker()
 	l8 := NewL8Registry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"))
 	cfg := &Config{Defaults: RateConfig{RPS: 100, MaxConcurrent: 1}}
 	registry := NewRegistry(store, cfg, broker, l8, NoopMetricsAdapter{}, nil)
 	admission := NewAdmissionController(limits, dbPath)
-	return NewAquifer(store, registry, broker, l8, admission, nil), store
+	app := NewAquifer(store, registry, broker, l8, admission, nil)
+	t.Cleanup(app.Close)
+	return app, store
 }
 
 func sampleJobRequest(userID, idempotentKey string) JobRequest {
@@ -135,7 +136,6 @@ func TestAdmissionDuplicateStillSucceedsUnderPressure(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "aquifer.db")
 	store := NewStore(dbPath)
-	t.Cleanup(func() { store.Close() })
 	broker := NewBroker()
 	l8 := NewL8Registry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"))
 	cfg := &Config{Defaults: RateConfig{RPS: 100, MaxConcurrent: 1}}
@@ -145,6 +145,7 @@ func TestAdmissionDuplicateStillSucceedsUnderPressure(t *testing.T) {
 	// the job is genuinely accepted and durably recorded.
 	relaxed := NewAdmissionController(AdmissionLimits{MemoryLimitMB: 1_000_000}, dbPath)
 	app := NewAquifer(store, registry, broker, l8, relaxed, nil)
+	t.Cleanup(app.Close)
 
 	req := sampleJobRequest("user-1", "same-key")
 	first, err := app.Enqueue(req)

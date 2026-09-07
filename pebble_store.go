@@ -48,10 +48,15 @@ type pebbleRecord struct {
 }
 
 type PebbleStore struct {
-	db       *pebble.DB
-	path     string
-	syncOpts *pebble.WriteOptions
-	locks    [shardCount]sync.Mutex
+	db        *pebble.DB
+	path      string
+	syncOpts  *pebble.WriteOptions
+	locks     [shardCount]sync.Mutex
+	drainMu   sync.Mutex
+	closeOnce sync.Once
+	closeErr  error
+	stop      chan struct{}
+	done      chan struct{}
 }
 
 // AQUIFER_PEBBLE_WAL_SYNC_INTERVAL_MS default. Confirmed empirically (a
@@ -94,6 +99,8 @@ func NewPebbleStore(path string) *PebbleStore {
 		// commit, not from skipping durability per write.
 		path:     path,
 		syncOpts: &pebble.WriteOptions{Sync: true},
+		stop:     make(chan struct{}),
+		done:     make(chan struct{}),
 	}
 
 	go s.cleanupLoop()
@@ -105,7 +112,12 @@ func (s *PebbleStore) Path() string {
 }
 
 func (s *PebbleStore) Close() error {
-	return s.db.Close()
+	s.closeOnce.Do(func() {
+		close(s.stop)
+		<-s.done
+		s.closeErr = s.db.Close()
+	})
+	return s.closeErr
 }
 
 func (s *PebbleStore) shardLock(key string) *sync.Mutex {
@@ -116,6 +128,11 @@ func (s *PebbleStore) shardLock(key string) *sync.Mutex {
 
 func jobKey(id string) []byte    { return []byte("job:" + id) }
 func idemKey(hash string) []byte { return []byte("idem:" + hash) }
+func drainSeqKey(sequence int64) []byte {
+	return []byte("drain:seq:" + strconv.FormatInt(sequence+1000000000000000000, 10))
+}
+func drainJobKey(jobID string) []byte { return []byte("drain:job:" + jobID) }
+func drainSequenceMetaKey() []byte    { return []byte("meta:drain_sequence") }
 
 // CheckOrInsert mirrors Store.CheckOrInsert's contract exactly: :ok for a
 // fresh job, or the existing job ID if the (user_id, idempotent_key) pair
@@ -207,6 +224,7 @@ func (s *PebbleStore) DeleteJob(jobID string) {
 	hashed := hashKey(rec.Job.UserID + ":" + rec.Job.IdempotentKey)
 
 	batch := s.db.NewBatch()
+	defer batch.Close()
 	batch.Delete(jobKey(jobID), nil)
 	batch.Delete(idemKey(hashed), nil)
 	if err := batch.Commit(s.syncOpts); err != nil {
@@ -231,6 +249,52 @@ func (s *PebbleStore) UpdateStatus(jobID string, status Status) {
 	rec.Job.Status = status
 	rec.ExpiresAt = time.Now().Add(ttlForStatus(status)).UnixMilli()
 	s.putRecord(jobID, rec)
+	if status == StatusCompleted || status == StatusFailed {
+		s.recordDrainEvent(rec, status)
+	}
+}
+
+func (s *PebbleStore) recordDrainEvent(rec *pebbleRecord, status Status) {
+	if rec == nil || rec.Job == nil || rec.Job.isWebhookDeliveryJob() {
+		return
+	}
+
+	s.drainMu.Lock()
+	defer s.drainMu.Unlock()
+
+	if _, closer, err := s.db.Get(drainJobKey(rec.Job.ID)); err == nil {
+		closer.Close()
+		return
+	}
+
+	var sequence int64
+	if val, closer, err := s.db.Get(drainSequenceMetaKey()); err == nil {
+		sequence, _ = strconv.ParseInt(string(val), 10, 64)
+		closer.Close()
+	}
+	sequence++
+
+	event := DrainEvent{
+		Sequence:   sequence,
+		HashKey:    hashKey(rec.Job.UserID + ":" + rec.Job.IdempotentKey),
+		JobID:      rec.Job.ID,
+		Status:     status,
+		RecordedAt: time.Now().UnixMilli(),
+	}
+	data, err := json.Marshal(event)
+	if err != nil {
+		log.Printf("pebble: marshal drain event for job %s: %v", rec.Job.ID, err)
+		return
+	}
+
+	batch := s.db.NewBatch()
+	defer batch.Close()
+	batch.Set(drainSeqKey(sequence), data, nil)
+	batch.Set(drainJobKey(rec.Job.ID), []byte(strconv.FormatInt(sequence, 10)), nil)
+	batch.Set(drainSequenceMetaKey(), []byte(strconv.FormatInt(sequence, 10)), nil)
+	if err := batch.Commit(s.syncOpts); err != nil {
+		log.Printf("pebble: commit drain event for job %s: %v", rec.Job.ID, err)
+	}
 }
 
 // forEachJob iterates every job: record, skipping expired ones. Used only
@@ -375,34 +439,105 @@ func (s *PebbleStore) ClearIdempotentKeys() {
 
 	deletePrefix([]byte("job:"), []byte("job;"))
 	deletePrefix([]byte("idem:"), []byte("idem;"))
+	deletePrefix([]byte("drain:seq:"), []byte("drain:seq;"))
+	deletePrefix([]byte("drain:job:"), []byte("drain:job;"))
+	s.db.Delete(drainSequenceMetaKey(), s.syncOpts)
+}
+
+func (s *PebbleStore) ListDrainEvents(limit int) []DrainEvent {
+	if limit <= 0 {
+		limit = 1000
+	}
+	iter, err := s.db.NewIter(&pebble.IterOptions{
+		LowerBound: []byte("drain:seq:"),
+		UpperBound: []byte("drain:seq;"),
+	})
+	if err != nil {
+		log.Printf("pebble: iterate drain events: %v", err)
+		return nil
+	}
+	defer iter.Close()
+
+	var events []DrainEvent
+	for iter.First(); iter.Valid() && len(events) < limit; iter.Next() {
+		var e DrainEvent
+		if err := json.Unmarshal(iter.Value(), &e); err != nil {
+			continue
+		}
+		events = append(events, e)
+	}
+	return events
+}
+
+func (s *PebbleStore) AcknowledgeDrainEventsThrough(sequence int64) {
+	if sequence <= 0 {
+		return
+	}
+
+	s.drainMu.Lock()
+	defer s.drainMu.Unlock()
+
+	iter, err := s.db.NewIter(&pebble.IterOptions{
+		LowerBound: []byte("drain:seq:"),
+		UpperBound: []byte("drain:seq;"),
+	})
+	if err != nil {
+		log.Printf("pebble: iterate drain events for ack: %v", err)
+		return
+	}
+	defer iter.Close()
+
+	batch := s.db.NewBatch()
+	defer batch.Close()
+	for iter.First(); iter.Valid(); iter.Next() {
+		var event DrainEvent
+		if err := json.Unmarshal(iter.Value(), &event); err != nil {
+			continue
+		}
+		if event.Sequence > sequence {
+			break
+		}
+		batch.Delete(drainSeqKey(event.Sequence), nil)
+		batch.Delete(drainJobKey(event.JobID), nil)
+	}
+	if err := batch.Commit(s.syncOpts); err != nil {
+		log.Printf("pebble: acknowledge drain events through %d: %v", sequence, err)
+	}
 }
 
 func (s *PebbleStore) cleanupLoop() {
+	defer close(s.done)
+
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		now := time.Now().UnixMilli()
-		staleBefore := time.Now().Add(-inFlightMax).UnixMilli()
+	for {
+		select {
+		case <-ticker.C:
+			now := time.Now().UnixMilli()
+			staleBefore := time.Now().Add(-inFlightMax).UnixMilli()
 
-		var expiredIDs []string
-		var staleInFlight []string
+			var expiredIDs []string
+			var staleInFlight []string
 
-		s.forEachJobIncludingExpired(func(rec *pebbleRecord) {
-			if rec.ExpiresAt < now {
-				expiredIDs = append(expiredIDs, rec.Job.ID)
-				return
+			s.forEachJobIncludingExpired(func(rec *pebbleRecord) {
+				if rec.ExpiresAt < now {
+					expiredIDs = append(expiredIDs, rec.Job.ID)
+					return
+				}
+				if rec.Job.Status == StatusInFlight && rec.Job.CreatedAt < staleBefore {
+					staleInFlight = append(staleInFlight, rec.Job.ID)
+				}
+			})
+
+			for _, id := range expiredIDs {
+				s.DeleteJob(id)
 			}
-			if rec.Job.Status == StatusInFlight && rec.Job.CreatedAt < staleBefore {
-				staleInFlight = append(staleInFlight, rec.Job.ID)
+			for _, id := range staleInFlight {
+				s.UpdateStatus(id, StatusQueued)
 			}
-		})
-
-		for _, id := range expiredIDs {
-			s.DeleteJob(id)
-		}
-		for _, id := range staleInFlight {
-			s.UpdateStatus(id, StatusQueued)
+		case <-s.stop:
+			return
 		}
 	}
 }

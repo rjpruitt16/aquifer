@@ -27,6 +27,9 @@ type URLWorker struct {
 	onIdle           func(string)
 	breakerUntil     time.Time // zero value means the breaker is closed
 	breakerKind      string    // "queue" or "reroute" — which kind of signal tripped it, see classifyOverload
+	closeOnce        sync.Once
+	stop             chan struct{}
+	done             chan struct{}
 }
 
 // BreakerOpen reports whether proxy mode should skip a direct dispatch
@@ -97,9 +100,29 @@ func NewURLWorker(domain string, rps float64, maxConc int, pool *Pool, store Job
 		metrics:        ensureMetrics(metrics),
 		enqueueWebhook: enqueueWebhook,
 		onIdle:         onIdle,
+		stop:           make(chan struct{}),
+		done:           make(chan struct{}),
 	}
 	go w.enforceAggregateBudget()
 	return w
+}
+
+func (w *URLWorker) Stop() {
+	w.closeOnce.Do(func() {
+		close(w.stop)
+
+		w.mu.Lock()
+		queues := make([]*AccountQueue, 0, len(w.queues))
+		for _, q := range w.queues {
+			queues = append(queues, q)
+		}
+		w.mu.Unlock()
+
+		for _, q := range queues {
+			q.Stop()
+		}
+		<-w.done
+	})
 }
 
 // enforceAggregateBudget periodically checks whether the sum of every
@@ -110,10 +133,17 @@ func NewURLWorker(domain string, rps float64, maxConc int, pool *Pool, store Job
 // simultaneously active tenant queues could each independently believe
 // they own the full ceiling, multiplying real load on the upstream by N.
 func (w *URLWorker) enforceAggregateBudget() {
+	defer close(w.done)
+
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
-	for range ticker.C {
-		w.checkAndThrottle()
+	for {
+		select {
+		case <-ticker.C:
+			w.checkAndThrottle()
+		case <-w.stop:
+			return
+		}
 	}
 }
 
@@ -181,6 +211,12 @@ func (w *URLWorker) budgetCeiling() float64 {
 func (w *URLWorker) Enqueue(job *Job) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+
+	select {
+	case <-w.stop:
+		return
+	default:
+	}
 
 	key := sharedKey
 	if w.accountQueueMode {

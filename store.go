@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"log"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -19,8 +20,12 @@ const (
 )
 
 type Store struct {
-	db   *sql.DB
-	path string
+	db        *sql.DB
+	path      string
+	closeOnce sync.Once
+	closeErr  error
+	stop      chan struct{}
+	done      chan struct{}
 }
 
 func NewStore(path string) *Store {
@@ -48,7 +53,7 @@ func NewStore(path string) *Store {
 	// of WAL.
 	db.SetMaxOpenConns(25)
 
-	s := &Store{db: db, path: path}
+	s := &Store{db: db, path: path, stop: make(chan struct{}), done: make(chan struct{})}
 	s.migrate()
 	go s.cleanupLoop()
 	return s
@@ -64,7 +69,12 @@ func (s *Store) Path() string {
 // (tests especially, cleaning up a t.TempDir()) should call this before
 // their directory is removed.
 func (s *Store) Close() error {
-	return s.db.Close()
+	s.closeOnce.Do(func() {
+		close(s.stop)
+		<-s.done
+		s.closeErr = s.db.Close()
+	})
+	return s.closeErr
 }
 
 func (s *Store) migrate() {
@@ -86,6 +96,15 @@ func (s *Store) migrate() {
 	`)
 	// safe to run on existing tables — ignored if column already exists
 	s.db.Exec(`ALTER TABLE jobs ADD COLUMN queue_key TEXT NOT NULL DEFAULT ''`)
+	s.db.Exec(`
+		CREATE TABLE IF NOT EXISTS drain_events (
+			sequence             INTEGER PRIMARY KEY AUTOINCREMENT,
+			idempotent_key_hash  TEXT NOT NULL,
+			job_id               TEXT NOT NULL UNIQUE,
+			status               TEXT NOT NULL,
+			recorded_at          INTEGER NOT NULL
+		)
+	`)
 }
 
 // CheckOrInsert inserts job unless its (user_id, idempotent_key) pair
@@ -172,6 +191,21 @@ func (s *Store) RecoverInFlight(queueKey string) []*Job {
 func (s *Store) UpdateStatus(jobID string, status Status) {
 	expiresAt := time.Now().Add(ttlForStatus(status)).UnixMilli()
 	s.db.Exec(`UPDATE jobs SET status = ?, expires_at = ? WHERE id = ?`, string(status), expiresAt, jobID)
+	if status == StatusCompleted || status == StatusFailed {
+		s.recordDrainEvent(jobID, status)
+	}
+}
+
+func (s *Store) recordDrainEvent(jobID string, status Status) {
+	if _, err := s.db.Exec(`
+		INSERT OR IGNORE INTO drain_events
+			(idempotent_key_hash, job_id, status, recorded_at)
+		SELECT idempotent_key_hash, id, ?, ?
+		FROM jobs
+		WHERE id = ? AND webhook_url != ''
+	`, string(status), time.Now().UnixMilli(), jobID); err != nil {
+		log.Printf("store: record drain event for job %s: %v", jobID, err)
+	}
 }
 
 type StoreCounts struct {
@@ -248,24 +282,71 @@ func (s *Store) ListIdempotentKeys() []LedgerEntry {
 // mode's watchdog after a successful ledger-flush webhook delivery, never
 // on a normal (non-drain-mode) deployment.
 func (s *Store) ClearIdempotentKeys() {
+	if _, err := s.db.Exec(`DELETE FROM drain_events`); err != nil {
+		log.Printf("ClearIdempotentKeys drain_events: %v", err)
+	}
 	if _, err := s.db.Exec(`DELETE FROM jobs`); err != nil {
 		log.Printf("ClearIdempotentKeys: %v", err)
 	}
 }
 
+func (s *Store) ListDrainEvents(limit int) []DrainEvent {
+	if limit <= 0 {
+		limit = 1000
+	}
+	rows, err := s.db.Query(`
+		SELECT sequence, idempotent_key_hash, job_id, status, recorded_at
+		FROM drain_events
+		ORDER BY sequence ASC
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		log.Printf("ListDrainEvents: %v", err)
+		return nil
+	}
+	defer rows.Close()
+
+	var events []DrainEvent
+	for rows.Next() {
+		var e DrainEvent
+		if err := rows.Scan(&e.Sequence, &e.HashKey, &e.JobID, &e.Status, &e.RecordedAt); err != nil {
+			log.Printf("ListDrainEvents scan: %v", err)
+			continue
+		}
+		events = append(events, e)
+	}
+	return events
+}
+
+func (s *Store) AcknowledgeDrainEventsThrough(sequence int64) {
+	if sequence <= 0 {
+		return
+	}
+	if _, err := s.db.Exec(`DELETE FROM drain_events WHERE sequence <= ?`, sequence); err != nil {
+		log.Printf("AcknowledgeDrainEventsThrough: %v", err)
+	}
+}
+
 func (s *Store) cleanupLoop() {
+	defer close(s.done)
+
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		now := time.Now()
-		// expire old jobs
-		s.db.Exec(`DELETE FROM jobs WHERE expires_at < ?`, now.UnixMilli())
-		// reset stale in_flight jobs back to queued so they get re-dispatched
-		s.db.Exec(`
-			UPDATE jobs SET status = 'queued'
-			WHERE status = 'in_flight' AND created_at < ?
-		`, now.Add(-inFlightMax).UnixMilli())
+	for {
+		select {
+		case <-ticker.C:
+			now := time.Now()
+			// expire old jobs
+			s.db.Exec(`DELETE FROM jobs WHERE expires_at < ?`, now.UnixMilli())
+			// reset stale in_flight jobs back to queued so they get re-dispatched
+			s.db.Exec(`
+				UPDATE jobs SET status = 'queued'
+				WHERE status = 'in_flight' AND created_at < ?
+			`, now.Add(-inFlightMax).UnixMilli())
+		case <-s.stop:
+			return
+		}
 	}
 }
 

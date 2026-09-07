@@ -37,6 +37,10 @@ type FlyRegionAdapter struct {
 
 	mu   sync.RWMutex
 	live []string
+
+	closeOnce sync.Once
+	stop      chan struct{}
+	done      chan struct{}
 }
 
 // NewFlyRegionAdapter constructs the adapter and starts its background
@@ -77,6 +81,8 @@ func NewFlyRegionAdapter() *FlyRegionAdapter {
 		regions:      regions,
 		pollInterval: pollInterval,
 		httpClient:   &http.Client{Timeout: flyHealthCheckTimeout},
+		stop:         make(chan struct{}),
+		done:         make(chan struct{}),
 	}
 	a.healthCheckURL = func(region string) string {
 		return fmt.Sprintf("http://%s.%s.internal:%s/health", region, appName, port)
@@ -102,11 +108,25 @@ func (a *FlyRegionAdapter) SelfRegion() string {
 	return a.selfRegion
 }
 
+func (a *FlyRegionAdapter) Close() {
+	a.closeOnce.Do(func() {
+		close(a.stop)
+		<-a.done
+	})
+}
+
 func (a *FlyRegionAdapter) pollLoop() {
+	defer close(a.done)
+
 	ticker := time.NewTicker(a.pollInterval)
 	defer ticker.Stop()
-	for range ticker.C {
-		a.pollOnce()
+	for {
+		select {
+		case <-ticker.C:
+			a.pollOnce()
+		case <-a.stop:
+			return
+		}
 	}
 }
 

@@ -1,11 +1,14 @@
 package aquifer
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -114,6 +117,10 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 	// mode unchanged rather than forcing it off for every request that
 	// doesn't happen to set this.
 	req.AccountQueueMode = pacingHeader(r.Header, "Account-Queue")
+
+	if s.forwardClusterRequest(w, r, "/jobs", req) {
+		return
+	}
 
 	result, err := s.aquifer.Enqueue(req)
 	if err != nil {
@@ -300,6 +307,10 @@ func (s *Server) proxyJob(w http.ResponseWriter, r *http.Request) {
 	}
 	req.AccountQueueMode = pacingHeader(r.Header, "Account-Queue")
 
+	if s.forwardClusterRequest(w, r, "/proxy", req) {
+		return
+	}
+
 	outcome := s.aquifer.AttemptDirect(r.Context(), req, proxyDirectAttemptTimeout())
 
 	if outcome.Err != nil {
@@ -463,6 +474,73 @@ func (s *Server) streamExistingJob(w http.ResponseWriter, r *http.Request, job *
 		return
 	}
 	s.streamEvents(w, r, job, events, unsubscribe, nil)
+}
+
+func (s *Server) forwardClusterRequest(w http.ResponseWriter, r *http.Request, path string, req JobRequest) bool {
+	if s.aquifer == nil || s.aquifer.clusterRouter == nil || hasClusterForwardedHeader(r) {
+		return false
+	}
+
+	key := clusterRoutingKey(req)
+	owner, ok := s.aquifer.clusterRouter.OwnerFor(key)
+	if !ok || s.aquifer.clusterRouter.IsOwner(key) {
+		return false
+	}
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return true
+	}
+
+	target := strings.TrimRight(owner.Address, "/") + path
+	outbound, err := http.NewRequestWithContext(r.Context(), http.MethodPost, target, bytes.NewReader(body))
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return true
+	}
+	outbound.Header.Set("Content-Type", "application/json")
+	outbound.Header.Set(clusterForwardedHeader, "true")
+	if accountQueue := pacingHeader(r.Header, "Account-Queue"); accountQueue != "" {
+		setLoadHeader(outbound.Header, "Account-Queue", accountQueue)
+	}
+
+	resp, err := (&http.Client{}).Do(outbound)
+	if err != nil {
+		jsonErrorFields(w, "cluster owner unavailable", http.StatusBadGateway, map[string]any{
+			"owner_id": owner.ID,
+		})
+		return true
+	}
+	defer resp.Body.Close()
+
+	for k, vs := range resp.Header {
+		for _, v := range vs {
+			w.Header().Add(k, v)
+		}
+	}
+	w.Header().Set("X-Aquifer-Cluster-Owner", owner.ID)
+	w.WriteHeader(resp.StatusCode)
+
+	flusher, stream := w.(http.Flusher)
+	buf := make([]byte, 4096)
+	for {
+		n, readErr := resp.Body.Read(buf)
+		if n > 0 {
+			if _, writeErr := w.Write(buf[:n]); writeErr != nil {
+				return true
+			}
+			if stream {
+				flusher.Flush()
+			}
+		}
+		if readErr != nil {
+			if readErr != io.EOF {
+				return true
+			}
+			return true
+		}
+	}
 }
 
 func jsonError(w http.ResponseWriter, msg string, code int) {

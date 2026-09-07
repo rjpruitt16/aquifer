@@ -96,13 +96,14 @@ func testAquifer(t *testing.T) *Aquifer {
 
 	dir := t.TempDir()
 	store := NewStore(filepath.Join(dir, "aquifer.db"))
-	t.Cleanup(func() { store.Close() })
 	broker := NewBroker()
 	l8 := NewL8Registry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"))
 	cfg := &Config{Defaults: RateConfig{RPS: 100, MaxConcurrent: 1}}
 	registry := NewRegistry(store, cfg, broker, l8, NoopMetricsAdapter{}, nil)
 	admission := NewAdmissionController(AdmissionLimits{}, filepath.Join(dir, "aquifer.db"))
-	return NewAquifer(store, registry, broker, l8, admission, nil)
+	app := NewAquifer(store, registry, broker, l8, admission, nil)
+	t.Cleanup(app.Close)
+	return app
 }
 
 func decodeMCPResponses(t *testing.T, output string) []map[string]any {

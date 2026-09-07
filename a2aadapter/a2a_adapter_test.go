@@ -29,13 +29,14 @@ func testAquifer(t *testing.T) *aquifer.Aquifer {
 
 	dir := t.TempDir()
 	store := aquifer.NewStore(filepath.Join(dir, "aquifer.db"))
-	t.Cleanup(func() { store.Close() })
 	broker := aquifer.NewBroker()
 	l8 := aquifer.NewL8Registry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"))
 	cfg := &aquifer.Config{Defaults: aquifer.RateConfig{RPS: 100, MaxConcurrent: 5}}
 	registry := aquifer.NewRegistry(store, cfg, broker, l8, aquifer.NoopMetricsAdapter{}, nil)
 	admission := aquifer.NewAdmissionController(aquifer.AdmissionLimits{}, filepath.Join(dir, "aquifer.db"))
-	return aquifer.NewAquifer(store, registry, broker, l8, admission, nil)
+	app := aquifer.NewAquifer(store, registry, broker, l8, admission, nil)
+	t.Cleanup(app.Close)
+	return app
 }
 
 // newTestHandler wires an executor into a real a2asrv.RequestHandler the

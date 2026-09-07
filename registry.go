@@ -15,11 +15,17 @@ type Registry struct {
 	l8              *L8Registry
 	metrics         MetricsAdapter
 	pools           *PoolRegistry
+	drainRemote     RemoteIdempotency
 	totalJobs       atomic.Int64
 	queueDepth      atomic.Int64
 	drainCfg        DrainConfig
 	drainState      atomic.Value // DrainState, read from Health() concurrently with the watchdog goroutine writing it
+	drainWatchdog   bool
+	drainBatch      bool
 	registrationCfg RegistrationConfig
+	closeOnce       sync.Once
+	stop            chan struct{}
+	wg              sync.WaitGroup
 }
 
 // NewRegistry reads drain mode's config from AQUIFER_DRAIN_* env vars
@@ -38,18 +44,56 @@ func NewRegistry(store JobStore, cfg *Config, broker *Broker, l8 *L8Registry, me
 		pools:           pools,
 		drainCfg:        LoadDrainConfig(),
 		registrationCfg: LoadRegistrationConfig(),
+		stop:            make(chan struct{}),
 	}
 	counts := store.Counts()
 	r.totalJobs.Store(counts.TotalJobs)
 	r.queueDepth.Store(counts.QueueDepth)
 	r.drainState.Store(DrainStateActive)
 	if r.drainCfg.Enabled {
-		go r.drainWatchdogLoop()
+		r.startDrainLoops()
 	}
 	if r.registrationCfg.Enabled() {
-		go r.registrationLoop()
+		r.startRegistrationLoop()
 	}
 	return r
+}
+
+func (r *Registry) Close() {
+	r.closeOnce.Do(func() {
+		close(r.stop)
+
+		r.mu.Lock()
+		workers := make([]*URLWorker, 0, len(r.workers))
+		for _, w := range r.workers {
+			workers = append(workers, w)
+		}
+		r.mu.Unlock()
+
+		for _, w := range workers {
+			w.Stop()
+		}
+		r.wg.Wait()
+
+		if r.pools != nil {
+			r.pools.Stop()
+		}
+		if r.l8 != nil {
+			r.l8.Close()
+		}
+		if r.store != nil {
+			r.store.Close()
+		}
+	})
+}
+
+func (r *Registry) stopping() bool {
+	select {
+	case <-r.stop:
+		return true
+	default:
+		return false
+	}
 }
 
 // DrainState is the instance's current position in drain mode's lifecycle
@@ -81,11 +125,58 @@ func (r *Registry) DrainSnapshot() map[string]any {
 // watchdog at runtime — disabling drain mode requires a restart, same as
 // every other env-var-driven config in this codebase.
 func (r *Registry) ConfigureDrain(cfg DrainConfig) {
-	wasEnabled := r.drainCfg.Enabled
 	r.drainCfg = cfg
-	if cfg.Enabled && !wasEnabled {
-		go r.drainWatchdogLoop()
+	if cfg.Enabled {
+		r.startDrainLoops()
 	}
+}
+
+func (r *Registry) SetDrainRemote(remote RemoteIdempotency) {
+	r.mu.Lock()
+	r.drainRemote = remote
+	r.mu.Unlock()
+}
+
+func (r *Registry) drainRemoteOrNil() RemoteIdempotency {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.drainRemote
+}
+
+func (r *Registry) startDrainLoops() {
+	r.mu.Lock()
+	startWatchdog := !r.drainWatchdog
+	startBatch := r.drainCfg.BatchEnabled && !r.drainBatch
+	if startWatchdog {
+		r.drainWatchdog = true
+	}
+	if startBatch {
+		r.drainBatch = true
+	}
+	r.mu.Unlock()
+
+	if startWatchdog {
+		r.wg.Add(1)
+		go func() {
+			defer r.wg.Done()
+			r.drainWatchdogLoop()
+		}()
+	}
+	if startBatch {
+		r.wg.Add(1)
+		go func() {
+			defer r.wg.Done()
+			r.drainBatchLoop()
+		}()
+	}
+}
+
+func (r *Registry) startRegistrationLoop() {
+	r.wg.Add(1)
+	go func() {
+		defer r.wg.Done()
+		r.registrationLoop()
+	}()
 }
 
 // Enqueue queues a job on the URLWorker for its upstream domain, or for
@@ -98,8 +189,16 @@ func (r *Registry) ConfigureDrain(cfg DrainConfig) {
 // that doesn't care about it shouldn't be able to flip it off for every
 // other concurrent tenant relying on it being on.
 func (r *Registry) Enqueue(job *Job, accountQueueHeader string) {
+	if r.stopping() {
+		return
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	if r.stopping() {
+		return
+	}
 
 	r.totalJobs.Add(1)
 	r.queueDepth.Add(1)
@@ -172,7 +271,7 @@ func (r *Registry) resolveWorkerLocked(job *Job) (string, *URLWorker) {
 // a given job's webhook is enqueued at most once even if this were somehow
 // called twice for it.
 func (r *Registry) EnqueueWebhook(originalJobID, userID, webhookURL string, payload map[string]any) {
-	if webhookURL == "" {
+	if webhookURL == "" || r.stopping() {
 		return
 	}
 
@@ -186,7 +285,7 @@ func (r *Registry) EnqueueWebhook(originalJobID, userID, webhookURL string, payl
 		Body:          string(body),
 	})
 
-	if _, duplicate := r.store.CheckOrInsert(job); duplicate {
+	if _, duplicate := r.store.CheckOrInsert(job); duplicate || r.stopping() {
 		return
 	}
 

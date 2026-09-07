@@ -72,13 +72,13 @@ func TestCreateJobDuplicateSucceedsAsIdempotentEvenUnderPressure(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "aquifer.db")
 	store := NewStore(dbPath)
-	t.Cleanup(func() { store.Close() })
 	broker := NewBroker()
 	l8 := NewL8Registry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"))
 	cfg := &Config{Defaults: RateConfig{RPS: 100, MaxConcurrent: 1}}
 	registry := NewRegistry(store, cfg, broker, l8, NoopMetricsAdapter{}, nil)
 	admission := NewAdmissionController(AdmissionLimits{MemoryLimitMB: 1_000_000}, dbPath)
 	app := NewAquifer(store, registry, broker, l8, admission, nil)
+	t.Cleanup(app.Close)
 	srv := NewServer(app)
 
 	body, _ := json.Marshal(sampleJobRequest("user-1", "same-key"))

@@ -28,14 +28,11 @@ func TestWebhookDeliveryJobsExcludedFromLedger(t *testing.T) {
 
 	dir := t.TempDir()
 	store := NewStore(filepath.Join(dir, "aquifer.db"))
-	t.Cleanup(func() {
-		store.Close()
-		time.Sleep(20 * time.Millisecond)
-	})
 	broker := NewBroker()
 	l8 := NewL8Registry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"))
 	cfg := &Config{Defaults: RateConfig{RPS: 100, MaxConcurrent: 1}}
 	registry := NewRegistry(store, cfg, broker, l8, NoopMetricsAdapter{}, nil)
+	t.Cleanup(registry.Close)
 
 	realJob := &Job{
 		ID:            generateID(),
@@ -198,6 +195,7 @@ func testL8Receiver(t *testing.T) (*httptest.Server, <-chan http.Header) {
 	dir := t.TempDir()
 	l8 := NewL8Registry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"))
 	app := NewAquifer(nil, nil, nil, l8, nil, nil)
+	t.Cleanup(app.Close)
 
 	captured := make(chan http.Header, 8)
 	mux := http.NewServeMux()

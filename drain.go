@@ -1,6 +1,7 @@
 package aquifer
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"strings"
@@ -22,13 +23,20 @@ import (
 // NewRegistry/ConfigureDrain) -- not a loop that runs and no-ops.
 const (
 	defaultDrainTimerSeconds  = 45
+	defaultDrainBatchInterval = 60
+	defaultDrainBatchMax      = 1000
+	defaultDrainSink          = "webhook"
 	drainWatchdogTickInterval = 5 * time.Second
 )
 
 type DrainConfig struct {
-	Enabled      bool  // AQUIFER_DRAIN_ENABLED
-	TimerSeconds int64 // AQUIFER_DRAIN_TIMER_SECONDS
-	WebhookURL   string
+	Enabled              bool  // AQUIFER_DRAIN_ENABLED
+	TimerSeconds         int64 // AQUIFER_DRAIN_TIMER_SECONDS
+	Sink                 string
+	WebhookURL           string
+	BatchEnabled         bool  // AQUIFER_DRAIN_BATCH_ENABLED
+	BatchIntervalSeconds int64 // AQUIFER_DRAIN_BATCH_INTERVAL_SECONDS
+	BatchMaxEvents       int   // AQUIFER_DRAIN_BATCH_MAX_EVENTS
 }
 
 // DrainState is the instance's explicit position in drain mode's lifecycle,
@@ -57,11 +65,22 @@ const (
 // ledger anyway."
 func LoadDrainConfig() DrainConfig {
 	cfg := DrainConfig{
-		Enabled:      envBool("AQUIFER_DRAIN_ENABLED", false),
-		TimerSeconds: envInt64("AQUIFER_DRAIN_TIMER_SECONDS", defaultDrainTimerSeconds),
-		WebhookURL:   os.Getenv("AQUIFER_DRAIN_WEBHOOK_URL"),
+		Enabled:              envBool("AQUIFER_DRAIN_ENABLED", false),
+		TimerSeconds:         envInt64("AQUIFER_DRAIN_TIMER_SECONDS", defaultDrainTimerSeconds),
+		Sink:                 strings.ToLower(os.Getenv("AQUIFER_DRAIN_SINK")),
+		WebhookURL:           os.Getenv("AQUIFER_DRAIN_WEBHOOK_URL"),
+		BatchEnabled:         envBool("AQUIFER_DRAIN_BATCH_ENABLED", false),
+		BatchIntervalSeconds: envInt64("AQUIFER_DRAIN_BATCH_INTERVAL_SECONDS", defaultDrainBatchInterval),
+		BatchMaxEvents:       int(envInt64("AQUIFER_DRAIN_BATCH_MAX_EVENTS", defaultDrainBatchMax)),
 	}
-	if cfg.Enabled && cfg.WebhookURL == "" {
+	if cfg.Sink == "" {
+		cfg.Sink = defaultDrainSink
+	}
+	if cfg.Sink != "webhook" && cfg.Sink != "valkey" {
+		log.Printf("drain: invalid AQUIFER_DRAIN_SINK=%q, using %s", cfg.Sink, defaultDrainSink)
+		cfg.Sink = defaultDrainSink
+	}
+	if cfg.Enabled && cfg.Sink == "webhook" && cfg.WebhookURL == "" {
 		log.Printf("drain: AQUIFER_DRAIN_ENABLED is true but AQUIFER_DRAIN_WEBHOOK_URL is not set — drain mode disabled, nowhere to send the ledger")
 		cfg.Enabled = false
 	}
@@ -94,35 +113,58 @@ func (r *Registry) drainWatchdogLoop() {
 
 	var becameIdleAt time.Time
 
-	for range ticker.C {
-		r.mu.Lock()
-		idle := len(r.workers) == 0
-		r.mu.Unlock()
+	for {
+		select {
+		case <-ticker.C:
+			r.mu.Lock()
+			idle := len(r.workers) == 0
+			r.mu.Unlock()
 
-		if !idle {
-			becameIdleAt = time.Time{}
-			r.setDrainState(DrainStateActive)
-			continue
+			if !idle {
+				becameIdleAt = time.Time{}
+				r.setDrainState(DrainStateActive)
+				continue
+			}
+
+			if r.DrainState() == DrainStateUnassigned {
+				continue // already flushed this idle period, wait for new activity to go active again
+			}
+
+			if becameIdleAt.IsZero() {
+				becameIdleAt = time.Now()
+				r.setDrainState(DrainStateDraining)
+				continue
+			}
+
+			if time.Since(becameIdleAt) < time.Duration(r.drainCfg.TimerSeconds)*time.Second {
+				continue // draining, timer hasn't elapsed yet
+			}
+
+			r.attemptDrainFlush()
+			// attemptDrainFlush itself moves state to Unassigned on success.
+			// On failure it leaves state at Draining, so the next tick retries
+			// the whole thing from scratch -- safe, since nothing was cleared.
+		case <-r.stop:
+			return
 		}
+	}
+}
 
-		if r.DrainState() == DrainStateUnassigned {
-			continue // already flushed this idle period, wait for new activity to go active again
+func (r *Registry) drainBatchLoop() {
+	interval := time.Duration(r.drainCfg.BatchIntervalSeconds) * time.Second
+	if interval <= 0 {
+		interval = defaultDrainBatchInterval * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			r.flushDrainEventBatch("ledger_batch")
+		case <-r.stop:
+			return
 		}
-
-		if becameIdleAt.IsZero() {
-			becameIdleAt = time.Now()
-			r.setDrainState(DrainStateDraining)
-			continue
-		}
-
-		if time.Since(becameIdleAt) < time.Duration(r.drainCfg.TimerSeconds)*time.Second {
-			continue // draining, timer hasn't elapsed yet
-		}
-
-		r.attemptDrainFlush()
-		// attemptDrainFlush itself moves state to Unassigned on success.
-		// On failure it leaves state at Draining, so the next tick retries
-		// the whole thing from scratch -- safe, since nothing was cleared.
 	}
 }
 
@@ -132,27 +174,62 @@ func (r *Registry) drainWatchdogLoop() {
 // successful flush, or nothing to flush at all) and false when it should
 // be retried on the next watchdog tick.
 func (r *Registry) attemptDrainFlush() bool {
-	entries := r.store.ListIdempotentKeys()
-	if len(entries) == 0 {
-		r.setDrainState(DrainStateUnassigned)
-		return true
-	}
-
-	payload := map[string]any{
-		"event":      "instance_idle",
-		"flushed_at": time.Now().UTC().Format(time.RFC3339),
-		"ledger":     entries,
-	}
-
-	if !deliverWebhookSync(r.drainCfg.WebhookURL, payload, r.l8, r.metrics) {
-		r.metrics.DrainFlushFailed(r.drainCfg.WebhookURL, len(entries))
-		log.Printf("drain: failed to deliver ledger flush (%d entries) after retries — not clearing, will retry", len(entries))
-		return false
+	for {
+		events, ok := r.flushDrainEventBatch("instance_idle")
+		if !ok {
+			return false
+		}
+		if len(events) == 0 {
+			break
+		}
 	}
 
 	r.store.ClearIdempotentKeys()
-	r.metrics.DrainFlushSucceeded(r.drainCfg.WebhookURL, len(entries))
-	log.Printf("drain: flushed and cleared ledger (%d entries)", len(entries))
 	r.setDrainState(DrainStateUnassigned)
 	return true
+}
+
+func (r *Registry) flushDrainEventBatch(eventName string) ([]DrainEvent, bool) {
+	limit := r.drainCfg.BatchMaxEvents
+	if limit <= 0 {
+		limit = defaultDrainBatchMax
+	}
+	events := r.store.ListDrainEvents(limit)
+	if len(events) == 0 {
+		return events, true
+	}
+
+	start := events[0].Sequence
+	end := events[len(events)-1].Sequence
+	if !r.deliverDrainBatch(eventName, events, start, end) {
+		r.metrics.DrainFlushFailed(r.drainCfg.WebhookURL, len(events))
+		log.Printf("drain: failed to deliver ledger batch (%d events) after retries — not acknowledging, will retry", len(events))
+		return events, false
+	}
+
+	r.store.AcknowledgeDrainEventsThrough(end)
+	r.metrics.DrainFlushSucceeded(r.drainCfg.WebhookURL, len(events))
+	log.Printf("drain: flushed and acknowledged ledger batch (%d events, sequence %d-%d)", len(events), start, end)
+	return events, true
+}
+
+func (r *Registry) deliverDrainBatch(eventName string, events []DrainEvent, start, end int64) bool {
+	if r.drainCfg.Sink == "valkey" {
+		remote := r.drainRemoteOrNil()
+		if remote == nil {
+			log.Printf("drain: AQUIFER_DRAIN_SINK=valkey but no remote idempotency sink is configured")
+			return false
+		}
+		return remote.Record(events)
+	}
+
+	payload := map[string]any{
+		"event":          eventName,
+		"batch_id":       fmt.Sprintf("%d-%d", start, end),
+		"sequence_start": start,
+		"sequence_end":   end,
+		"flushed_at":     time.Now().UTC().Format(time.RFC3339),
+		"ledger":         events,
+	}
+	return deliverWebhookSync(r.drainCfg.WebhookURL, payload, r.l8, r.metrics)
 }

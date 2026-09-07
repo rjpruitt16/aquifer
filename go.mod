@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/a2aproject/a2a-go/v2 v2.5.0
+	github.com/buraksezer/consistent v1.1.0
 	github.com/cockroachdb/pebble v1.1.5
 	github.com/google/uuid v1.6.0
 	gopkg.in/yaml.v3 v3.0.1

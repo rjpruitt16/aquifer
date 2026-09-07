@@ -20,6 +20,7 @@ type Aquifer struct {
 	l8        *L8Registry
 	admission *AdmissionController
 	pools     *PoolRegistry
+	remote    RemoteIdempotency
 	// regionAdapter backs /proxy's cross-region redirect (proxy.go). Left
 	// nil by NewAquifer deliberately -- SetRegionAdapter is how it gets
 	// wired in, so every existing NewAquifer caller (tests included) is
@@ -38,6 +39,7 @@ type Aquifer struct {
 	// DNS) to point at local httptest servers instead -- same
 	// injectable-for-testability pattern as FlyRegionAdapter.healthCheckURL.
 	redirectTargetURL func(region string) string
+	clusterRouter     *ClusterRouter
 }
 
 func NewAquifer(store JobStore, registry *Registry, broker *Broker, l8 *L8Registry, admission *AdmissionController, pools *PoolRegistry) *Aquifer {
@@ -48,6 +50,28 @@ func NewAquifer(store JobStore, registry *Registry, broker *Broker, l8 *L8Regist
 	}
 }
 
+func (a *Aquifer) Close() {
+	if a == nil {
+		return
+	}
+	if closer, ok := a.regionAdapter.(interface{ Close() }); ok {
+		closer.Close()
+	}
+	if a.registry != nil {
+		a.registry.Close()
+		return
+	}
+	if a.pools != nil {
+		a.pools.Stop()
+	}
+	if a.l8 != nil {
+		a.l8.Close()
+	}
+	if a.store != nil {
+		a.store.Close()
+	}
+}
+
 // SetRegionAdapter wires in a RegionAdapter after construction -- kept
 // separate from NewAquifer's constructor so adding this opt-in feature
 // doesn't change NewAquifer's signature for every existing caller. A nil
@@ -55,6 +79,14 @@ func NewAquifer(store JobStore, registry *Registry, broker *Broker, l8 *L8Regist
 // regionAdapterOrDefault.
 func (a *Aquifer) SetRegionAdapter(adapter RegionAdapter) {
 	a.regionAdapter = adapter
+}
+
+func (a *Aquifer) SetClusterRouter(router *ClusterRouter) {
+	a.clusterRouter = router
+}
+
+func (a *Aquifer) SetRemoteIdempotency(remote RemoteIdempotency) {
+	a.remote = remote
 }
 
 func (a *Aquifer) regionAdapterOrDefault() RegionAdapter {
@@ -116,6 +148,18 @@ func (a *Aquifer) PrepareJob(req JobRequest) (job *Job, duplicate *EnqueueResult
 			Status:    StatusQueued,
 			Duplicate: true,
 		}, nil
+	}
+
+	if a.remote != nil {
+		entry, found := a.remote.Lookup(hashKey(req.UserID + ":" + req.IdempotentKey))
+		if found {
+			a.store.DeleteJob(job.ID)
+			return nil, &EnqueueResult{
+				JobID:     entry.JobID,
+				Status:    entry.Status,
+				Duplicate: true,
+			}, nil
+		}
 	}
 
 	// CheckOrInsert already wrote this job's row since it wasn't a duplicate.
@@ -197,6 +241,9 @@ func (a *Aquifer) Health() map[string]any {
 	}
 	if drain := a.registry.DrainSnapshot(); drain != nil {
 		h["drain"] = drain
+	}
+	if cluster := a.clusterRouter.Snapshot(); cluster != nil {
+		h["cluster"] = cluster
 	}
 	return h
 }

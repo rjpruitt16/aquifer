@@ -35,17 +35,13 @@ func TestPoolBackedJobDispatchesToRegisteredMember(t *testing.T) {
 
 	dir := t.TempDir()
 	store := NewStore(filepath.Join(dir, "aquifer.db"))
-	t.Cleanup(func() {
-		store.Close()
-		time.Sleep(20 * time.Millisecond)
-	})
 	broker := NewBroker()
 	l8 := NewL8Registry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"))
 	cfg := &Config{Defaults: RateConfig{RPS: 50, MaxConcurrent: 5}}
 	pools := NewPoolRegistry()
-	t.Cleanup(pools.Stop)
 	registry := NewRegistry(store, cfg, broker, l8, NoopMetricsAdapter{}, pools)
 	app := NewAquifer(store, registry, broker, l8, nil, pools)
+	t.Cleanup(app.Close)
 
 	if err := app.RegisterPoolMember("workers", "w1", member.URL, 20, 30); err != nil {
 		t.Fatalf("unexpected registration error: %v", err)
@@ -272,17 +268,14 @@ func testPoolApp(t *testing.T, rps float64, maxConcurrent int) (*Aquifer, *Store
 
 	dir := t.TempDir()
 	store := NewStore(filepath.Join(dir, "aquifer.db"))
-	t.Cleanup(func() {
-		store.Close()
-		time.Sleep(20 * time.Millisecond)
-	})
 	broker := NewBroker()
 	l8 := NewL8Registry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"))
 	cfg := &Config{Defaults: RateConfig{RPS: rps, MaxConcurrent: maxConcurrent}}
 	pools := NewPoolRegistry()
-	t.Cleanup(pools.Stop)
 	registry := NewRegistry(store, cfg, broker, l8, NoopMetricsAdapter{}, pools)
-	return NewAquifer(store, registry, broker, l8, nil, pools), store, pools
+	app := NewAquifer(store, registry, broker, l8, nil, pools)
+	t.Cleanup(app.Close)
+	return app, store, pools
 }
 
 func waitForWebhook(t *testing.T, ch <-chan map[string]any) map[string]any {

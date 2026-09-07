@@ -51,6 +51,18 @@ type LedgerEntry struct {
 	Status  Status `json:"status"`
 }
 
+// DrainEvent is the durable, acknowledged unit used by batched drain
+// streaming. It intentionally carries the same hash-only ledger data as
+// LedgerEntry, plus a monotonic local sequence so a receiver can treat
+// batches idempotently and Aquifer can delete only acknowledged events.
+type DrainEvent struct {
+	Sequence   int64  `json:"sequence"`
+	HashKey    string `json:"idempotent_key_hash"`
+	JobID      string `json:"job_id"`
+	Status     Status `json:"status"`
+	RecordedAt int64  `json:"recorded_at"`
+}
+
 type JobRequest struct {
 	UserID        string            `json:"user_id"`
 	IdempotentKey string            `json:"idempotent_key"`

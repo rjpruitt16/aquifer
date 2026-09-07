@@ -71,6 +71,10 @@ type L8Registry struct {
 	trustDir string
 	trusts   sync.Map // domain -> ed25519.PublicKey (in-memory, loaded from disk on start)
 	nonces   sync.Map // nonce -> time.Time expiry
+
+	closeOnce sync.Once
+	stop      chan struct{}
+	done      chan struct{}
 }
 
 func NewL8Registry(keyPath, trustDir string) *L8Registry {
@@ -85,10 +89,19 @@ func NewL8Registry(keyPath, trustDir string) *L8Registry {
 		publicKey:  pub,
 		PubB64:     base64.StdEncoding.EncodeToString(pub),
 		trustDir:   trustDir,
+		stop:       make(chan struct{}),
+		done:       make(chan struct{}),
 	}
 	r.loadTrustsFromDisk()
 	go r.sweepNonces()
 	return r
+}
+
+func (r *L8Registry) Close() {
+	r.closeOnce.Do(func() {
+		close(r.stop)
+		<-r.done
+	})
 }
 
 func loadOrGenKey(path string) (ed25519.PublicKey, ed25519.PrivateKey) {
@@ -340,16 +353,23 @@ func sanitizeDomain(domain string) string {
 }
 
 func (r *L8Registry) sweepNonces() {
+	defer close(r.done)
+
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
-	for range ticker.C {
-		now := time.Now()
-		r.nonces.Range(func(k, v any) bool {
-			if expiry, ok := v.(time.Time); ok && now.After(expiry) {
-				r.nonces.Delete(k)
-			}
-			return true
-		})
+	for {
+		select {
+		case <-ticker.C:
+			now := time.Now()
+			r.nonces.Range(func(k, v any) bool {
+				if expiry, ok := v.(time.Time); ok && now.After(expiry) {
+					r.nonces.Delete(k)
+				}
+				return true
+			})
+		case <-r.stop:
+			return
+		}
 	}
 }
 
