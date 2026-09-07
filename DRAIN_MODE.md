@@ -51,6 +51,9 @@ guarantee that never happens, enforce it on your own end before routing traffic 
 | `AQUIFER_VALKEY_URL` | *(none)* | Required when `AQUIFER_DRAIN_SINK=valkey`, and also used by remote idempotency lookup. Supports `redis://` and `valkey://` URLs. |
 | `AQUIFER_REMOTE_IDEMPOTENCY_PREFIX` | `aqueduct:idempotency:` | Key prefix for Valkey idempotency entries. |
 | `AQUIFER_REMOTE_IDEMPOTENCY_TTL_SECONDS` | `7200` | TTL for remote idempotency entries written to Valkey. |
+| `AQUIFER_REMOTE_RESULT_ENABLED` | `false` | Also writes bounded terminal result snapshots to Valkey. |
+| `AQUIFER_REMOTE_RESULT_PREFIX` | `aqueduct:result:` | Key prefix for terminal result snapshots. |
+| `AQUIFER_REMOTE_RESULT_MAX_BYTES` | `65536` | Maximum response-body bytes stored in each result snapshot; `0` stores metadata only. |
 | `AQUIFER_IDLE_TIMEOUT_SECONDS` | `300` (5min) | The per-tenant-queue self-GC timer itself. Exists mainly so contract tests don't have to burn 5+ real minutes to prove a real drain flush — leave this at the default in production. |
 
 **Webhook payloads:**
@@ -115,12 +118,22 @@ The value is:
   "job_id": "a3f9...",
   "status": "completed",
   "recorded_at": 1798053731000,
-  "source": "aquifer"
+  "source": "aquifer",
+  "result_key": "aqueduct:result:..."
 }
 ```
 
 Those Valkey writes are treated the same way as webhook delivery: only successful writes are
 acknowledged and deleted from Aquifer's local drain-event journal.
+
+If `AQUIFER_REMOTE_RESULT_ENABLED=true`, Aquifer also writes:
+
+```txt
+{AQUIFER_REMOTE_RESULT_PREFIX}{idempotent_key_hash}
+```
+
+with the terminal response status, content type, body up to `AQUIFER_REMOTE_RESULT_MAX_BYTES`,
+and a `body_truncated` flag. The idempotency entry's `result_key` points at that snapshot.
 
 `idempotent_key_hash` is `sha256(user_id + ":" + idempotent_key)`, hex-encoded lowercase — the exact
 hash Aquifer already computes internally, never the plaintext key. A downstream consumer re-checking a

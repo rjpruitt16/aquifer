@@ -18,6 +18,8 @@ const (
 	defaultRemoteIdempotencyTimeoutMS  = 25
 	defaultRemoteIdempotencyTTLSeconds = 2 * 60 * 60
 	defaultRemoteIdempotencyPrefix     = "aqueduct:idempotency:"
+	defaultRemoteResultPrefix          = "aqueduct:result:"
+	defaultRemoteResultMaxBytes        = 64 * 1024
 )
 
 type RemoteIdempotencyEntry struct {
@@ -25,6 +27,18 @@ type RemoteIdempotencyEntry struct {
 	Status     Status `json:"status"`
 	RecordedAt int64  `json:"recorded_at"`
 	Source     string `json:"source"`
+	ResultKey  string `json:"result_key,omitempty"`
+}
+
+type JobResult struct {
+	JobID          string `json:"job_id"`
+	Status         Status `json:"status"`
+	ResponseStatus int    `json:"response_status"`
+	ContentType    string `json:"content_type,omitempty"`
+	Body           string `json:"body,omitempty"`
+	BodyTruncated  bool   `json:"body_truncated,omitempty"`
+	RecordedAt     int64  `json:"recorded_at"`
+	Source         string `json:"source"`
 }
 
 type RemoteIdempotency interface {
@@ -32,12 +46,19 @@ type RemoteIdempotency interface {
 	Record(events []DrainEvent) bool
 }
 
+type JobResultRecorder interface {
+	RecordResult(hash string, result JobResult) (string, bool)
+}
+
 type RemoteIdempotencyConfig struct {
-	Enabled    bool
-	URL        string
-	Timeout    time.Duration
-	Prefix     string
-	TTLSeconds int64
+	Enabled        bool
+	URL            string
+	Timeout        time.Duration
+	Prefix         string
+	TTLSeconds     int64
+	ResultEnabled  bool
+	ResultPrefix   string
+	ResultMaxBytes int64
 }
 
 func LoadRemoteIdempotencyConfig() RemoteIdempotencyConfig {
@@ -53,13 +74,24 @@ func LoadRemoteIdempotencyConfig() RemoteIdempotencyConfig {
 	if prefix == "" {
 		prefix = defaultRemoteIdempotencyPrefix
 	}
+	resultPrefix := os.Getenv("AQUIFER_REMOTE_RESULT_PREFIX")
+	if resultPrefix == "" {
+		resultPrefix = defaultRemoteResultPrefix
+	}
+	maxBytes := envInt64("AQUIFER_REMOTE_RESULT_MAX_BYTES", defaultRemoteResultMaxBytes)
+	if maxBytes < 0 {
+		maxBytes = defaultRemoteResultMaxBytes
+	}
 
 	return RemoteIdempotencyConfig{
-		Enabled:    envBool("AQUIFER_REMOTE_IDEMPOTENCY_ENABLED", false) || strings.EqualFold(os.Getenv("AQUIFER_DRAIN_SINK"), "valkey"),
-		URL:        os.Getenv("AQUIFER_VALKEY_URL"),
-		Timeout:    time.Duration(timeoutMS) * time.Millisecond,
-		Prefix:     prefix,
-		TTLSeconds: ttl,
+		Enabled:        envBool("AQUIFER_REMOTE_IDEMPOTENCY_ENABLED", false) || strings.EqualFold(os.Getenv("AQUIFER_DRAIN_SINK"), "valkey"),
+		URL:            os.Getenv("AQUIFER_VALKEY_URL"),
+		Timeout:        time.Duration(timeoutMS) * time.Millisecond,
+		Prefix:         prefix,
+		TTLSeconds:     ttl,
+		ResultEnabled:  envBool("AQUIFER_REMOTE_RESULT_ENABLED", false),
+		ResultPrefix:   resultPrefix,
+		ResultMaxBytes: maxBytes,
 	}
 }
 
@@ -77,6 +109,9 @@ func NewValkeyRemoteIdempotency(cfg RemoteIdempotencyConfig) RemoteIdempotency {
 	}
 	if cfg.Prefix == "" {
 		cfg.Prefix = defaultRemoteIdempotencyPrefix
+	}
+	if cfg.ResultPrefix == "" {
+		cfg.ResultPrefix = defaultRemoteResultPrefix
 	}
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = defaultRemoteIdempotencyTimeoutMS * time.Millisecond
@@ -115,6 +150,9 @@ func (v *ValkeyRemoteIdempotency) Record(events []DrainEvent) bool {
 			RecordedAt: event.RecordedAt,
 			Source:     "aquifer",
 		}
+		if v.cfg.ResultEnabled {
+			entry.ResultKey = v.cfg.ResultPrefix + event.HashKey
+		}
 		payload, err := json.Marshal(entry)
 		if err != nil {
 			log.Printf("remote idempotency: marshal event %d: %v", event.Sequence, err)
@@ -126,6 +164,40 @@ func (v *ValkeyRemoteIdempotency) Record(events []DrainEvent) bool {
 		}
 	}
 	return true
+}
+
+func (v *ValkeyRemoteIdempotency) RecordResult(hash string, result JobResult) (string, bool) {
+	if !v.cfg.ResultEnabled {
+		return "", false
+	}
+	key := v.cfg.ResultPrefix + hash
+	result.Body, result.BodyTruncated = truncateStringBytes(result.Body, v.cfg.ResultMaxBytes)
+	if result.Source == "" {
+		result.Source = "aquifer"
+	}
+	if result.RecordedAt == 0 {
+		result.RecordedAt = time.Now().UnixMilli()
+	}
+	payload, err := json.Marshal(result)
+	if err != nil {
+		log.Printf("remote result: marshal job %s: %v", result.JobID, err)
+		return "", false
+	}
+	if _, err := v.command("SET", key, string(payload), "EX", strconv.FormatInt(v.cfg.TTLSeconds, 10)); err != nil {
+		log.Printf("remote result: record job %s failed: %v", result.JobID, err)
+		return "", false
+	}
+	return key, true
+}
+
+func truncateStringBytes(s string, maxBytes int64) (string, bool) {
+	if maxBytes == 0 {
+		return "", s != ""
+	}
+	if maxBytes < 0 || int64(len(s)) <= maxBytes {
+		return s, false
+	}
+	return s[:maxBytes], true
 }
 
 func (v *ValkeyRemoteIdempotency) command(args ...string) (string, error) {

@@ -11,6 +11,7 @@ type EnqueueResult struct {
 	JobID     string `json:"job_id"`
 	Status    Status `json:"status"`
 	Duplicate bool   `json:"duplicate,omitempty"`
+	ResultKey string `json:"result_key,omitempty"`
 }
 
 type Aquifer struct {
@@ -158,6 +159,7 @@ func (a *Aquifer) PrepareJob(req JobRequest) (job *Job, duplicate *EnqueueResult
 				JobID:     entry.JobID,
 				Status:    entry.Status,
 				Duplicate: true,
+				ResultKey: entry.ResultKey,
 			}, nil
 		}
 	}

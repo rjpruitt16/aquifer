@@ -32,6 +32,7 @@ func TestRemoteIdempotencyDuplicateDeletesLocalAcceptedJob(t *testing.T) {
 			Status:     StatusCompleted,
 			RecordedAt: 123,
 			Source:     "test",
+			ResultKey:  "aqueduct:result:remote-key",
 		},
 		found: true,
 	}
@@ -48,11 +49,47 @@ func TestRemoteIdempotencyDuplicateDeletesLocalAcceptedJob(t *testing.T) {
 	if result.JobID != "remote-job" || result.Status != StatusCompleted {
 		t.Fatalf("expected remote result returned, got %+v", result)
 	}
+	if result.ResultKey != "aqueduct:result:remote-key" {
+		t.Fatalf("expected remote duplicate to return result key, got %+v", result)
+	}
 	if remote.lookupHash != hashKey(req.UserID+":"+req.IdempotentKey) {
 		t.Fatalf("expected lookup by Aquifer idempotency hash, got %q", remote.lookupHash)
 	}
 	if entries := store.ListIdempotentKeys(); len(entries) != 0 {
 		t.Fatalf("expected local speculative insert deleted after remote duplicate, got %+v", entries)
+	}
+}
+
+func TestLoadRemoteIdempotencyConfigResultDefaults(t *testing.T) {
+	t.Setenv("AQUIFER_REMOTE_IDEMPOTENCY_ENABLED", "true")
+	t.Setenv("AQUIFER_VALKEY_URL", "redis://localhost:6379")
+
+	cfg := LoadRemoteIdempotencyConfig()
+	if cfg.ResultEnabled {
+		t.Fatalf("expected remote result recording to default off")
+	}
+	if cfg.ResultPrefix != defaultRemoteResultPrefix {
+		t.Fatalf("expected default result prefix %q, got %q", defaultRemoteResultPrefix, cfg.ResultPrefix)
+	}
+	if cfg.ResultMaxBytes != defaultRemoteResultMaxBytes {
+		t.Fatalf("expected default result max bytes %d, got %d", defaultRemoteResultMaxBytes, cfg.ResultMaxBytes)
+	}
+}
+
+func TestTruncateStringBytes(t *testing.T) {
+	got, truncated := truncateStringBytes("abcdef", 3)
+	if got != "abc" || !truncated {
+		t.Fatalf("expected truncated abc, got %q truncated=%v", got, truncated)
+	}
+
+	got, truncated = truncateStringBytes("abcdef", 0)
+	if got != "" || !truncated {
+		t.Fatalf("expected empty truncated body for max 0, got %q truncated=%v", got, truncated)
+	}
+
+	got, truncated = truncateStringBytes("abc", 10)
+	if got != "abc" || truncated {
+		t.Fatalf("expected unchanged body, got %q truncated=%v", got, truncated)
 	}
 }
 

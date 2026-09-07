@@ -24,6 +24,7 @@ type URLWorker struct {
 	l8               *L8Registry
 	metrics          MetricsAdapter
 	enqueueWebhook   webhookEnqueuer
+	resultRecorder   JobResultRecorder
 	onIdle           func(string)
 	breakerUntil     time.Time // zero value means the breaker is closed
 	breakerKind      string    // "queue" or "reroute" — which kind of signal tripped it, see classifyOverload
@@ -87,7 +88,7 @@ func (w *URLWorker) QueueActive() bool {
 	return false
 }
 
-func NewURLWorker(domain string, rps float64, maxConc int, pool *Pool, store JobStore, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, enqueueWebhook webhookEnqueuer, onIdle func(string)) *URLWorker {
+func NewURLWorker(domain string, rps float64, maxConc int, pool *Pool, store JobStore, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, enqueueWebhook webhookEnqueuer, resultRecorder JobResultRecorder, onIdle func(string)) *URLWorker {
 	w := &URLWorker{
 		domain:         domain,
 		rps:            rps,
@@ -99,6 +100,7 @@ func NewURLWorker(domain string, rps float64, maxConc int, pool *Pool, store Job
 		l8:             l8,
 		metrics:        ensureMetrics(metrics),
 		enqueueWebhook: enqueueWebhook,
+		resultRecorder: resultRecorder,
 		onIdle:         onIdle,
 		stop:           make(chan struct{}),
 		done:           make(chan struct{}),
@@ -225,7 +227,7 @@ func (w *URLWorker) Enqueue(job *Job) {
 
 	q, ok := w.queues[key]
 	if !ok {
-		q = NewAccountQueue(key, w.domain, w.rps, w.maxConc, w.pool, w.store, w.broker, w.l8, w.metrics, w.enqueueWebhook, func(k string) {
+		q = NewAccountQueue(key, w.domain, w.rps, w.maxConc, w.pool, w.store, w.broker, w.l8, w.metrics, w.enqueueWebhook, w.resultRecorder, func(k string) {
 			w.mu.Lock()
 			delete(w.queues, k)
 			empty := len(w.queues) == 0

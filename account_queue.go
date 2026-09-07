@@ -77,6 +77,7 @@ type AccountQueue struct {
 	l8             *L8Registry
 	metrics        MetricsAdapter
 	enqueueWebhook webhookEnqueuer
+	resultRecorder JobResultRecorder
 	currentRPS     atomic.Int64 // stored as rps * 100
 	backlog        atomic.Int32 // len(queue) + inFlight, live — see run()
 	stop           chan struct{}
@@ -115,7 +116,7 @@ func (q *AccountQueue) Throttle(rps float64) {
 	}
 }
 
-func NewAccountQueue(key, upstream string, rps float64, maxConc int, pool *Pool, store JobStore, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, enqueueWebhook webhookEnqueuer, onIdle func(string), slowStart bool, onSlowStartSignal func(bool)) *AccountQueue {
+func NewAccountQueue(key, upstream string, rps float64, maxConc int, pool *Pool, store JobStore, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, enqueueWebhook webhookEnqueuer, resultRecorder JobResultRecorder, onIdle func(string), slowStart bool, onSlowStartSignal func(bool)) *AccountQueue {
 	q := &AccountQueue{
 		key:            key,
 		upstream:       upstream,
@@ -127,6 +128,7 @@ func NewAccountQueue(key, upstream string, rps float64, maxConc int, pool *Pool,
 		l8:             l8,
 		metrics:        ensureMetrics(metrics),
 		enqueueWebhook: enqueueWebhook,
+		resultRecorder: resultRecorder,
 		stop:           make(chan struct{}),
 		stopped:        make(chan struct{}),
 	}
@@ -299,7 +301,7 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 						}
 					}
 				}()
-				msg := execute(q.ctx, j, url, q.upstream, q.store, q.broker, q.l8, q.metrics, q.pool, m, flowRate, q.enqueueWebhook)
+				msg := execute(q.ctx, j, url, q.upstream, q.store, q.broker, q.l8, q.metrics, q.pool, m, flowRate, q.enqueueWebhook, q.resultRecorder)
 				select {
 				case q.done <- msg:
 				case <-q.stop:
@@ -356,7 +358,7 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 	}
 }
 
-func execute(ctx context.Context, job *Job, dispatchURL, upstream string, store JobStore, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, pool *Pool, member *PoolMember, flowRate float64, enqueueWebhook webhookEnqueuer) jobDoneMsg {
+func execute(ctx context.Context, job *Job, dispatchURL, upstream string, store JobStore, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, pool *Pool, member *PoolMember, flowRate float64, enqueueWebhook webhookEnqueuer, resultRecorder JobResultRecorder) jobDoneMsg {
 	metrics = ensureMetrics(metrics)
 	startedAt := time.Now()
 
@@ -435,19 +437,24 @@ func execute(ctx context.Context, job *Job, dispatchURL, upstream string, store 
 			pool.RecordFailure(currentMember.ID)
 		}
 		store.UpdateStatus(job.ID, StatusFailed)
+		resultKey := recordJobResult(job, resultRecorder, StatusFailed, responseStatus, "", string(body))
 		broker.Publish(job.ID, SSEEvent{
 			Event: "failed",
 			Data:  map[string]any{"job_id": job.ID, "reason": reason, "response_status": responseStatus, "body": string(body)},
 		})
 		metrics.JobFailed(job.UserID, upstream, reason)
 		if !job.isWebhookDeliveryJob() {
-			enqueueWebhook(job.ID, job.UserID, job.WebhookURL, map[string]any{
+			payload := map[string]any{
 				"job_id":          job.ID,
 				"status":          "failed",
 				"reason":          reason,
 				"response_status": responseStatus,
 				"body":            string(body),
-			})
+			}
+			if resultKey != "" {
+				payload["result_key"] = resultKey
+			}
+			enqueueWebhook(job.ID, job.UserID, job.WebhookURL, payload)
 		}
 		return jobDoneMsg{}
 	}
@@ -459,6 +466,7 @@ func execute(ctx context.Context, job *Job, dispatchURL, upstream string, store 
 
 	body, _ := io.ReadAll(resp.Body)
 	store.UpdateStatus(job.ID, StatusCompleted)
+	resultKey := recordJobResult(job, resultRecorder, StatusCompleted, resp.StatusCode, resp.Header.Get("Content-Type"), string(body))
 	broker.Publish(job.ID, SSEEvent{
 		Event: "completed",
 		Data: map[string]any{
@@ -469,12 +477,16 @@ func execute(ctx context.Context, job *Job, dispatchURL, upstream string, store 
 	})
 	metrics.JobCompleted(job.UserID, upstream, time.Since(startedAt).Milliseconds())
 	if !job.isWebhookDeliveryJob() {
-		enqueueWebhook(job.ID, job.UserID, job.WebhookURL, map[string]any{
+		payload := map[string]any{
 			"job_id":          job.ID,
 			"status":          "completed",
 			"response_status": resp.StatusCode,
 			"body":            string(body),
-		})
+		}
+		if resultKey != "" {
+			payload["result_key"] = resultKey
+		}
+		enqueueWebhook(job.ID, job.UserID, job.WebhookURL, payload)
 	}
 
 	msg := jobDoneMsg{}
@@ -503,6 +515,25 @@ func execute(ctx context.Context, job *Job, dispatchURL, upstream string, store 
 		msg.slowStart = &enabled
 	}
 	return msg
+}
+
+func recordJobResult(job *Job, recorder JobResultRecorder, status Status, responseStatus int, contentType string, body string) string {
+	if recorder == nil || job.isWebhookDeliveryJob() {
+		return ""
+	}
+	key, ok := recorder.RecordResult(hashKey(job.UserID+":"+job.IdempotentKey), JobResult{
+		JobID:          job.ID,
+		Status:         status,
+		ResponseStatus: responseStatus,
+		ContentType:    contentType,
+		Body:           body,
+		RecordedAt:     time.Now().UnixMilli(),
+		Source:         "aquifer",
+	})
+	if !ok {
+		return ""
+	}
+	return key
 }
 
 func pacingHeader(headers http.Header, name string) string {

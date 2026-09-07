@@ -16,6 +16,7 @@ type Registry struct {
 	metrics         MetricsAdapter
 	pools           *PoolRegistry
 	drainRemote     RemoteIdempotency
+	resultRecorder  JobResultRecorder
 	totalJobs       atomic.Int64
 	queueDepth      atomic.Int64
 	drainCfg        DrainConfig
@@ -134,6 +135,11 @@ func (r *Registry) ConfigureDrain(cfg DrainConfig) {
 func (r *Registry) SetDrainRemote(remote RemoteIdempotency) {
 	r.mu.Lock()
 	r.drainRemote = remote
+	if recorder, ok := remote.(JobResultRecorder); ok {
+		r.resultRecorder = recorder
+	} else {
+		r.resultRecorder = nil
+	}
 	r.mu.Unlock()
 }
 
@@ -248,7 +254,7 @@ func (r *Registry) resolveWorkerLocked(job *Job) (string, *URLWorker) {
 
 	w, ok := r.workers[key]
 	if !ok {
-		w = NewURLWorker(key, rc.RPS, rc.MaxConcurrent, pool, r.store, r.broker, r.l8, r.metrics, r.EnqueueWebhook, func(k string) {
+		w = NewURLWorker(key, rc.RPS, rc.MaxConcurrent, pool, r.store, r.broker, r.l8, r.metrics, r.EnqueueWebhook, r.resultRecorder, func(k string) {
 			r.mu.Lock()
 			delete(r.workers, k)
 			r.mu.Unlock()

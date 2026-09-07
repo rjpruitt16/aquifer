@@ -8,6 +8,19 @@ import (
 	"time"
 )
 
+type fakeJobResultRecorder struct {
+	hash   string
+	result JobResult
+	key    string
+	ok     bool
+}
+
+func (f *fakeJobResultRecorder) RecordResult(hash string, result JobResult) (string, bool) {
+	f.hash = hash
+	f.result = result
+	return f.key, f.ok
+}
+
 // TestMakeRequestRequestsOrcaMetricsByDefault guards the exact casing sent:
 // lowercase "text", not "TEXT". vLLM accepts either (metrics_format.lower()
 // in orca_metrics.py), but Triton's ORCA support (src/orca_http.cc) does a
@@ -88,6 +101,38 @@ func TestSetLoadHeaderWritesBothNamespaces(t *testing.T) {
 	}
 }
 
+func TestRecordJobResultUsesIdempotencyHash(t *testing.T) {
+	recorder := &fakeJobResultRecorder{key: "aqueduct:result:abc", ok: true}
+	job := &Job{ID: "job-1", UserID: "user-1", IdempotentKey: "key-1", WebhookURL: "https://example.com/webhook"}
+
+	got := recordJobResult(job, recorder, StatusCompleted, http.StatusOK, "application/json", `{"ok":true}`)
+
+	if got != recorder.key {
+		t.Fatalf("expected result key %q, got %q", recorder.key, got)
+	}
+	if recorder.hash != hashKey("user-1:key-1") {
+		t.Fatalf("expected idempotency hash, got %q", recorder.hash)
+	}
+	if recorder.result.JobID != "job-1" || recorder.result.Status != StatusCompleted || recorder.result.ResponseStatus != http.StatusOK {
+		t.Fatalf("unexpected recorded result: %+v", recorder.result)
+	}
+	if recorder.result.Body != `{"ok":true}` || recorder.result.ContentType != "application/json" {
+		t.Fatalf("unexpected recorded body/content type: %+v", recorder.result)
+	}
+}
+
+func TestRecordJobResultSkipsWebhookDeliveryJobs(t *testing.T) {
+	recorder := &fakeJobResultRecorder{key: "aqueduct:result:abc", ok: true}
+	job := &Job{ID: "webhook-job", UserID: "user-1", IdempotentKey: "webhook:job-1"}
+
+	if got := recordJobResult(job, recorder, StatusCompleted, http.StatusOK, "application/json", "{}"); got != "" {
+		t.Fatalf("expected no result key for webhook delivery job, got %q", got)
+	}
+	if recorder.hash != "" {
+		t.Fatalf("expected recorder not to be called for webhook delivery job")
+	}
+}
+
 // TestSlowStartBeginsAtMinRPS proves a queue constructed with slowStart=true
 // starts dispatching at minRPS regardless of how high its configured
 // ceiling is, rather than firing at the full configured rate immediately --
@@ -105,7 +150,7 @@ func TestSlowStartBeginsAtMinRPS(t *testing.T) {
 	})
 
 	const configuredRPS = 100.0
-	q := NewAccountQueue("tenant-1", "https://example.com", configuredRPS, 5, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, map[string]any) {}, func(string) {}, true, func(bool) {})
+	q := NewAccountQueue("tenant-1", "https://example.com", configuredRPS, 5, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, map[string]any) {}, nil, func(string) {}, true, func(bool) {})
 	t.Cleanup(q.Stop)
 
 	deadline := time.Now().Add(time.Second)
@@ -135,7 +180,7 @@ func TestSlowStartOffByDefaultStartsAtConfiguredRPS(t *testing.T) {
 	})
 
 	const configuredRPS = 12.0
-	q := NewAccountQueue("tenant-1", "https://example.com", configuredRPS, 5, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, map[string]any) {}, func(string) {}, false, func(bool) {})
+	q := NewAccountQueue("tenant-1", "https://example.com", configuredRPS, 5, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, map[string]any) {}, nil, func(string) {}, false, func(bool) {})
 	t.Cleanup(q.Stop)
 
 	deadline := time.Now().Add(time.Second)

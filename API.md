@@ -221,6 +221,9 @@ Configuration:
 | `AQUIFER_REMOTE_IDEMPOTENCY_TIMEOUT_MS` | `25` | Lookup/write timeout budget |
 | `AQUIFER_REMOTE_IDEMPOTENCY_PREFIX` | `aqueduct:idempotency:` | Key prefix |
 | `AQUIFER_REMOTE_IDEMPOTENCY_TTL_SECONDS` | `7200` | TTL for entries written by Valkey drain sink |
+| `AQUIFER_REMOTE_RESULT_ENABLED` | `false` | Also writes a bounded terminal result snapshot to Valkey |
+| `AQUIFER_REMOTE_RESULT_PREFIX` | `aqueduct:result:` | Key prefix for result snapshots |
+| `AQUIFER_REMOTE_RESULT_MAX_BYTES` | `65536` | Maximum response-body bytes stored in a result snapshot; `0` stores metadata only |
 
 Key:
 
@@ -235,11 +238,35 @@ Value:
   "job_id": "a3f9...",
   "status": "completed",
   "recorded_at": 1798053731000,
-  "source": "aquifer"
+  "source": "aquifer",
+  "result_key": "aqueduct:result:..."
 }
 ```
 
 `AQUIFER_DRAIN_SINK=valkey` uses the same prefix/value contract for completed and failed job records.
+
+When `AQUIFER_REMOTE_RESULT_ENABLED=true`, Aquifer also writes the terminal response snapshot to:
+
+```txt
+{AQUIFER_REMOTE_RESULT_PREFIX}{sha256(user_id + ":" + idempotent_key)}
+```
+
+Value:
+
+```json
+{
+  "job_id": "a3f9...",
+  "status": "completed",
+  "response_status": 200,
+  "content_type": "application/json",
+  "body": "{\"ok\":true}",
+  "body_truncated": false,
+  "recorded_at": 1798053731000,
+  "source": "aquifer"
+}
+```
+
+The result body is capped before writing to Valkey. This is meant for replaying or inspecting bounded API responses, not for storing large artifacts or unbounded streams. Use object storage or your own durable result store for large outputs.
 
 ## Autoscaling
 
