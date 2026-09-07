@@ -56,6 +56,13 @@ func TestRemoteIdempotencyDuplicateDeletesLocalAcceptedJob(t *testing.T) {
 	}
 }
 
+func TestNewValkeyRemoteIdempotencyDisabledReturnsNilInterface(t *testing.T) {
+	var remote RemoteIdempotency = NewValkeyRemoteIdempotency(RemoteIdempotencyConfig{})
+	if remote != nil {
+		t.Fatalf("expected disabled Valkey remote idempotency to return a nil interface, got %T", remote)
+	}
+}
+
 func TestDrainValkeySinkRecordsAndAcknowledges(t *testing.T) {
 	remote := &fakeRemoteIdempotency{recordOK: true}
 	r := drainTestRegistry(t, NoopMetricsAdapter{})

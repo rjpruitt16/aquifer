@@ -30,6 +30,32 @@ func TestCreateJobSucceedsUnderNormalConditions(t *testing.T) {
 	}
 }
 
+func TestCreateJobDefaultRuntimeDoesNotEnableRemoteIdempotency(t *testing.T) {
+	t.Setenv("AQUIFER_REMOTE_IDEMPOTENCY_ENABLED", "")
+	t.Setenv("AQUIFER_DRAIN_SINK", "")
+	t.Setenv("AQUIFER_VALKEY_URL", "")
+
+	rt := NewRuntime(RuntimeOptions{
+		DBPath:          filepath.Join(t.TempDir(), "aquifer.db"),
+		L8KeyPath:       filepath.Join(t.TempDir(), ".l8-key"),
+		L8TrustDir:      filepath.Join(t.TempDir(), "l8-trust"),
+		AdmissionLimits: &AdmissionLimits{},
+		Metrics:         NoopMetricsAdapter{},
+	})
+	t.Cleanup(rt.Close)
+	srv := NewServer(rt.Aquifer)
+
+	body, _ := json.Marshal(sampleJobRequest("user-default-runtime", "key-default-runtime"))
+	req := httptest.NewRequest(http.MethodPost, "/jobs", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 without remote idempotency env, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestCreateJobRejectsOversizedBodyWith413(t *testing.T) {
 	srv := testServer(t, AdmissionLimits{MaxBodyBytes: 10})
 

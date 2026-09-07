@@ -67,7 +67,7 @@ type ValkeyRemoteIdempotency struct {
 	cfg RemoteIdempotencyConfig
 }
 
-func NewValkeyRemoteIdempotency(cfg RemoteIdempotencyConfig) *ValkeyRemoteIdempotency {
+func NewValkeyRemoteIdempotency(cfg RemoteIdempotencyConfig) RemoteIdempotency {
 	if !cfg.Enabled {
 		return nil
 	}
