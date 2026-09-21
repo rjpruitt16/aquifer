@@ -37,17 +37,23 @@ type RuntimeOptions struct {
 	// local store accepts a new key but before the job is dispatched. If
 	// nil, NewRuntime loads AQUIFER_REMOTE_IDEMPOTENCY_* env config.
 	RemoteIdempotency RemoteIdempotency
+	// WebSocketConfig and WebSocketStore allow embedding applications and
+	// tests to configure the durable WebSocket proxy without environment
+	// variables. Nil values load AQUIFER_WS_* and AQUIFER_VALKEY_URL.
+	WebSocketConfig *WebSocketConfig
+	WebSocketStore  WebSocketStreamStore
 }
 
 type Runtime struct {
-	Aquifer   *Aquifer
-	Store     JobStore
-	Broker    *Broker
-	Registry  *Registry
-	L8        *L8Registry
-	Config    *Config
-	Admission *AdmissionController
-	Pools     *PoolRegistry
+	Aquifer    *Aquifer
+	Store      JobStore
+	Broker     *Broker
+	Registry   *Registry
+	L8         *L8Registry
+	Config     *Config
+	Admission  *AdmissionController
+	Pools      *PoolRegistry
+	WebSockets *WebSocketManager
 }
 
 func NewRuntime(opts RuntimeOptions) *Runtime {
@@ -118,15 +124,37 @@ func NewRuntime(opts RuntimeOptions) *Runtime {
 		app.SetClusterRouter(clusterRouter)
 	}
 
+	webSocketCfg := opts.WebSocketConfig
+	if webSocketCfg == nil {
+		loaded := LoadWebSocketConfig()
+		webSocketCfg = &loaded
+	}
+	var webSocketManager *WebSocketManager
+	if webSocketCfg.Enabled {
+		streamStore := opts.WebSocketStore
+		if streamStore == nil {
+			var err error
+			streamStore, err = NewRedisWebSocketStreamStore(webSocketCfg.RedisURL, webSocketCfg.StreamPrefix, webSocketCfg.StreamMaxEvents)
+			if err != nil {
+				log.Printf("websocket: disabled: %v", err)
+			}
+		}
+		if streamStore != nil {
+			webSocketManager = NewWebSocketManager(*webSocketCfg, streamStore)
+			app.SetWebSocketManager(webSocketManager)
+		}
+	}
+
 	return &Runtime{
-		Aquifer:   app,
-		Store:     store,
-		Broker:    broker,
-		Registry:  registry,
-		L8:        l8,
-		Config:    cfg,
-		Admission: admission,
-		Pools:     pools,
+		Aquifer:    app,
+		Store:      store,
+		Broker:     broker,
+		Registry:   registry,
+		L8:         l8,
+		Config:     cfg,
+		Admission:  admission,
+		Pools:      pools,
+		WebSockets: webSocketManager,
 	}
 }
 

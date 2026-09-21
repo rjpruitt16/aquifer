@@ -81,7 +81,111 @@ Pool-routed jobs (`pool_id` instead of `url`) always fall straight to queue+stre
 curl -N -X POST http://localhost:8080/proxy -d '{ ... same shape as POST /jobs ... }'
 ```
 
-### Cross-region redirect (Fly.io)
+## GET /websocket
+
+Opt-in WebSocket proxying with an ordered Valkey transcript, cursor replay, paced upstream connection admission, and automatic upstream reconnect. Aquifer does **not** authenticate callers or choose their destination. Put it behind a trusted gateway that authenticates the request and injects the upstream URL.
+
+Enable the endpoint with `AQUIFER_WS_ENABLED=true` and configure `AQUIFER_VALKEY_URL`. WebSocket sessions fail closed when Valkey is unavailable because Aquifer cannot uphold record-before-forward and record-before-deliver without the stream.
+
+### Handshake
+
+```http
+GET /websocket?session_id=session-123&after=0-0 HTTP/1.1
+Connection: Upgrade
+Upgrade: websocket
+Sec-WebSocket-Protocol: aqueduct.v1
+Authorization: Bearer gateway-authenticated-identity
+X-Aqueduct-Upstream-URL: wss://backend.internal/socket
+```
+
+`session_id` identifies the durable transcript. `after` is the last Valkey stream ID the client has processed and defaults to `0-0`. Aquifer replays backend messages after that cursor before following live events. A cursor older than retained history is rejected with **409** instead of silently skipping data.
+
+The trusted `X-Aqueduct-Upstream-URL` must be an absolute `ws://` or `wss://` URL and is subject to `AQUIFER_ALLOWED_URL_DOMAINS`. Aquifer forwards end-to-end gateway headers such as `Authorization`, strips hop-by-hop and internal `X-Aqueduct-*`/`X-Aquifer-*` headers, and injects `X-Aqueduct-Session-ID` upstream.
+
+### Messages
+
+Every application message is a JSON `aqueduct.v1` envelope. Raw frame proxying is intentionally not supported.
+
+Client command:
+
+```json
+{"type":"command","message_id":"command-42","payload":{"action":"start"}}
+```
+
+The `message_id` must be stable across client retries. Aquifer appends the command to Valkey before forwarding it and confirms that durable write with:
+
+```json
+{"type":"command_recorded","message_id":"command-42","stream_id":"1798053731000-0"}
+```
+
+Backend acknowledgement and events:
+
+```json
+{"type":"ack","message_id":"ack-42","caused_by":"command-42"}
+{"type":"event","message_id":"event-43","caused_by":"command-42","payload":{"state":"running"}}
+{"type":"event","message_id":"event-44","caused_by":"command-42","payload":{"state":"complete"}}
+```
+
+`caused_by` supports one command producing zero, one, or many events; it is not a one-request/one-response contract. Aquifer appends every backend `ack` and `event` before delivery, then adds its Valkey `stream_id` and upstream `generation` to the client-facing envelope.
+
+Aquifer also sends non-durable control messages:
+
+```json
+{"type":"status","state":"replaying"}
+{"type":"status","state":"replay_complete"}
+{"type":"status","state":"waiting","position":2}
+{"type":"status","state":"connecting"}
+{"type":"status","state":"connected","generation":7}
+{"type":"status","state":"reconnecting","retry_after_ms":914,"reason":"..."}
+```
+
+On upstream loss, Aquifer keeps the client connection open and reconnects with jittered exponential backoff. Commands are durably recorded, but v1 does **not** automatically replay a command after an ambiguous upstream failure: Aquifer cannot know whether the backend acted before the connection disappeared. Clients may resend a command with the same `message_id`; backend actions must therefore be idempotent by `message_id`. Delivery of backend events is at least once when a client reconnects from its last acknowledged stream cursor.
+
+Two clients may temporarily attach to the same `session_id` during an application-managed handoff; both follow the same durable backend event stream, and the client decides when to close the old socket. Process termination currently closes active sessions, so clients must reconnect through the gateway; [graceful SIGTERM quiescing and handoff](https://github.com/rjpruitt16/aquifer/issues/15) is intentionally a follow-up rather than an implicit redirect inside Aquifer.
+
+### Capacity
+
+Connection ceilings are local to one Aquifer process. `AQUIFER_WS_MAX_CLIENT_CONNECTIONS=1000` means that instance accepts at most 1,000 clients; it is not a fleet-wide semaphore. Ten identical instances can therefore admit up to 10,000 clients when the gateway distributes them.
+
+The upstream can lower this instance's upstream-connection ceiling or opening rate during a successful handshake:
+
+```http
+X-Aqueduct-WS-Max-Connections: 250
+X-Aqueduct-WS-Connect-Rps: 20
+```
+
+It can update either value on an established socket with `{"type":"aqueduct.capacity","max_connections":250,"connect_rps":20}`. Dynamic signals can only lower operator-configured ceilings, never raise them. `Retry-After` on a rejected upstream handshake becomes the minimum reconnect delay.
+
+| Env var | Default | Description |
+|---|---:|---|
+| `AQUIFER_WS_ENABLED` | `false` | Enables `GET /websocket` |
+| `AQUIFER_VALKEY_URL` | _(required)_ | Shared `redis://`, `rediss://`, `valkey://`, or `valkeys://` stream store |
+| `AQUIFER_WS_STREAM_PREFIX` | `aqueduct:ws:` | Stream key prefix; session IDs are SHA-256 hashed |
+| `AQUIFER_WS_STREAM_MAX_EVENTS` | `10000` | Approximate retained entries per session |
+| `AQUIFER_WS_READ_BATCH` | `100` | Maximum events fetched per stream read |
+| `AQUIFER_WS_READ_BLOCK_MS` | `1000` | Live stream blocking-read interval |
+| `AQUIFER_WS_MAX_MESSAGE_BYTES` | `1048576` | Maximum client or backend message size |
+| `AQUIFER_WS_HANDSHAKE_TIMEOUT_SECONDS` | `10` | Valkey check and upstream handshake timeout |
+| `AQUIFER_WS_RECONNECT_MAX_SECONDS` | `30` | Maximum reconnect backoff before jitter |
+| `AQUIFER_WS_MAX_CLIENT_CONNECTIONS` | `1000` | Client socket ceiling for this Aquifer instance |
+| `AQUIFER_WS_MAX_UPSTREAM_CONNECTIONS` | `1000` | Active backend socket ceiling for this instance |
+| `AQUIFER_WS_MAX_WAITING_CONNECTIONS` | `1000` | Local queue ceiling for sessions waiting on an upstream slot |
+| `AQUIFER_WS_CONNECT_RPS` | `20` | Maximum upstream connection openings per second on this instance |
+
+Handshake errors are returned before upgrade: **400** for invalid protocol/session/upstream input, **409** for a replay gap, **429** for a local connection or waiting ceiling, and **503** when Valkey is unavailable. `GET /health` exposes this instance's client, waiting, active-upstream, configured, and effective limits under `websocket`.
+
+Measure a deployment with a controlled upstream before raising the defaults:
+
+```bash
+go run ./cmd/aquifer-websocket-bench \
+  -target ws://localhost:8080/websocket \
+  -upstream ws://localhost:6060/socket \
+  -connections 1000 -ramp 10s -hold 30s
+```
+
+This measures one Aquifer instance. Run it against each machine size and include the gateway, Valkey latency, file-descriptor limits, and the real backend in capacity planning.
+
+## Cross-region redirect (Fly.io)
 
 If `AQUIFER_FLY_REGIONS` is set, an `upstream_unreachable` fallback, or an `upstream_overloaded`/`domain_degraded` fallback specifically classified as reroute-eligible (see `X-Aqueduct-Reroute-Codes` above — `503` by default, not every overload), tries other regions Aquifer is deployed to — live, over Fly's private network — before falling back to this instance's own local queue. Off by default; unset, `/proxy` behaves exactly as described above with zero change.
 
