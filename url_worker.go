@@ -25,10 +25,11 @@ type URLWorker struct {
 	metrics          MetricsAdapter
 	enqueueWebhook   webhookEnqueuer
 	resultRecorder   JobResultRecorder
-	onIdle           func(string)
+	onIdle           func(string, *URLWorker)
 	breakerUntil     time.Time // zero value means the breaker is closed
 	breakerKind      string    // "queue" or "reroute" — which kind of signal tripped it, see classifyOverload
 	closeOnce        sync.Once
+	stopOnce         sync.Once
 	stop             chan struct{}
 	done             chan struct{}
 }
@@ -88,7 +89,7 @@ func (w *URLWorker) QueueActive() bool {
 	return false
 }
 
-func NewURLWorker(domain string, rps float64, maxConc int, pool *Pool, store JobStore, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, enqueueWebhook webhookEnqueuer, resultRecorder JobResultRecorder, onIdle func(string)) *URLWorker {
+func NewURLWorker(domain string, rps float64, maxConc int, pool *Pool, store JobStore, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, enqueueWebhook webhookEnqueuer, resultRecorder JobResultRecorder, onIdle func(string, *URLWorker)) *URLWorker {
 	w := &URLWorker{
 		domain:         domain,
 		rps:            rps,
@@ -111,7 +112,7 @@ func NewURLWorker(domain string, rps float64, maxConc int, pool *Pool, store Job
 
 func (w *URLWorker) Stop() {
 	w.closeOnce.Do(func() {
-		close(w.stop)
+		w.signalStop()
 
 		w.mu.Lock()
 		queues := make([]*AccountQueue, 0, len(w.queues))
@@ -124,6 +125,12 @@ func (w *URLWorker) Stop() {
 			q.Stop()
 		}
 		<-w.done
+	})
+}
+
+func (w *URLWorker) signalStop() {
+	w.stopOnce.Do(func() {
+		close(w.stop)
 	})
 }
 
@@ -210,13 +217,13 @@ func (w *URLWorker) budgetCeiling() float64 {
 	return w.rps
 }
 
-func (w *URLWorker) Enqueue(job *Job) {
+func (w *URLWorker) Enqueue(job *Job) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
 	select {
 	case <-w.stop:
-		return
+		return false
 	default:
 	}
 
@@ -231,13 +238,16 @@ func (w *URLWorker) Enqueue(job *Job) {
 			w.mu.Lock()
 			delete(w.queues, k)
 			empty := len(w.queues) == 0
+			if empty {
+				w.signalStop()
+			}
 			w.mu.Unlock()
 			// Propagate upward so Registry can observe an instance-wide
 			// idle state -- w.onIdle was previously wired but never
 			// called, leaking this worker in Registry.workers forever
 			// once its last queue went idle.
 			if empty && w.onIdle != nil {
-				w.onIdle(w.domain)
+				w.onIdle(w.domain, w)
 			}
 		}, w.slowStart, func(v bool) {
 			w.mu.Lock()
@@ -248,6 +258,7 @@ func (w *URLWorker) Enqueue(job *Job) {
 	}
 
 	q.Enqueue(job)
+	return true
 }
 
 func (w *URLWorker) handleAccountQueueHeader(val string) {

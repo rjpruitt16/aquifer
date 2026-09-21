@@ -24,7 +24,7 @@ func TestAggregateBudgetThrottlesSiblingQueues(t *testing.T) {
 	})
 
 	const ceiling = 10.0
-	w := NewURLWorker("https://example.com", ceiling, 5, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, map[string]any) {}, nil, func(string) {})
+	w := NewURLWorker("https://example.com", ceiling, 5, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, map[string]any) {}, nil, func(string, *URLWorker) {})
 	t.Cleanup(w.Stop)
 
 	// Three tenant queues, each spawned with the worker's full ceiling —
@@ -77,7 +77,7 @@ func TestAggregateBudgetLeavesSingleQueueAlone(t *testing.T) {
 	})
 
 	const ceiling = 10.0
-	w := NewURLWorker("https://example.com", ceiling, 5, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, map[string]any) {}, nil, func(string) {})
+	w := NewURLWorker("https://example.com", ceiling, 5, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, map[string]any) {}, nil, func(string, *URLWorker) {})
 	t.Cleanup(w.Stop)
 	q1 := NewAccountQueue("tenant-1", w.domain, ceiling, 5, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, map[string]any) {}, nil, func(string) {}, false, func(bool) {})
 

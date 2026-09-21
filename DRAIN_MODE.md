@@ -46,7 +46,7 @@ guarantee that never happens, enforce it on your own end before routing traffic 
 | `AQUIFER_DRAIN_SINK` | `webhook` | `webhook` posts batch payloads to `AQUIFER_DRAIN_WEBHOOK_URL`; `valkey` writes idempotency entries directly to Valkey. |
 | `AQUIFER_DRAIN_WEBHOOK_URL` | *(none)* | Required when `AQUIFER_DRAIN_SINK=webhook` — if unset, drain mode logs a warning and stays off rather than flushing with nowhere to send it. |
 | `AQUIFER_DRAIN_BATCH_ENABLED` | `false` | When true, Aquifer periodically sends pending drain events before the final idle flush. |
-| `AQUIFER_DRAIN_BATCH_INTERVAL_SECONDS` | `60` | Periodic batch interval. |
+| `AQUIFER_DRAIN_BATCH_INTERVAL_SECONDS` | `60` | Periodic batch interval. Each wait gets a small jitter so a fleet does not synchronize batch sends against the same URL. |
 | `AQUIFER_DRAIN_BATCH_MAX_EVENTS` | `1000` | Maximum events sent in one webhook payload. |
 | `AQUIFER_VALKEY_URL` | *(none)* | Required when `AQUIFER_DRAIN_SINK=valkey`, and also used by remote idempotency lookup. Supports `redis://` and `valkey://` URLs. |
 | `AQUIFER_REMOTE_IDEMPOTENCY_PREFIX` | `aqueduct:idempotency:` | Key prefix for Valkey idempotency entries. |

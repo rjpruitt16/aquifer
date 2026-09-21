@@ -218,10 +218,64 @@ func TestSlowStartHeaderAppliesToNextNewQueueOnly(t *testing.T) {
 	}
 }
 
+func TestIdleAccountQueueRemovesWorkerAndStopsBudgetLoop(t *testing.T) {
+	t.Setenv("AQUIFER_IDLE_TIMEOUT_SECONDS", "1")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	r := testRegistry(t)
+	job := jobFor("tenant-idle", "key-idle")
+	job.URL = srv.URL
+	job.WebhookURL = ""
+	r.store.CheckOrInsert(job)
+
+	r.Enqueue(job, "enabled")
+
+	key := domainKey(job.URL)
+	var worker *URLWorker
+	if !waitUntil(2*time.Second, func() bool {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		worker = r.workers[key]
+		return worker != nil
+	}) {
+		t.Fatalf("expected worker for %q to be created", key)
+	}
+
+	if !waitUntil(4*time.Second, func() bool {
+		r.mu.Lock()
+		_, ok := r.workers[key]
+		r.mu.Unlock()
+		return !ok
+	}) {
+		t.Fatalf("expected idle worker for %q to be removed from registry", key)
+	}
+
+	select {
+	case <-worker.done:
+	case <-time.After(time.Second):
+		t.Fatalf("expected idle worker's aggregate-budget goroutine to stop")
+	}
+}
+
 func queueKeys(m map[string]*AccountQueue) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
 		keys = append(keys, k)
 	}
 	return keys
+}
+
+func waitUntil(timeout time.Duration, condition func() bool) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return condition()
 }

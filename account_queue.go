@@ -6,7 +6,6 @@ import (
 	"io"
 	"log"
 	"math"
-	"math/rand"
 	"net/http"
 	"strings"
 	"sync"
@@ -257,11 +256,10 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 			}
 
 			interval := time.Duration(float64(time.Second) / rps)
-			jitter := time.Duration(rand.Int63n(int64(interval/10) + 1))
 			elapsed := time.Since(lastRequestAt)
 
 			if elapsed < interval {
-				time.Sleep(interval - elapsed + jitter)
+				time.Sleep(withJitter(interval - elapsed))
 			}
 
 			job := queue[0]
@@ -375,7 +373,7 @@ func execute(ctx context.Context, job *Job, dispatchURL, upstream string, store 
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
-			backoff := time.Duration(math.Pow(2, float64(attempt-1))) * time.Second
+			backoff := withJitter(time.Duration(math.Pow(2, float64(attempt-1))) * time.Second)
 			log.Printf("[AccountQueue] retry %d/%d for %s in %s", attempt, maxRetries, currentURL, backoff)
 			if !sleepBeforeRetryContext(ctx, backoff) {
 				store.UpdateStatus(job.ID, StatusQueued)

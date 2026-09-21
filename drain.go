@@ -155,14 +155,19 @@ func (r *Registry) drainBatchLoop() {
 	if interval <= 0 {
 		interval = defaultDrainBatchInterval * time.Second
 	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
 
 	for {
+		timer := time.NewTimer(withJitter(interval))
 		select {
-		case <-ticker.C:
+		case <-timer.C:
 			r.flushDrainEventBatch("ledger_batch")
 		case <-r.stop:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
 			return
 		}
 	}

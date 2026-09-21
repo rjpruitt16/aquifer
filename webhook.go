@@ -45,7 +45,7 @@ func deliverWithRetry(rawURL string, payload map[string]any, attempt int, l8 *L8
 	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
 	if err != nil {
 		if attempt < webhookMaxRetries {
-			backoff := time.Duration(math.Pow(2, float64(attempt))) * time.Second
+			backoff := withJitter(time.Duration(math.Pow(2, float64(attempt))) * time.Second)
 			log.Printf("[Webhook] error delivering to %s, retry %d/%d in %s: %v", rawURL, attempt+1, webhookMaxRetries, backoff, err)
 			time.Sleep(backoff)
 			return deliverWithRetry(rawURL, payload, attempt+1, l8, metrics)
@@ -58,7 +58,7 @@ func deliverWithRetry(rawURL string, payload map[string]any, attempt int, l8 *L8
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		if attempt < webhookMaxRetries {
-			backoff := time.Duration(math.Pow(2, float64(attempt))) * time.Second
+			backoff := withJitter(time.Duration(math.Pow(2, float64(attempt))) * time.Second)
 			log.Printf("[Webhook] %d from %s, retry %d/%d in %s", resp.StatusCode, rawURL, attempt+1, webhookMaxRetries, backoff)
 			time.Sleep(backoff)
 			return deliverWithRetry(rawURL, payload, attempt+1, l8, metrics)

@@ -209,16 +209,26 @@ func (r *Registry) Enqueue(job *Job, accountQueueHeader string) {
 	r.totalJobs.Add(1)
 	r.queueDepth.Add(1)
 
-	key, w := r.resolveWorkerLocked(job)
+	for {
+		key, w := r.resolveWorkerLocked(job)
 
-	r.metrics.JobQueued(job.UserID, key)
+		if accountQueueHeader != "" {
+			w.handleAccountQueueHeader(accountQueueHeader)
+		}
 
-	if accountQueueHeader != "" {
-		w.handleAccountQueueHeader(accountQueueHeader)
+		if w.Enqueue(job) {
+			r.metrics.JobQueued(job.UserID, key)
+			r.metrics.QueueDepth(key, int(r.queueDepth.Load()))
+			return
+		}
+
+		// The worker can self-stop after its last AccountQueue idles out.
+		// If Enqueue races that transition, drop the stale registry entry
+		// and resolve a fresh worker instead of silently losing the job.
+		if current := r.workers[key]; current == w {
+			delete(r.workers, key)
+		}
 	}
-
-	w.Enqueue(job)
-	r.metrics.QueueDepth(key, int(r.queueDepth.Load()))
 }
 
 // workerFor resolves (creating if necessary) the URLWorker that would
@@ -254,9 +264,11 @@ func (r *Registry) resolveWorkerLocked(job *Job) (string, *URLWorker) {
 
 	w, ok := r.workers[key]
 	if !ok {
-		w = NewURLWorker(key, rc.RPS, rc.MaxConcurrent, pool, r.store, r.broker, r.l8, r.metrics, r.EnqueueWebhook, r.resultRecorder, func(k string) {
+		w = NewURLWorker(key, rc.RPS, rc.MaxConcurrent, pool, r.store, r.broker, r.l8, r.metrics, r.EnqueueWebhook, r.resultRecorder, func(k string, idleWorker *URLWorker) {
 			r.mu.Lock()
-			delete(r.workers, k)
+			if current := r.workers[k]; current == idleWorker {
+				delete(r.workers, k)
+			}
 			r.mu.Unlock()
 		})
 		r.workers[key] = w
