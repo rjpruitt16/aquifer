@@ -47,6 +47,16 @@ jobs:
             --hurl-dir=./aqueduct-runner/hurl
             --recorder-dir=./aqueduct-runner/recorder
 
+      - name: Contract test -- WebSocket durability, replay, reconnect, and local limits
+        uses: dagger/dagger-for-github@v8.4.1
+        with:
+          version: "0.21.8"
+          module: ./aqueduct-runner
+          call: >-
+            test-aquifer-websocket
+            --source=./aquifer
+            --websocket-dir=./aqueduct-runner/websocket
+
   # Separate job so a slow drain-mode regression doesn't hold up the fast
   # checks above -- both start immediately, no `needs:` dependency.
   contract-test-drain:
