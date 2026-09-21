@@ -159,6 +159,23 @@ func (a *WebSocketAdmission) Wait(ctx context.Context) (func(), error) {
 	}
 }
 
+func (a *WebSocketAdmission) Cancel() {
+	if a == nil || a.scheduler == nil || a.waiter == nil {
+		return
+	}
+	s := a.scheduler
+	s.mu.Lock()
+	if a.waiter.granted {
+		s.activeUpstreams--
+		a.waiter.granted = false
+	} else if !a.waiter.canceled {
+		a.waiter.canceled = true
+		s.removeWaiterLocked(a.waiter)
+	}
+	s.mu.Unlock()
+	s.notify()
+}
+
 func (s *WebSocketScheduler) UpdateCapacity(maxConnections *int, connectRPS *float64) {
 	s.mu.Lock()
 	if maxConnections != nil && *maxConnections > 0 {
@@ -216,11 +233,17 @@ func (s *WebSocketScheduler) run() {
 		case <-timer.C:
 		case <-s.wake:
 			if !timer.Stop() {
-				<-timer.C
+				select {
+				case <-timer.C:
+				default:
+				}
 			}
 		case <-s.stop:
 			if !timer.Stop() {
-				<-timer.C
+				select {
+				case <-timer.C:
+				default:
+				}
 			}
 			s.failWaiters()
 			return

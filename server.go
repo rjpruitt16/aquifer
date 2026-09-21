@@ -54,6 +54,7 @@ func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /jobs", s.createJob)
 	mux.HandleFunc("POST /proxy", s.proxyJob)
+	mux.HandleFunc("GET /websocket", s.webSocket)
 	mux.HandleFunc("GET /results", s.getJobResult)
 	mux.HandleFunc("GET /jobs/{id}/stream", s.streamJob)
 	mux.HandleFunc("GET /jobs/{id}", s.getJob)
@@ -63,6 +64,14 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /l8/challenge", s.l8Challenge)
 	mux.HandleFunc("GET /l8-spec", s.l8Spec)
 	return mux
+}
+
+func (s *Server) webSocket(w http.ResponseWriter, r *http.Request) {
+	if s.aquifer == nil || s.aquifer.webSockets == nil {
+		jsonError(w, "websocket proxy is disabled", http.StatusNotFound)
+		return
+	}
+	s.aquifer.webSockets.ServeHTTP(w, r)
 }
 
 // registerPoolMember handles both initial registration and heartbeat

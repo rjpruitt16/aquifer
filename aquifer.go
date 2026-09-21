@@ -42,6 +42,7 @@ type Aquifer struct {
 	// injectable-for-testability pattern as FlyRegionAdapter.healthCheckURL.
 	redirectTargetURL func(region string) string
 	clusterRouter     *ClusterRouter
+	webSockets        *WebSocketManager
 }
 
 func NewAquifer(store JobStore, registry *Registry, broker *Broker, l8 *L8Registry, admission *AdmissionController, pools *PoolRegistry) *Aquifer {
@@ -58,6 +59,9 @@ func (a *Aquifer) Close() {
 	}
 	if closer, ok := a.regionAdapter.(interface{ Close() }); ok {
 		closer.Close()
+	}
+	if a.webSockets != nil {
+		a.webSockets.Close()
 	}
 	if a.registry != nil {
 		a.registry.Close()
@@ -89,6 +93,10 @@ func (a *Aquifer) SetClusterRouter(router *ClusterRouter) {
 
 func (a *Aquifer) SetRemoteIdempotency(remote RemoteIdempotency) {
 	a.remote = remote
+}
+
+func (a *Aquifer) SetWebSocketManager(manager *WebSocketManager) {
+	a.webSockets = manager
 }
 
 func (a *Aquifer) regionAdapterOrDefault() RegionAdapter {
@@ -261,6 +269,9 @@ func (a *Aquifer) Health() map[string]any {
 	}
 	if cluster := a.clusterRouter.Snapshot(); cluster != nil {
 		h["cluster"] = cluster
+	}
+	if sockets := a.webSockets.Snapshot(); sockets != nil {
+		h["websocket"] = sockets
 	}
 	return h
 }

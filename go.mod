@@ -6,6 +6,7 @@ require (
 	github.com/a2aproject/a2a-go/v2 v2.5.0
 	github.com/cockroachdb/pebble v1.1.5
 	github.com/google/uuid v1.6.0
+	github.com/gorilla/websocket v1.5.3
 	github.com/redis/go-redis/v9 v9.22.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.50.0
