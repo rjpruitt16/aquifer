@@ -141,7 +141,7 @@ Aquifer also sends non-durable control messages:
 
 On upstream loss, Aquifer keeps the client connection open and reconnects with jittered exponential backoff. Commands are durably recorded, but v1 does **not** automatically replay a command after an ambiguous upstream failure: Aquifer cannot know whether the backend acted before the connection disappeared. Clients may resend a command with the same `message_id`; backend actions must therefore be idempotent by `message_id`. Delivery of backend events is at least once when a client reconnects from its last acknowledged stream cursor.
 
-Two clients may temporarily attach to the same `session_id` during an application-managed handoff; both follow the same durable backend event stream, and the client decides when to close the old socket. Process termination currently closes active sessions, so clients must reconnect through the gateway; graceful SIGTERM quiescing and handoff is intentionally a follow-up rather than an implicit redirect inside Aquifer.
+Two clients may temporarily attach to the same `session_id` during an application-managed handoff; both follow the same durable backend event stream, and the client decides when to close the old socket. Process termination currently closes active sessions, so clients must reconnect through the gateway; [graceful SIGTERM quiescing and handoff](https://github.com/rjpruitt16/aquifer/issues/15) is intentionally a follow-up rather than an implicit redirect inside Aquifer.
 
 ### Capacity
 
