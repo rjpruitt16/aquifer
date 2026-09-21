@@ -40,6 +40,12 @@ your users  →  POST /proxy to Aquifer  →  your resources (paced, routed, at 
 ```
 Point Aquifer at your resources like a normal reverse proxy, close to the caller. It tries the request directly first — a healthy resource sees no queue at all — and only falls back to durable queuing when something's actually overloaded, on the same connection, staying in queue mode until that domain's backlog is genuinely drained (not just until a cooldown timer expires) — see [`POST /proxy`](API.md#post-proxy) for the details, including the header an upstream can use to request queuing proactively.
 
+**WebSocket proxy — durable replay and paced reconnects**
+```
+clients  →  trusted gateway  →  GET /websocket on Aquifer  →  WebSocket backend
+```
+Aquifer can persist an ordered WebSocket transcript in Valkey, replay missed backend events after a client reconnects, and pace new or replacement upstream connections. Authentication remains the gateway's job. See [`GET /websocket`](API.md#get-websocket) for the protocol and limits.
+
 **Sleep through partial outages.** On Fly.io, set `AQUIFER_FLY_REGIONS` and that same overload signal drives real cross-region redirect: other regions Aquifer is deployed to get tried live, over Fly's private network, before this instance ever falls back to its own local queue — nearest-first by measured latency, deterministic enough that two callers racing the same job converge on the same region instead of each chasing their own nearest option. One region degrading routes around itself instead of paging you at 3am. If every known region is down too, that's a real fleet-wide problem — Aquifer says so with a `429` and a long `Retry-After` rather than quietly queueing it somewhere and hoping. See [`POST /proxy`](API.md#post-proxy)'s "Cross-region redirect" section for the full mechanics, including the one honestly-documented tradeoff it doesn't try to hide.
 
 **Why not just Envoy or nginx rate limiting?** A static rate limit dispatches as fast as the number allows, with no memory and no way to adapt if the backend is struggling worse than that number assumed — and nothing durable, so a rejected or in-flight request is just gone. Aquifer persists every job before dispatching it, adapts its pace live from what the backend actually says, and can retry against a sibling region if the whole region degrades.
