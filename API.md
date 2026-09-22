@@ -83,9 +83,9 @@ curl -N -X POST http://localhost:8080/proxy -d '{ ... same shape as POST /jobs .
 
 ## GET /websocket
 
-Opt-in WebSocket proxying with an ordered Valkey transcript, cursor replay, paced upstream connection admission, and automatic upstream reconnect. Aquifer does **not** authenticate callers or choose their destination. Put it behind a trusted gateway that authenticates the request and injects the upstream URL.
+WebSocket proxying with an ordered Valkey transcript, cursor replay, paced upstream connection admission, and automatic upstream reconnect. Aquifer does **not** authenticate callers or choose their destination. Put it behind a trusted gateway that authenticates the request and injects the upstream URL.
 
-Enable the endpoint with `AQUIFER_WS_ENABLED=true` and configure `AQUIFER_VALKEY_URL`. WebSocket sessions fail closed when Valkey is unavailable because Aquifer cannot uphold record-before-forward and record-before-deliver without the stream.
+The endpoint enables automatically when `AQUIFER_VALKEY_URL` is configured; there is no separate feature flag to turn on. `AQUIFER_WS_ENABLED=false` remains an operational kill switch. Without a configured Valkey URL, the WebSocket subsystem stays inactive so ordinary HTTP/MCP installations do not acquire an external dependency. Active WebSocket sessions fail closed when Valkey is unavailable because Aquifer cannot uphold record-before-forward and record-before-deliver without the stream.
 
 ### Handshake
 
@@ -158,7 +158,7 @@ It can update either value on an established socket with `{"type":"aqueduct.capa
 
 | Env var | Default | Description |
 |---|---:|---|
-| `AQUIFER_WS_ENABLED` | `false` | Enables `GET /websocket` |
+| `AQUIFER_WS_ENABLED` | automatic | WebSockets are on when `AQUIFER_VALKEY_URL` is set; `false` explicitly disables them |
 | `AQUIFER_VALKEY_URL` | _(required)_ | Shared `redis://`, `rediss://`, `valkey://`, or `valkeys://` stream store |
 | `AQUIFER_WS_STREAM_PREFIX` | `aqueduct:ws:` | Stream key prefix; session IDs are SHA-256 hashed |
 | `AQUIFER_WS_STREAM_MAX_EVENTS` | `10000` | Approximate retained entries per session |
