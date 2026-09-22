@@ -6,6 +6,10 @@
 
 Distributed agents call tools and APIs in bursts. Your backend gets overwhelmed on inbound. Your app gets 429s on outbound. One slow dependency takes everything else down with it, and the retries agents fire off while they wait only make it worse — [wasted utilization and higher cost](https://rahmipruitt.me/content/gpu-retry-tax/) on one end, [outages reactive autoscaling alone can't prevent](https://rahmipruitt.me/content/github-outage-reactive-scaling/) on the other.
 
+The usual answer to that is more hardware — double the fleet, triple the GPU budget, eat the bill. It works, but it's expensive, it leaves capacity idle most of the time, and it doesn't actually fix the burst, just buys enough headroom to survive the next one:
+
+![How teams handle traffic spikes: overprovisioning the fleet versus queueing the burst and pacing the flow while capacity catches up](docs/images/how-teams-handle-traffic-spikes.png)
+
 Aquifer gives those agents a coordination layer: a self-hosted load balancer that absorbs the burst, queues requests durably (SQLite by default, or Pebble — see below), and releases them at a rate you configure — or a slower one, if the destination service asks for it.
 
 What's usually behind that backend can't scale instantly either — a GPU, a database, a CI runner. Aquifer buys time for more of it to come online; it's overkill if that ceiling is fixed for good.
