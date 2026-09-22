@@ -33,7 +33,7 @@ type WebSocketConfig struct {
 
 func LoadWebSocketConfig() WebSocketConfig {
 	return WebSocketConfig{
-		Enabled:          envBool("AQUIFER_WS_ENABLED", false),
+		Enabled:          webSocketEnabled(),
 		RedisURL:         os.Getenv("AQUIFER_VALKEY_URL"),
 		StreamPrefix:     defaultString(os.Getenv("AQUIFER_WS_STREAM_PREFIX"), defaultWebSocketStreamPrefix),
 		StreamMaxEvents:  positiveEnvInt64("AQUIFER_WS_STREAM_MAX_EVENTS", defaultWebSocketStreamMaxEvents),
@@ -49,6 +49,13 @@ func LoadWebSocketConfig() WebSocketConfig {
 			ConnectRPS:   positiveEnvFloat64("AQUIFER_WS_CONNECT_RPS", defaultWebSocketConnectRPS),
 		},
 	}
+}
+
+func webSocketEnabled() bool {
+	if raw := os.Getenv("AQUIFER_WS_ENABLED"); raw != "" {
+		return envBool("AQUIFER_WS_ENABLED", true)
+	}
+	return os.Getenv("AQUIFER_VALKEY_URL") != ""
 }
 
 func positiveEnvInt64(key string, fallback int64) int64 {
