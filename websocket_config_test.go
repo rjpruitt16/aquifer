@@ -1,6 +1,9 @@
 package aquifer
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestWebSocketConfigAutomaticallyEnablesWithValkey(t *testing.T) {
 	t.Setenv("AQUIFER_WS_ENABLED", "")
@@ -8,6 +11,19 @@ func TestWebSocketConfigAutomaticallyEnablesWithValkey(t *testing.T) {
 
 	if cfg := LoadWebSocketConfig(); !cfg.Enabled {
 		t.Fatal("expected WebSockets to enable automatically when Valkey is configured")
+	}
+}
+
+func TestWebSocketConfigLoadsSlowStartAndStreamTTL(t *testing.T) {
+	t.Setenv("AQUIFER_WS_SLOW_START_RPS", "2.5")
+	t.Setenv("AQUIFER_WS_STREAM_TTL_SECONDS", "60")
+
+	cfg := LoadWebSocketConfig()
+	if cfg.Scheduler.SlowStartRPS != 2.5 {
+		t.Fatalf("expected slow-start rate 2.5, got %v", cfg.Scheduler.SlowStartRPS)
+	}
+	if cfg.StreamTTL != time.Minute {
+		t.Fatalf("expected one-minute stream TTL, got %v", cfg.StreamTTL)
 	}
 }
 

@@ -18,6 +18,7 @@ type WebSocketSchedulerConfig struct {
 	MaxUpstreams int
 	MaxWaiting   int
 	ConnectRPS   float64
+	SlowStartRPS float64
 }
 
 type WebSocketSchedulerSnapshot struct {
@@ -28,14 +29,18 @@ type WebSocketSchedulerSnapshot struct {
 	MaxUpstreams        int     `json:"max_upstreams"`
 	EffectiveMax        int     `json:"effective_max_upstreams"`
 	ConnectRPS          float64 `json:"connect_rps"`
+	SlowStartRPS        float64 `json:"slow_start_rps"`
+	CurrentRampRPS      float64 `json:"current_ramp_rps"`
 	EffectiveConnectRPS float64 `json:"effective_connect_rps"`
 }
 
 type websocketWaiter struct {
-	ready    chan struct{}
-	granted  bool
-	canceled bool
-	err      error
+	ready     chan struct{}
+	positions chan int
+	position  int
+	granted   bool
+	canceled  bool
+	err       error
 }
 
 type WebSocketAdmission struct {
@@ -54,6 +59,8 @@ type WebSocketScheduler struct {
 	maxUpstreams    int
 	maxWaiting      int
 	configuredRPS   float64
+	slowStartRPS    float64
+	rampRPS         float64
 	advertisedMax   int
 	advertisedRPS   float64
 	clients         int
@@ -81,11 +88,19 @@ func NewWebSocketScheduler(cfg WebSocketSchedulerConfig) *WebSocketScheduler {
 	if cfg.ConnectRPS <= 0 {
 		cfg.ConnectRPS = 20
 	}
+	if cfg.SlowStartRPS <= 0 {
+		cfg.SlowStartRPS = 1
+	}
+	if cfg.SlowStartRPS > cfg.ConnectRPS {
+		cfg.SlowStartRPS = cfg.ConnectRPS
+	}
 	s := &WebSocketScheduler{
 		maxClients:    cfg.MaxClients,
 		maxUpstreams:  cfg.MaxUpstreams,
 		maxWaiting:    cfg.MaxWaiting,
 		configuredRPS: cfg.ConnectRPS,
+		slowStartRPS:  cfg.SlowStartRPS,
+		rampRPS:       cfg.SlowStartRPS,
 		wake:          make(chan struct{}, 1),
 		stop:          make(chan struct{}),
 		done:          make(chan struct{}),
@@ -129,36 +144,64 @@ func (s *WebSocketScheduler) EnqueueUpstream() (*WebSocketAdmission, error) {
 	if len(s.waiters) >= s.maxWaiting {
 		return nil, ErrWebSocketWaitingLimit
 	}
-	waiter := &websocketWaiter{ready: make(chan struct{})}
+	position := len(s.waiters) + 1
+	waiter := &websocketWaiter{
+		ready:     make(chan struct{}),
+		positions: make(chan int, 1),
+		position:  position,
+	}
 	s.waiters = append(s.waiters, waiter)
-	admission := &WebSocketAdmission{scheduler: s, waiter: waiter, Position: len(s.waiters)}
+	admission := &WebSocketAdmission{scheduler: s, waiter: waiter, Position: position}
 	s.notify()
 	return admission, nil
 }
 
-func (a *WebSocketAdmission) Wait(ctx context.Context) (func(), error) {
+func (a *WebSocketAdmission) Wait(ctx context.Context, onPosition func(int) error) (func(), error) {
 	if a == nil || a.scheduler == nil || a.waiter == nil {
 		return nil, ErrWebSocketSchedulerClosed
 	}
-	select {
-	case <-a.waiter.ready:
-		if a.waiter.err != nil {
-			return nil, a.waiter.err
+	lastPosition := a.Position
+	if onPosition != nil {
+		if err := onPosition(lastPosition); err != nil {
+			a.Cancel()
+			return nil, err
 		}
-		return a.scheduler.releaseFunc(), nil
-	case <-ctx.Done():
-		s := a.scheduler
-		s.mu.Lock()
-		if a.waiter.granted {
-			s.activeUpstreams--
+	}
+	for {
+		select {
+		case <-a.waiter.ready:
+			if a.waiter.err != nil {
+				return nil, a.waiter.err
+			}
+			return a.scheduler.releaseFunc(), nil
+		case position := <-a.waiter.positions:
+			if position == lastPosition {
+				continue
+			}
+			lastPosition = position
+			if onPosition != nil {
+				if err := onPosition(position); err != nil {
+					a.Cancel()
+					return nil, err
+				}
+			}
+		case <-ctx.Done():
+			s := a.scheduler
+			s.mu.Lock()
+			if a.waiter.granted {
+				s.activeUpstreams--
+				a.waiter.granted = false
+				s.mu.Unlock()
+				s.notify()
+				return nil, ctx.Err()
+			}
+			a.waiter.canceled = true
+			s.removeWaiterLocked(a.waiter)
+			s.publishPositionsLocked()
 			s.mu.Unlock()
 			s.notify()
 			return nil, ctx.Err()
 		}
-		a.waiter.canceled = true
-		s.removeWaiterLocked(a.waiter)
-		s.mu.Unlock()
-		return nil, ctx.Err()
 	}
 }
 
@@ -174,6 +217,31 @@ func (a *WebSocketAdmission) Cancel() {
 	} else if !a.waiter.canceled {
 		a.waiter.canceled = true
 		s.removeWaiterLocked(a.waiter)
+		s.publishPositionsLocked()
+	}
+	s.mu.Unlock()
+	s.notify()
+}
+
+func (s *WebSocketScheduler) ReportSuccess() {
+	s.mu.Lock()
+	s.rampRPS *= 2
+	if s.rampRPS > s.configuredRPS {
+		s.rampRPS = s.configuredRPS
+	}
+	s.mu.Unlock()
+	s.notify()
+}
+
+func (s *WebSocketScheduler) ReportFailure() {
+	s.mu.Lock()
+	s.rampRPS = s.slowStartRPS
+	if len(s.waiters) > 0 {
+		interval := time.Duration(float64(time.Second) / s.effectiveRPSLocked())
+		earliest := time.Now().Add(s.jitter(interval))
+		if s.nextGrant.Before(earliest) {
+			s.nextGrant = earliest
+		}
 	}
 	s.mu.Unlock()
 	s.notify()
@@ -202,6 +270,8 @@ func (s *WebSocketScheduler) Snapshot() WebSocketSchedulerSnapshot {
 		MaxUpstreams:        s.maxUpstreams,
 		EffectiveMax:        s.effectiveMaxLocked(),
 		ConnectRPS:          s.configuredRPS,
+		SlowStartRPS:        s.slowStartRPS,
+		CurrentRampRPS:      s.rampRPS,
 		EffectiveConnectRPS: s.effectiveRPSLocked(),
 	}
 }
@@ -262,6 +332,7 @@ func (s *WebSocketScheduler) grantReady() (time.Duration, bool) {
 
 	for len(s.waiters) > 0 && s.waiters[0].canceled {
 		s.waiters = s.waiters[1:]
+		s.publishPositionsLocked()
 	}
 	if len(s.waiters) == 0 || s.activeUpstreams >= s.effectiveMaxLocked() {
 		return 0, false
@@ -272,6 +343,7 @@ func (s *WebSocketScheduler) grantReady() (time.Duration, bool) {
 
 	waiter := s.waiters[0]
 	s.waiters = s.waiters[1:]
+	s.publishPositionsLocked()
 	waiter.granted = true
 	s.activeUpstreams++
 	interval := time.Duration(float64(time.Second) / s.effectiveRPSLocked())
@@ -288,10 +360,32 @@ func (s *WebSocketScheduler) effectiveMaxLocked() int {
 }
 
 func (s *WebSocketScheduler) effectiveRPSLocked() float64 {
-	if s.advertisedRPS > 0 && s.advertisedRPS < s.configuredRPS {
-		return s.advertisedRPS
+	effective := s.configuredRPS
+	if s.rampRPS > 0 && s.rampRPS < effective {
+		effective = s.rampRPS
 	}
-	return s.configuredRPS
+	if s.advertisedRPS > 0 && s.advertisedRPS < effective {
+		effective = s.advertisedRPS
+	}
+	return effective
+}
+
+func (s *WebSocketScheduler) publishPositionsLocked() {
+	for i, waiter := range s.waiters {
+		position := i + 1
+		if waiter.position == position {
+			continue
+		}
+		waiter.position = position
+		select {
+		case <-waiter.positions:
+		default:
+		}
+		select {
+		case waiter.positions <- position:
+		default:
+		}
+	}
 }
 
 func (s *WebSocketScheduler) releaseFunc() func() {

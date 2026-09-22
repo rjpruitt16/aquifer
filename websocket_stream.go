@@ -38,9 +38,10 @@ type RedisWebSocketStreamStore struct {
 	client    *redis.Client
 	prefix    string
 	maxEvents int64
+	ttl       time.Duration
 }
 
-func NewRedisWebSocketStreamStore(rawURL, prefix string, maxEvents int64) (*RedisWebSocketStreamStore, error) {
+func NewRedisWebSocketStreamStore(rawURL, prefix string, maxEvents int64, ttl time.Duration) (*RedisWebSocketStreamStore, error) {
 	if rawURL == "" {
 		return nil, errors.New("AQUIFER_VALKEY_URL is required when WebSockets are enabled")
 	}
@@ -58,10 +59,14 @@ func NewRedisWebSocketStreamStore(rawURL, prefix string, maxEvents int64) (*Redi
 	if maxEvents <= 0 {
 		maxEvents = defaultWebSocketStreamMaxEvents
 	}
+	if ttl <= 0 {
+		ttl = defaultWebSocketStreamTTL
+	}
 	return &RedisWebSocketStreamStore{
 		client:    redis.NewClient(opts),
 		prefix:    prefix,
 		maxEvents: maxEvents,
+		ttl:       ttl,
 	}, nil
 }
 
@@ -102,14 +107,21 @@ func (s *RedisWebSocketStreamStore) Append(ctx context.Context, sessionID, direc
 		"generation", strconv.FormatInt(message.Generation, 10),
 		"recorded_at", strconv.FormatInt(time.Now().UnixMilli(), 10),
 	}
-	id, err := s.client.XAdd(ctx, &redis.XAddArgs{
+	pipe := s.client.TxPipeline()
+	add := pipe.XAdd(ctx, &redis.XAddArgs{
 		Stream: s.streamKey(sessionID),
 		MaxLen: s.maxEvents,
 		Approx: true,
 		Values: values,
-	}).Result()
+	})
+	pipe.Expire(ctx, s.streamKey(sessionID), s.ttl)
+	_, err := pipe.Exec(ctx)
 	if err != nil {
 		return "", fmt.Errorf("append websocket event: %w", err)
+	}
+	id, err := add.Result()
+	if err != nil {
+		return "", fmt.Errorf("read appended websocket event id: %w", err)
 	}
 	return id, nil
 }
@@ -155,7 +167,7 @@ func (s *RedisWebSocketStreamStore) CheckCursor(ctx context.Context, sessionID, 
 		return fmt.Errorf("read websocket stream cursor: %w", err)
 	}
 	if len(oldest) == 0 {
-		return nil
+		return ErrWebSocketReplayGap
 	}
 	cmp, err := compareRedisStreamIDs(after, oldest[0].ID)
 	if err != nil {
