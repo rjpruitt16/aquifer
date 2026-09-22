@@ -44,6 +44,9 @@ type WebSocketAdmission struct {
 	Position  int
 }
 
+// WebSocketScheduler is the per-Aquifer connection queue. It admits client
+// sockets, holds upstream connection attempts in FIFO order, and dispatches
+// those attempts at the configured, jittered connection-open rate.
 type WebSocketScheduler struct {
 	mu sync.Mutex
 

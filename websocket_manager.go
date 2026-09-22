@@ -45,11 +45,11 @@ func (w *webSocketWriter) Close(code int, reason string) {
 }
 
 type WebSocketManager struct {
-	cfg       WebSocketConfig
-	store     WebSocketStreamStore
-	scheduler *WebSocketScheduler
-	dialer    *websocket.Dialer
-	upgrader  websocket.Upgrader
+	cfg      WebSocketConfig
+	store    WebSocketStreamStore
+	queue    *WebSocketScheduler
+	dialer   *websocket.Dialer
+	upgrader websocket.Upgrader
 
 	ctx        context.Context
 	cancel     context.CancelFunc
@@ -61,9 +61,9 @@ type WebSocketManager struct {
 func NewWebSocketManager(cfg WebSocketConfig, store WebSocketStreamStore) *WebSocketManager {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &WebSocketManager{
-		cfg:       cfg,
-		store:     store,
-		scheduler: NewWebSocketScheduler(cfg.Scheduler),
+		cfg:   cfg,
+		store: store,
+		queue: NewWebSocketScheduler(cfg.Scheduler),
 		dialer: &websocket.Dialer{
 			HandshakeTimeout: cfg.HandshakeTimeout,
 			Subprotocols:     []string{webSocketSubprotocol},
@@ -141,14 +141,14 @@ func (m *WebSocketManager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := m.scheduler.AcquireClient(); err != nil {
+	if err := m.queue.AcquireClient(); err != nil {
 		w.Header().Set("Retry-After", "1")
 		jsonError(w, err.Error(), http.StatusTooManyRequests)
 		return
 	}
-	defer m.scheduler.ReleaseClient()
+	defer m.queue.ReleaseClient()
 
-	admission, err := m.scheduler.EnqueueUpstream()
+	admission, err := m.queue.EnqueueUpstream()
 	if err != nil {
 		w.Header().Set("Retry-After", "1")
 		jsonError(w, err.Error(), http.StatusTooManyRequests)
@@ -185,7 +185,7 @@ func (m *WebSocketManager) Snapshot() map[string]any {
 	if m == nil {
 		return nil
 	}
-	snapshot := m.scheduler.Snapshot()
+	snapshot := m.queue.Snapshot()
 	return map[string]any{
 		"enabled":                  true,
 		"clients":                  snapshot.Clients,
@@ -205,7 +205,7 @@ func (m *WebSocketManager) Close() {
 	}
 	m.closeOnce.Do(func() {
 		m.cancel()
-		m.scheduler.Close()
+		m.queue.Close()
 		m.wg.Wait()
 		if m.store != nil {
 			_ = m.store.Close()
@@ -342,7 +342,7 @@ func (s *webSocketSession) connectUpstream() error {
 	for {
 		if admission == nil {
 			var err error
-			admission, err = s.manager.scheduler.EnqueueUpstream()
+			admission, err = s.manager.queue.EnqueueUpstream()
 			if err != nil {
 				return err
 			}
@@ -437,7 +437,7 @@ func (s *webSocketSession) relayUpstream(upstream *websocket.Conn, generation in
 				return
 			}
 			if message.Type == "aqueduct.capacity" {
-				s.manager.scheduler.UpdateCapacity(message.MaxConnections, message.ConnectRPS)
+				s.manager.queue.UpdateCapacity(message.MaxConnections, message.ConnectRPS)
 				continue
 			}
 			message.Generation = generation
@@ -492,7 +492,7 @@ func (m *WebSocketManager) applyCapacityHeaders(response *http.Response) time.Du
 			connectRPS = &value
 		}
 	}
-	m.scheduler.UpdateCapacity(maxConnections, connectRPS)
+	m.queue.UpdateCapacity(maxConnections, connectRPS)
 
 	if raw := response.Header.Get("Retry-After"); raw != "" {
 		if seconds, err := strconv.Atoi(raw); err == nil && seconds > 0 {

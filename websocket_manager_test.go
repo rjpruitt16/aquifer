@@ -245,7 +245,7 @@ func TestWebSocketProxyRecordsCorrelatesAndDeliversThroughStream(t *testing.T) {
 		t.Fatal("backend did not observe forwarded headers")
 	}
 
-	snapshot := manager.scheduler.Snapshot()
+	snapshot := manager.queue.Snapshot()
 	if snapshot.EffectiveMax != 3 || snapshot.EffectiveConnectRPS != 5 {
 		t.Fatalf("expected successful handshake capacity headers to lower local limits, got %+v", snapshot)
 	}
