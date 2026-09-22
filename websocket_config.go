@@ -12,10 +12,12 @@ const (
 	defaultWebSocketMaxUpstreams     = 1000
 	defaultWebSocketMaxWaiting       = 1000
 	defaultWebSocketConnectRPS       = 20.0
+	defaultWebSocketSlowStartRPS     = 1.0
 	defaultWebSocketMaxMessageBytes  = 1024 * 1024
 	defaultWebSocketReadBlockMS      = 1000
 	defaultWebSocketHandshakeTimeout = 10 * time.Second
 	defaultWebSocketReconnectMax     = 30 * time.Second
+	defaultWebSocketStreamTTL        = 24 * time.Hour
 )
 
 type WebSocketConfig struct {
@@ -23,6 +25,7 @@ type WebSocketConfig struct {
 	RedisURL         string
 	StreamPrefix     string
 	StreamMaxEvents  int64
+	StreamTTL        time.Duration
 	ReadBatch        int64
 	ReadBlock        time.Duration
 	MaxMessageBytes  int64
@@ -37,6 +40,7 @@ func LoadWebSocketConfig() WebSocketConfig {
 		RedisURL:         os.Getenv("AQUIFER_VALKEY_URL"),
 		StreamPrefix:     defaultString(os.Getenv("AQUIFER_WS_STREAM_PREFIX"), defaultWebSocketStreamPrefix),
 		StreamMaxEvents:  positiveEnvInt64("AQUIFER_WS_STREAM_MAX_EVENTS", defaultWebSocketStreamMaxEvents),
+		StreamTTL:        time.Duration(positiveEnvInt64("AQUIFER_WS_STREAM_TTL_SECONDS", int64(defaultWebSocketStreamTTL/time.Second))) * time.Second,
 		ReadBatch:        positiveEnvInt64("AQUIFER_WS_READ_BATCH", defaultWebSocketReadBatch),
 		ReadBlock:        time.Duration(positiveEnvInt64("AQUIFER_WS_READ_BLOCK_MS", defaultWebSocketReadBlockMS)) * time.Millisecond,
 		MaxMessageBytes:  positiveEnvInt64("AQUIFER_WS_MAX_MESSAGE_BYTES", defaultWebSocketMaxMessageBytes),
@@ -47,6 +51,7 @@ func LoadWebSocketConfig() WebSocketConfig {
 			MaxUpstreams: int(positiveEnvInt64("AQUIFER_WS_MAX_UPSTREAM_CONNECTIONS", defaultWebSocketMaxUpstreams)),
 			MaxWaiting:   int(positiveEnvInt64("AQUIFER_WS_MAX_WAITING_CONNECTIONS", defaultWebSocketMaxWaiting)),
 			ConnectRPS:   positiveEnvFloat64("AQUIFER_WS_CONNECT_RPS", defaultWebSocketConnectRPS),
+			SlowStartRPS: positiveEnvFloat64("AQUIFER_WS_SLOW_START_RPS", defaultWebSocketSlowStartRPS),
 		},
 	}
 }

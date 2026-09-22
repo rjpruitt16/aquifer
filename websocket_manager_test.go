@@ -114,7 +114,7 @@ func (s *memoryWebSocketStreamStore) CheckCursor(_ context.Context, sessionID, a
 		return errors.New("stream unavailable")
 	}
 	if len(s.events[sessionID]) == 0 {
-		return nil
+		return ErrWebSocketReplayGap
 	}
 	cmp, err := compareRedisStreamIDs(after, s.events[sessionID][0].StreamID)
 	if err != nil {
@@ -158,6 +158,7 @@ func testWebSocketConfig() WebSocketConfig {
 			MaxUpstreams: 10,
 			MaxWaiting:   10,
 			ConnectRPS:   1000,
+			SlowStartRPS: 1000,
 		},
 	}
 }

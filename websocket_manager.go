@@ -86,7 +86,7 @@ func NewWebSocketManagerFromConfig(cfg WebSocketConfig) (*WebSocketManager, erro
 	if !cfg.Enabled {
 		return nil, nil
 	}
-	store, err := NewRedisWebSocketStreamStore(cfg.RedisURL, cfg.StreamPrefix, cfg.StreamMaxEvents)
+	store, err := NewRedisWebSocketStreamStore(cfg.RedisURL, cfg.StreamPrefix, cfg.StreamMaxEvents, cfg.StreamTTL)
 	if err != nil {
 		return nil, err
 	}
@@ -347,11 +347,9 @@ func (s *webSocketSession) connectUpstream() error {
 				return err
 			}
 		}
-		if err := s.client.WriteJSON(WebSocketEnvelope{Type: "status", State: "waiting", Position: admission.Position}); err != nil {
-			admission.Cancel()
-			return err
-		}
-		release, err := admission.Wait(s.ctx)
+		release, err := admission.Wait(s.ctx, func(position int) error {
+			return s.client.WriteJSON(WebSocketEnvelope{Type: "status", State: "waiting", Position: position})
+		})
 		admission = nil
 		if err != nil {
 			return err
@@ -365,6 +363,7 @@ func (s *webSocketSession) connectUpstream() error {
 		retryAfter := s.manager.applyCapacityHeaders(response)
 		if err != nil {
 			release()
+			s.manager.queue.ReportFailure()
 			attempt++
 			backoff := reconnectBackoff(attempt, retryAfter, s.manager.cfg.ReconnectMax)
 			if err := s.client.WriteJSON(WebSocketEnvelope{
@@ -382,10 +381,12 @@ func (s *webSocketSession) connectUpstream() error {
 		}
 		if upstream.Subprotocol() != webSocketSubprotocol {
 			release()
+			s.manager.queue.ReportFailure()
 			_ = upstream.Close()
 			return errors.New("upstream did not negotiate aqueduct.v1")
 		}
 
+		s.manager.queue.ReportSuccess()
 		attempt = 0
 		generation := s.manager.generation.Add(1)
 		upstream.SetReadLimit(s.manager.cfg.MaxMessageBytes)
@@ -400,6 +401,7 @@ func (s *webSocketSession) connectUpstream() error {
 		if s.ctx.Err() != nil {
 			return s.ctx.Err()
 		}
+		s.manager.queue.ReportFailure()
 		attempt++
 		backoff := reconnectBackoff(attempt, 0, s.manager.cfg.ReconnectMax)
 		if writeErr := s.client.WriteJSON(WebSocketEnvelope{

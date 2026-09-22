@@ -139,7 +139,11 @@ Aquifer also sends non-durable control messages:
 {"type":"status","state":"reconnecting","retry_after_ms":914,"reason":"..."}
 ```
 
+While a session waits, Aquifer emits another `waiting` status whenever its FIFO position changes (for example, `2` then `1`). These progress messages are live control state and are not appended to the durable transcript.
+
 On upstream loss, Aquifer keeps the client connection open and reconnects with jittered exponential backoff. Commands are durably recorded, but v1 does **not** automatically replay a command after an ambiguous upstream failure: Aquifer cannot know whether the backend acted before the connection disappeared. Clients may resend a command with the same `message_id`; backend actions must therefore be idempotent by `message_id`. Delivery of backend events is at least once when a client reconnects from its last acknowledged stream cursor.
+
+Each session transcript retains approximately the newest `AQUIFER_WS_STREAM_MAX_EVENTS` entries and expires `AQUIFER_WS_STREAM_TTL_SECONDS` after its last recorded entry. Every append refreshes that TTL. Expired history is treated as a replay gap when a client supplies a nonzero cursor, so deletion cannot silently skip events.
 
 Two clients may temporarily attach to the same `session_id` during an application-managed handoff; both follow the same durable backend event stream, and the client decides when to close the old socket. Process termination currently closes active sessions, so clients must reconnect through the gateway; [graceful SIGTERM quiescing and handoff](https://github.com/rjpruitt16/aquifer/issues/15) is intentionally a follow-up rather than an implicit redirect inside Aquifer.
 
@@ -156,12 +160,15 @@ X-Aqueduct-WS-Connect-Rps: 20
 
 It can update either value on an established socket with `{"type":"aqueduct.capacity","max_connections":250,"connect_rps":20}`. Dynamic signals can only lower operator-configured ceilings, never raise them. `Retry-After` on a rejected upstream handshake becomes the minimum reconnect delay.
 
+Opening starts at `AQUIFER_WS_SLOW_START_RPS` for each Aquifer process. Every successful upstream handshake doubles the current ramp rate until `AQUIFER_WS_CONNECT_RPS` is reached; a failed handshake or lost upstream resets the ramp. Backend capacity signals can still lower the effective rate at any point.
+
 | Env var | Default | Description |
 |---|---:|---|
 | `AQUIFER_WS_ENABLED` | automatic | WebSockets are on when `AQUIFER_VALKEY_URL` is set; `false` explicitly disables them |
 | `AQUIFER_VALKEY_URL` | _(required)_ | Shared `redis://`, `rediss://`, `valkey://`, or `valkeys://` stream store |
 | `AQUIFER_WS_STREAM_PREFIX` | `aqueduct:ws:` | Stream key prefix; session IDs are SHA-256 hashed |
 | `AQUIFER_WS_STREAM_MAX_EVENTS` | `10000` | Approximate retained entries per session |
+| `AQUIFER_WS_STREAM_TTL_SECONDS` | `86400` | Sliding expiration after the last recorded session entry |
 | `AQUIFER_WS_READ_BATCH` | `100` | Maximum events fetched per stream read |
 | `AQUIFER_WS_READ_BLOCK_MS` | `1000` | Live stream blocking-read interval |
 | `AQUIFER_WS_MAX_MESSAGE_BYTES` | `1048576` | Maximum client or backend message size |
@@ -171,8 +178,9 @@ It can update either value on an established socket with `{"type":"aqueduct.capa
 | `AQUIFER_WS_MAX_UPSTREAM_CONNECTIONS` | `1000` | Active backend socket ceiling for this instance |
 | `AQUIFER_WS_MAX_WAITING_CONNECTIONS` | `1000` | Local queue ceiling for sessions waiting on an upstream slot |
 | `AQUIFER_WS_CONNECT_RPS` | `20` | Maximum upstream connection openings per second on this instance |
+| `AQUIFER_WS_SLOW_START_RPS` | `1` | Initial and post-failure connection-opening rate before successful handshakes ramp it up |
 
-Handshake errors are returned before upgrade: **400** for invalid protocol/session/upstream input, **409** for a replay gap, **429** for a local connection or waiting ceiling, and **503** when Valkey is unavailable. `GET /health` exposes this instance's client, waiting, active-upstream, configured, and effective limits under `websocket`.
+Handshake errors are returned before upgrade: **400** for invalid protocol/session/upstream input, **409** for a replay gap, **429** for a local connection or waiting ceiling, and **503** when Valkey is unavailable. `GET /health` exposes this instance's client, waiting, active-upstream, configured, ramp, and effective limits under `websocket`.
 
 Measure a deployment with a controlled upstream before raising the defaults:
 
