@@ -340,6 +340,8 @@ The two combine: a fleet can partition statically by upstream domain, while indi
 
 **External registration** — off by default, and orthogonal to the above: `AQUIFER_REGISTRY_URL` makes an instance periodically report its own listening port to an external control plane (deciding tenant assignment, scaling, etc. is entirely that service's job, not Aquifer's). See **[REGISTRATION.md](REGISTRATION.md)** for the env vars and ping payload shape.
 
+None of this needs instances sharing state centrally, and that's the normal shape for a load balancer, not a gap unique to Aquifer — nginx and HAProxy make local decisions the same way. Pure central rate limiting is a gateway-layer concern that composes in front of Aquifer if you want it, not something Aquifer needs to reinvent. What an instance does need is to be safe to hand off without knowing anything about the rest of the fleet, which is what [slow start](#dynamic-pacing) is for: a freshly-assigned instance starts below its configured ceiling and creeps up, rather than assuming the ramp some other instance already earned.
+
 ---
 
 ## Deployment model
