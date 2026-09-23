@@ -164,7 +164,7 @@ func TestNewFlyRegionAdapterParsesRegionListAndPort(t *testing.T) {
 		t.Fatalf("expected self region iad, got %q", a.SelfRegion())
 	}
 	url := a.healthCheckURL("lhr")
-	if url != "http://lhr.my-app.internal:9090/health" {
+	if url != "http://lhr.my-app.internal:9090/ready" {
 		t.Fatalf("expected the real region-prefixed .internal URL, got %q", url)
 	}
 }

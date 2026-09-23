@@ -2,6 +2,7 @@ package aquifer
 
 import (
 	"errors"
+	"sync/atomic"
 	"time"
 )
 
@@ -43,6 +44,7 @@ type Aquifer struct {
 	redirectTargetURL func(region string) string
 	clusterRouter     *ClusterRouter
 	webSockets        *WebSocketManager
+	draining          atomic.Bool
 }
 
 func NewAquifer(store JobStore, registry *Registry, broker *Broker, l8 *L8Registry, admission *AdmissionController, pools *PoolRegistry) *Aquifer {
@@ -144,6 +146,9 @@ func (a *Aquifer) Enqueue(req JobRequest) (EnqueueResult, error) {
 // duplicate result if this idempotent_key already exists; job is nil in
 // that case. Behavior is otherwise identical to Enqueue's first half.
 func (a *Aquifer) PrepareJob(req JobRequest) (job *Job, duplicate *EnqueueResult, err error) {
+	if a.IsDraining() {
+		return nil, nil, ErrAquiferDraining
+	}
 	if msg := req.Validate(); msg != "" {
 		return nil, nil, errors.New(msg)
 	}
@@ -255,8 +260,12 @@ func (a *Aquifer) SubscribeJob(id string) (*Job, <-chan SSEEvent, func(), error)
 }
 
 func (a *Aquifer) Health() map[string]any {
+	status := "ok"
+	if a.IsDraining() {
+		status = "draining"
+	}
 	h := map[string]any{
-		"status":        "ok",
+		"status":        status,
 		"l8_protocol":   "0.1",
 		"l8_public_key": a.l8.PubB64,
 		"admission":     a.AdmissionSnapshot(),

@@ -42,6 +42,10 @@ type RuntimeOptions struct {
 	// variables. Nil values load AQUIFER_WS_* and AQUIFER_VALKEY_URL.
 	WebSocketConfig *WebSocketConfig
 	WebSocketStore  WebSocketStreamStore
+	// ShutdownConfig controls SIGTERM quiescing, WebSocket handoff, and the
+	// maximum time accepted work may continue draining. Nil loads
+	// AQUIFER_SHUTDOWN_* and AQUIFER_WS_DRAIN_GRACE_SECONDS.
+	ShutdownConfig *ShutdownConfig
 }
 
 type Runtime struct {
@@ -54,6 +58,7 @@ type Runtime struct {
 	Admission  *AdmissionController
 	Pools      *PoolRegistry
 	WebSockets *WebSocketManager
+	Shutdown   ShutdownConfig
 }
 
 func NewRuntime(opts RuntimeOptions) *Runtime {
@@ -129,6 +134,10 @@ func NewRuntime(opts RuntimeOptions) *Runtime {
 		loaded := LoadWebSocketConfig()
 		webSocketCfg = &loaded
 	}
+	shutdownCfg := LoadShutdownConfig()
+	if opts.ShutdownConfig != nil {
+		shutdownCfg = *opts.ShutdownConfig
+	}
 	var webSocketManager *WebSocketManager
 	if webSocketCfg.Enabled {
 		streamStore := opts.WebSocketStore
@@ -155,6 +164,7 @@ func NewRuntime(opts RuntimeOptions) *Runtime {
 		Admission:  admission,
 		Pools:      pools,
 		WebSockets: webSocketManager,
+		Shutdown:   shutdownCfg,
 	}
 }
 
@@ -176,7 +186,37 @@ func RunAdapter(ctx context.Context, adapter FrameworkAdapter, opts RuntimeOptio
 	runtime := NewRuntime(opts)
 	defer runtime.Close()
 	runtime.RecoverQueuedJobs(runtime.DBPath())
-	return adapter.Start(ctx, runtime.Aquifer)
+
+	adapterCtx, stopAdapter := context.WithCancel(context.Background())
+	defer stopAdapter()
+	adapterDone := make(chan error, 1)
+	go func() {
+		adapterDone <- adapter.Start(adapterCtx, runtime.Aquifer)
+	}()
+
+	select {
+	case err := <-adapterDone:
+		return err
+	case <-ctx.Done():
+	}
+
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), runtime.Shutdown.Timeout)
+	defer cancelShutdown()
+	runtime.BeginDrain()
+	if !sleepBeforeRetryContext(shutdownCtx, runtime.Shutdown.Quiesce) {
+		log.Printf("shutdown: quiesce window ended at deadline")
+	}
+	stopAdapter()
+
+	if err := runtime.Drain(shutdownCtx); err != nil {
+		log.Printf("shutdown: graceful drain deadline reached: %v", err)
+	}
+	select {
+	case err := <-adapterDone:
+		return err
+	case <-shutdownCtx.Done():
+		return nil
+	}
 }
 
 func (r *Runtime) DBPath() string {

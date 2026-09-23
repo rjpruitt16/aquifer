@@ -160,7 +160,7 @@ X-Aqueduct-WS-Connect-Rps: 20
 
 It can update either value on an established socket with `{"type":"aqueduct.capacity","max_connections":250,"connect_rps":20}`. Dynamic signals can only lower operator-configured ceilings, never raise them. `Retry-After` on a rejected upstream handshake becomes the minimum reconnect delay.
 
-Opening starts at `AQUIFER_WS_SLOW_START_RPS` for each Aquifer process. Every successful upstream handshake doubles the current ramp rate until `AQUIFER_WS_CONNECT_RPS` is reached; a failed handshake or lost upstream resets the ramp. Backend capacity signals can still lower the effective rate at any point.
+Opening starts at `AQUIFER_WS_SLOW_START_RPS` for each Aquifer process. Every successful upstream handshake doubles the current ramp rate until `AQUIFER_WS_CONNECT_RPS` is reached; a failed handshake resets the ramp. An established socket disconnecting does not penalize unrelated connections by resetting the process-wide ramp. Backend capacity signals can still lower the effective rate at any point. Set the slow-start rate equal to the connection ceiling to disable ramping.
 
 | Env var | Default | Description |
 |---|---:|---|

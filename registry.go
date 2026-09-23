@@ -1,32 +1,38 @@
 package aquifer
 
 import (
+	"context"
 	"encoding/json"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 type Registry struct {
-	mu              sync.Mutex
-	workers         map[string]*URLWorker
-	store           JobStore
-	cfg             *Config
-	broker          *Broker
-	l8              *L8Registry
-	metrics         MetricsAdapter
-	pools           *PoolRegistry
-	drainRemote     RemoteIdempotency
-	resultRecorder  JobResultRecorder
-	totalJobs       atomic.Int64
-	queueDepth      atomic.Int64
-	drainCfg        DrainConfig
-	drainState      atomic.Value // DrainState, read from Health() concurrently with the watchdog goroutine writing it
-	drainWatchdog   bool
-	drainBatch      bool
-	registrationCfg RegistrationConfig
-	closeOnce       sync.Once
-	stop            chan struct{}
-	wg              sync.WaitGroup
+	mu                sync.Mutex
+	workers           map[string]*URLWorker
+	store             JobStore
+	cfg               *Config
+	broker            *Broker
+	l8                *L8Registry
+	metrics           MetricsAdapter
+	pools             *PoolRegistry
+	drainRemote       RemoteIdempotency
+	resultRecorder    JobResultRecorder
+	totalJobs         atomic.Int64
+	queueDepth        atomic.Int64
+	drainCfg          DrainConfig
+	drainFlushMu      sync.Mutex
+	drainState        atomic.Value // DrainState, read from Health() concurrently with the watchdog goroutine writing it
+	drainWatchdog     bool
+	drainBatch        bool
+	registrationCfg   RegistrationConfig
+	registrationState atomic.Value // LifecycleState
+	closeOnce         sync.Once
+	ctx               context.Context
+	cancel            context.CancelFunc
+	stop              chan struct{}
+	wg                sync.WaitGroup
 }
 
 // NewRegistry reads drain mode's config from AQUIFER_DRAIN_* env vars
@@ -35,6 +41,7 @@ type Registry struct {
 // opt-in env vars internally. Callers wanting a programmatic override
 // (RuntimeOptions.DrainConfig) call ConfigureDrain after construction.
 func NewRegistry(store JobStore, cfg *Config, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, pools *PoolRegistry) *Registry {
+	ctx, cancel := context.WithCancel(context.Background())
 	r := &Registry{
 		workers:         make(map[string]*URLWorker),
 		store:           store,
@@ -45,12 +52,15 @@ func NewRegistry(store JobStore, cfg *Config, broker *Broker, l8 *L8Registry, me
 		pools:           pools,
 		drainCfg:        LoadDrainConfig(),
 		registrationCfg: LoadRegistrationConfig(),
+		ctx:             ctx,
+		cancel:          cancel,
 		stop:            make(chan struct{}),
 	}
 	counts := store.Counts()
 	r.totalJobs.Store(counts.TotalJobs)
 	r.queueDepth.Store(counts.QueueDepth)
 	r.drainState.Store(DrainStateActive)
+	r.registrationState.Store(LifecycleStateActive)
 	if r.drainCfg.Enabled {
 		r.startDrainLoops()
 	}
@@ -60,8 +70,67 @@ func NewRegistry(store JobStore, cfg *Config, broker *Broker, l8 *L8Registry, me
 	return r
 }
 
+func (r *Registry) BeginDrain() {
+	if r == nil {
+		return
+	}
+	r.registrationState.Store(LifecycleStateDraining)
+	if r.registrationCfg.Enabled() {
+		r.wg.Add(1)
+		go func() {
+			defer r.wg.Done()
+			r.pingRegistry()
+		}()
+	}
+}
+
+func (r *Registry) WaitIdle(ctx context.Context) error {
+	if r == nil {
+		return nil
+	}
+	ticker := time.NewTicker(shutdownIdlePollInterval)
+	defer ticker.Stop()
+	for {
+		if r.idleForShutdown() {
+			return nil
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+func (r *Registry) idleForShutdown() bool {
+	if r.store.Counts().TotalJobs != 0 {
+		return false
+	}
+	r.mu.Lock()
+	workers := make([]*URLWorker, 0, len(r.workers))
+	for _, worker := range r.workers {
+		workers = append(workers, worker)
+	}
+	r.mu.Unlock()
+	for _, worker := range workers {
+		if worker.QueueActive() {
+			return false
+		}
+	}
+	return true
+}
+
+func (r *Registry) FlushForShutdown(ctx context.Context) bool {
+	if r == nil || !r.drainCfg.Enabled {
+		return true
+	}
+	r.setDrainState(DrainStateDraining)
+	return r.attemptDrainFlushContext(ctx)
+}
+
 func (r *Registry) Close() {
 	r.closeOnce.Do(func() {
+		r.cancel()
 		close(r.stop)
 
 		r.mu.Lock()

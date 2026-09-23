@@ -282,7 +282,10 @@ func TestWebSocketProxyReconnectsUpstreamAndKeepsClientConnected(t *testing.T) {
 	defer backend.Close()
 
 	store := newMemoryWebSocketStreamStore()
-	manager := NewWebSocketManager(testWebSocketConfig(), store)
+	cfg := testWebSocketConfig()
+	cfg.Scheduler.ConnectRPS = 8
+	cfg.Scheduler.SlowStartRPS = 1
+	manager := NewWebSocketManager(cfg, store)
 	app := &Aquifer{webSockets: manager}
 	server := httptest.NewServer(NewServer(app).Routes())
 	defer server.Close()
@@ -308,6 +311,65 @@ func TestWebSocketProxyReconnectsUpstreamAndKeepsClientConnected(t *testing.T) {
 	}
 	if !sawReconnect || !sawSecondConnection || !sawEvent {
 		t.Fatalf("expected reconnect lifecycle and durable event, reconnect=%v second=%v event=%v", sawReconnect, sawSecondConnection, sawEvent)
+	}
+	if snapshot := manager.queue.Snapshot(); snapshot.CurrentRampRPS != 4 {
+		t.Fatalf("ordinary established-socket loss should preserve the ramp; expected 4 RPS after two successful handshakes, got %+v", snapshot)
+	}
+}
+
+func TestWebSocketDrainNotifiesClosesAndRejectsNewHandshakes(t *testing.T) {
+	backendUpgrader := websocket.Upgrader{Subprotocols: []string{webSocketSubprotocol}, CheckOrigin: func(*http.Request) bool { return true }}
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := backendUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	defer backend.Close()
+
+	store := newMemoryWebSocketStreamStore()
+	manager := NewWebSocketManager(testWebSocketConfig(), store)
+	app := &Aquifer{webSockets: manager}
+	server := httptest.NewServer(NewServer(app).Routes())
+	defer server.Close()
+	defer manager.Close()
+
+	headers := http.Header{webSocketUpstreamURLHeader: []string{toWebSocketURL(backend.URL)}}
+	client := dialAqueductWebSocket(t, server.URL+"/websocket?session_id=drain-existing&after=0-0", headers)
+	readWebSocketUntil(t, client, func(message WebSocketEnvelope) bool {
+		return message.Type == "status" && message.State == "connected"
+	})
+
+	app.BeginDrain(50 * time.Millisecond)
+	message := readWebSocketEnvelope(t, client, time.Second)
+	for message.Type != "status" || message.State != "server_draining" {
+		message = readWebSocketEnvelope(t, client, time.Second)
+	}
+	if message.RetryAfterMS != 50 {
+		t.Fatalf("expected 50ms reconnect grace, got %+v", message)
+	}
+
+	client.SetReadDeadline(time.Now().Add(time.Second))
+	_, _, err := client.ReadMessage()
+	var closeErr *websocket.CloseError
+	if !errors.As(err, &closeErr) || closeErr.Code != websocket.CloseServiceRestart {
+		t.Fatalf("expected service-restart close code %d, got %v", websocket.CloseServiceRestart, err)
+	}
+
+	endpoint := "ws" + strings.TrimPrefix(server.URL, "http") + "/websocket?session_id=drain-new&after=0-0"
+	_, response, err := websocket.DefaultDialer.Dial(endpoint, headers)
+	if err == nil || response == nil || response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("expected draining handshake rejection, response=%v err=%v", response, err)
+	}
+	defer response.Body.Close()
+	if response.Header.Get(nodeStateHeader) != "draining" {
+		t.Fatalf("expected draining node-state header, got %v", response.Header)
 	}
 }
 

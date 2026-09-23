@@ -86,7 +86,7 @@ func (a *Adapter) Start(ctx context.Context, aq *aquifer.Aquifer) error {
 
 	go func() {
 		<-ctx.Done()
-		server.Shutdown(context.Background())
+		aquifer.ShutdownHTTPServer(server)
 	}()
 
 	err := server.ListenAndServe()

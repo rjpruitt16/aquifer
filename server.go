@@ -40,7 +40,7 @@ func (a *HTTPAdapter) Start(ctx context.Context, aquifer *Aquifer) error {
 
 	go func() {
 		<-ctx.Done()
-		server.Shutdown(context.Background())
+		ShutdownHTTPServer(server)
 	}()
 
 	err := server.ListenAndServe()
@@ -59,6 +59,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /jobs/{id}/stream", s.streamJob)
 	mux.HandleFunc("GET /jobs/{id}", s.getJob)
 	mux.HandleFunc("GET /health", s.health)
+	mux.HandleFunc("GET /ready", s.ready)
 	mux.HandleFunc("POST /pools/{pool_id}/members", s.registerPoolMember)
 	mux.HandleFunc("GET /.well-known/l8", s.wellKnownL8)
 	mux.HandleFunc("POST /l8/challenge", s.l8Challenge)
@@ -134,6 +135,10 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 
 	result, err := s.aquifer.Enqueue(req)
 	if err != nil {
+		if errors.Is(err, ErrAquiferDraining) {
+			writeNodeDraining(w, s.aquifer.RetryAfterSeconds())
+			return
+		}
 		var admissionErr *AdmissionRejectedError
 		if errors.As(err, &admissionErr) {
 			w.Header().Set("Retry-After", fmt.Sprintf("%d", s.aquifer.RetryAfterSeconds()))
@@ -193,6 +198,15 @@ func (s *Server) getJobResult(w http.ResponseWriter, r *http.Request) {
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(s.aquifer.Health())
+}
+
+func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if s.aquifer.IsDraining() {
+		writeNodeDraining(w, s.aquifer.RetryAfterSeconds())
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]string{"status": "ready"})
 }
 
 func (s *Server) wellKnownL8(w http.ResponseWriter, r *http.Request) {
@@ -339,6 +353,10 @@ func (s *Server) proxyJob(w http.ResponseWriter, r *http.Request) {
 	outcome := s.aquifer.AttemptDirect(r.Context(), req, proxyDirectAttemptTimeout())
 
 	if outcome.Err != nil {
+		if errors.Is(outcome.Err, ErrAquiferDraining) {
+			writeNodeDraining(w, s.aquifer.RetryAfterSeconds())
+			return
+		}
 		var admissionErr *AdmissionRejectedError
 		if errors.As(outcome.Err, &admissionErr) {
 			w.Header().Set("Retry-After", fmt.Sprintf("%d", s.aquifer.RetryAfterSeconds()))
@@ -414,6 +432,17 @@ func (s *Server) proxyJob(w http.ResponseWriter, r *http.Request) {
 		Reason: outcome.FallbackReason,
 		Status: outcome.FallbackStatus,
 	})
+}
+
+func writeNodeDraining(w http.ResponseWriter, retryAfter int) {
+	if retryAfter <= 0 {
+		retryAfter = 1
+	}
+	w.Header().Set("Retry-After", fmt.Sprintf("%d", retryAfter))
+	w.Header().Set(nodeStateHeader, "draining")
+	w.Header().Set("X-Aquifer-Node-State", "draining")
+	w.Header().Set("Connection", "close")
+	jsonError(w, ErrAquiferDraining.Error(), http.StatusServiceUnavailable)
 }
 
 // relaySSE forwards a redirected region's own SSE response byte-for-byte
@@ -521,6 +550,10 @@ func (s *Server) forwardClusterRequest(w http.ResponseWriter, r *http.Request, p
 	var tried []string
 	for _, owner := range owners {
 		if owner.ID == s.aquifer.clusterRouter.self.ID {
+			if s.aquifer.IsDraining() {
+				tried = append(tried, owner.ID)
+				continue
+			}
 			return false
 		}
 		tried = append(tried, owner.ID)
@@ -539,6 +572,11 @@ func (s *Server) forwardClusterRequest(w http.ResponseWriter, r *http.Request, p
 
 		resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(outbound)
 		if err != nil {
+			s.aquifer.clusterRouter.PruneMember(owner.ID)
+			continue
+		}
+		if resp.StatusCode == http.StatusServiceUnavailable && pacingHeader(resp.Header, "Node-State") == "draining" {
+			resp.Body.Close()
 			s.aquifer.clusterRouter.PruneMember(owner.ID)
 			continue
 		}
