@@ -5,15 +5,18 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/rjpruitt16/aquifer"
 )
 
 type JSONLineAdapter struct {
-	in  *os.File
-	out *os.File
+	in  io.Reader
+	out io.Writer
 }
 
 func (a *JSONLineAdapter) Name() string {
@@ -24,50 +27,67 @@ func (a *JSONLineAdapter) Start(ctx context.Context, app *aquifer.Aquifer) error
 	scanner := bufio.NewScanner(a.in)
 	encoder := json.NewEncoder(a.out)
 
-	for scanner.Scan() {
+	lines := make(chan []byte)
+	scanDone := make(chan error, 1)
+	go func() {
+		defer close(lines)
+		for scanner.Scan() {
+			line := append([]byte(nil), scanner.Bytes()...)
+			select {
+			case lines <- line:
+			case <-ctx.Done():
+				scanDone <- nil
+				return
+			}
+		}
+		scanDone <- scanner.Err()
+	}()
+
+	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		default:
-		}
+		case line, ok := <-lines:
+			if !ok {
+				return <-scanDone
+			}
 
-		var req Request
-		if err := json.Unmarshal(scanner.Bytes(), &req); err != nil {
-			writeError(encoder, err)
-			continue
-		}
-
-		switch req.Method {
-		case "enqueue":
-			var jobReq aquifer.JobRequest
-			if err := json.Unmarshal(req.Params, &jobReq); err != nil {
+			var req Request
+			if err := json.Unmarshal(line, &req); err != nil {
 				writeError(encoder, err)
 				continue
 			}
-			result, err := app.Enqueue(jobReq)
-			writeResult(encoder, result, err)
 
-		case "get_job":
-			var params struct {
-				JobID string `json:"job_id"`
-			}
-			if err := json.Unmarshal(req.Params, &params); err != nil {
-				writeError(encoder, err)
-				continue
-			}
-			if params.JobID == "" {
-				writeError(encoder, errors.New("job_id is required"))
-				continue
-			}
-			job, err := app.GetJob(params.JobID)
-			writeResult(encoder, job, err)
+			switch req.Method {
+			case "enqueue":
+				var jobReq aquifer.JobRequest
+				if err := json.Unmarshal(req.Params, &jobReq); err != nil {
+					writeError(encoder, err)
+					continue
+				}
+				result, err := app.Enqueue(jobReq)
+				writeResult(encoder, result, err)
 
-		default:
-			writeError(encoder, errors.New("unknown method"))
+			case "get_job":
+				var params struct {
+					JobID string `json:"job_id"`
+				}
+				if err := json.Unmarshal(req.Params, &params); err != nil {
+					writeError(encoder, err)
+					continue
+				}
+				if params.JobID == "" {
+					writeError(encoder, errors.New("job_id is required"))
+					continue
+				}
+				job, err := app.GetJob(params.JobID)
+				writeResult(encoder, job, err)
+
+			default:
+				writeError(encoder, errors.New("unknown method"))
+			}
 		}
 	}
-
-	return scanner.Err()
 }
 
 type Request struct {
@@ -93,8 +113,10 @@ func writeError(encoder *json.Encoder, err error) {
 }
 
 func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	adapter := &JSONLineAdapter{in: os.Stdin, out: os.Stdout}
-	if err := aquifer.RunAdapter(context.Background(), adapter, aquifer.RuntimeOptions{
+	if err := aquifer.RunAdapter(ctx, adapter, aquifer.RuntimeOptions{
 		DBPath: os.Getenv("DB_PATH"),
 	}); err != nil {
 		log.Fatal(err)

@@ -39,6 +39,13 @@ func testAquifer(t *testing.T) *aquifer.Aquifer {
 	return app
 }
 
+func TestAgentCardReportsAquiferVersion(t *testing.T) {
+	card := agentCard("https://aquifer.example", a2a.AgentCapabilities{})
+	if card.Version != aquifer.Version {
+		t.Fatalf("expected Agent Card version %q, got %q", aquifer.Version, card.Version)
+	}
+}
+
 // newTestHandler wires an executor into a real a2asrv.RequestHandler the
 // same way Adapter.Start does, minus the HTTP transport -- these tests
 // drive the handler directly, which is what actually exercises Execute's

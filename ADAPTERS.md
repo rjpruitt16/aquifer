@@ -77,28 +77,32 @@ package main
 import (
     "context"
     "log"
+    "os"
+    "os/signal"
+    "syscall"
 
     "github.com/rjpruitt16/aquifer"
     myadapter "github.com/you/your-adapter"
 )
 
 func main() {
-    runtime := aquifer.NewRuntime(aquifer.RuntimeOptions{
+    ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+    defer stop()
+    adapter := myadapter.New()
+    log.Fatal(aquifer.RunAdapter(ctx, adapter, aquifer.RuntimeOptions{
         DBPath:     "aquifer.db",
         ConfigPath: "aquifer.yml",
-    })
-    runtime.RecoverQueuedJobs("aquifer.db")
-
-    adapter := myadapter.New()
-    log.Fatal(adapter.Start(context.Background(), runtime.Aquifer))
+    }))
 }
 ```
 
-For the shortest form, let Aquifer create the runtime and start your adapter:
+`RunAdapter` creates and recovers the runtime, rejects new work before canceling the adapter context, drains accepted jobs and WebSockets, performs the final acknowledged ledger flush, and enforces the configured shutdown deadline. An adapter's `Start` method must return when `ctx` is canceled. HTTP adapters can call `aquifer.ShutdownHTTPServer(server)` to get the same bounded listener shutdown used by the built-in HTTP and A2A adapters.
+
+The minimal call remains:
 
 ```go
 adapter := myadapter.New()
-log.Fatal(aquifer.RunAdapter(context.Background(), adapter, aquifer.RuntimeOptions{
+log.Fatal(aquifer.RunAdapter(ctx, adapter, aquifer.RuntimeOptions{
     DBPath:     "aquifer.db",
     ConfigPath: "aquifer.yml",
 }))

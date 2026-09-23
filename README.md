@@ -223,7 +223,7 @@ POST /jobs
 
 **Do not expose Aquifer directly to untrusted callers.** `url` is dispatched as a real HTTP request — if an arbitrary or untrusted party can set it, Aquifer becomes an open relay/SSRF vector, using Aquifer's own network position and identity to reach anything the machine can reach. The intended caller is **your own trusted backend or gateway code** dispatching to a destination it already knows about — not an agent, end user, or any other party choosing the destination itself.
 
-**[API.md](API.md)** has the full reference: `GET /jobs/:id`, the SSE stream, `POST /proxy` (edge-gateway mode — see [Use cases](#use-cases)), `GET /health`, webhook payload shapes, and the autoscaling headers.
+**[API.md](API.md)** has the full reference: `GET /jobs/:id`, the SSE stream, `POST /proxy` (edge-gateway mode — see [Use cases](#use-cases)), health/readiness and graceful shutdown, webhook payload shapes, and the autoscaling headers.
 
 ---
 

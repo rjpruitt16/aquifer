@@ -140,7 +140,7 @@ func handleMCPRequest(aquifer *Aquifer, req mcpRequest) (any, error) {
 			},
 			"serverInfo": map[string]any{
 				"name":    "aquifer",
-				"version": "0.1.0",
+				"version": Version,
 			},
 		}, nil
 	case "ping":

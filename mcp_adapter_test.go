@@ -5,9 +5,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestMCPStdioAdapterListsToolsAndResourceTemplates(t *testing.T) {
@@ -31,6 +33,10 @@ func TestMCPStdioAdapterListsToolsAndResourceTemplates(t *testing.T) {
 
 	if responses[0]["error"] != nil {
 		t.Fatalf("initialize returned error: %v", responses[0]["error"])
+	}
+	serverInfo := responses[0]["result"].(map[string]any)["serverInfo"].(map[string]any)
+	if serverInfo["version"] != Version {
+		t.Fatalf("expected MCP server version %q, got %v", Version, serverInfo["version"])
 	}
 
 	toolsResult := responses[1]["result"].(map[string]any)
@@ -88,6 +94,28 @@ func TestMCPReadJobResource(t *testing.T) {
 	}
 	if job.ID != result.JobID {
 		t.Fatalf("expected job %s, got %s", result.JobID, job.ID)
+	}
+}
+
+func TestMCPStdioAdapterReturnsWhenContextIsCanceled(t *testing.T) {
+	reader, writer := io.Pipe()
+	t.Cleanup(func() {
+		_ = reader.Close()
+		_ = writer.Close()
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	adapter := NewMCPStdioAdapter(reader, io.Discard)
+	done := make(chan error, 1)
+	go func() { done <- adapter.Start(ctx, nil) }()
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("adapter cancellation: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("MCP adapter did not return after context cancellation")
 	}
 }
 
