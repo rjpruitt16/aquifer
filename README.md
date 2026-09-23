@@ -2,6 +2,16 @@
 
 ![How engineers respond to congestion: pacing and backpressure everywhere else in infrastructure, versus retrying everything immediately at the API layer](docs/images/how-engineers-respond-to-congestion.jpg)
 
+**TL;DR — why not Envoy?**
+
+Envoy circuit breaking protects an overloaded service by rejecting excess work outright. That keeps the backend alive, but a rejected request is just gone — nothing durable — and it leaves the client to retry independently, creating uncoordinated competition for whatever capacity opens up next and wasting cycles on repeated attempts.
+
+Aquifer takes a different approach: persist the excess work, then pace its release.
+
+The backend is also closer to the truth about its own capacity than a static proxy limit ever is. If the fleet loses half its usable capacity, the admission rate should fall; if capacity expands, the release rate should rise. Instead of leaning on static limits like max connections or concurrent requests, Aquifer can ask the backend directly, continuously: *how fast should we send work right now?* (See [Dynamic Pacing](#dynamic-pacing) for how that ceiling, backoff, and recovery actually work.)
+
+Circuit breaking protects the service by saying "stop." Aquifer coordinates demand by saying "wait here, and I'll tell you when to go."
+
 **Increase your rate limit without DDoSing your backend.**
 
 Distributed agents call tools and APIs in bursts. Your backend gets overwhelmed on inbound. Your app gets 429s on outbound. One slow dependency takes everything else down with it, and the retries agents fire off while they wait only make it worse — [wasted utilization and higher cost](https://rahmipruitt.me/content/gpu-retry-tax/) on one end, [outages reactive autoscaling alone can't prevent](https://rahmipruitt.me/content/github-outage-reactive-scaling/) on the other.
@@ -55,8 +65,6 @@ clients  →  trusted gateway  →  GET /websocket on Aquifer  →  WebSocket ba
 Aquifer can persist an ordered WebSocket transcript in Valkey, replay missed backend events after a client reconnects, and pace new or replacement upstream connections. Authentication remains the gateway's job. See [`GET /websocket`](API.md#get-websocket) for the protocol and limits.
 
 **Sleep through partial outages.** On Fly.io, set `AQUIFER_FLY_REGIONS` and that same overload signal drives real cross-region redirect: other regions Aquifer is deployed to get tried live, over Fly's private network, before this instance ever falls back to its own local queue — nearest-first by measured latency, deterministic enough that two callers racing the same job converge on the same region instead of each chasing their own nearest option. One region degrading routes around itself instead of paging you at 3am. If every known region is down too, that's a real fleet-wide problem — Aquifer says so with a `429` and a long `Retry-After` rather than quietly queueing it somewhere and hoping. See [`POST /proxy`](API.md#post-proxy)'s "Cross-region redirect" section for the full mechanics, including the one honestly-documented tradeoff it doesn't try to hide.
-
-**Why not just Envoy or nginx rate limiting?** A static rate limit dispatches as fast as the number allows, with no memory and no way to adapt if the backend is struggling worse than that number assumed — and nothing durable, so a rejected or in-flight request is just gone. Aquifer persists every job before dispatching it, adapts its pace live from what the backend actually says, and can retry against a sibling region if the whole region degrades.
 
 In all four, the upstream can lower the dispatch pace via response headers — see [Dynamic Pacing](#dynamic-pacing) for how the ceiling, backoff, and recovery actually work.
 
