@@ -363,7 +363,7 @@ func (s *webSocketSession) run() {
 	s.cancel()
 	s.client.Close(websocket.CloseNormalClosure, "session closed")
 	wg.Wait()
-	if err != nil && !errors.Is(err, context.Canceled) && !websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+	if err != nil && !s.manager.IsDraining() && !errors.Is(err, context.Canceled) && !websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 		log.Printf("websocket session %s closed: %v", s.sessionID, err)
 	}
 }
