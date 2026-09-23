@@ -57,6 +57,16 @@ jobs:
             --source=./aquifer
             --websocket-dir=./aqueduct-runner/websocket
 
+      - name: Contract test -- SIGTERM drain and WebSocket handoff
+        uses: dagger/dagger-for-github@v8.4.1
+        with:
+          version: "0.21.8"
+          module: ./aqueduct-runner
+          call: >-
+            test-aquifer-shutdown
+            --source=./aquifer
+            --websocket-dir=./aqueduct-runner/websocket
+
   # Separate job so a slow drain-mode regression doesn't hold up the fast
   # checks above -- both start immediately, no `needs:` dependency.
   contract-test-drain:
