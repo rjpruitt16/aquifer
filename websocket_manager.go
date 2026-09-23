@@ -56,6 +56,9 @@ type WebSocketManager struct {
 	wg         sync.WaitGroup
 	closeOnce  sync.Once
 	generation atomic.Int64
+	sessionsMu sync.Mutex
+	sessions   map[*webSocketSession]struct{}
+	draining   bool
 }
 
 func NewWebSocketManager(cfg WebSocketConfig, store WebSocketStreamStore) *WebSocketManager {
@@ -77,8 +80,9 @@ func NewWebSocketManager(cfg WebSocketConfig, store WebSocketStreamStore) *WebSo
 				return true
 			},
 		},
-		ctx:    ctx,
-		cancel: cancel,
+		ctx:      ctx,
+		cancel:   cancel,
+		sessions: make(map[*webSocketSession]struct{}),
 	}
 }
 
@@ -100,6 +104,10 @@ func (m *WebSocketManager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if !websocket.IsWebSocketUpgrade(r) {
 		jsonError(w, "websocket upgrade required", http.StatusUpgradeRequired)
+		return
+	}
+	if m.IsDraining() {
+		writeNodeDraining(w, 1)
 		return
 	}
 	if !containsString(websocket.Subprotocols(r), webSocketSubprotocol) {
@@ -176,8 +184,18 @@ func (m *WebSocketManager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		initialAdmission: admission,
 	}
 
-	m.wg.Add(1)
-	defer m.wg.Done()
+	if !m.registerSession(session) {
+		admission.Cancel()
+		_ = session.client.WriteJSON(WebSocketEnvelope{
+			Type:         "status",
+			State:        "server_draining",
+			Reason:       ErrAquiferDraining.Error(),
+			RetryAfterMS: 1000,
+		})
+		session.client.Close(websocket.CloseServiceRestart, "aquifer is draining; reconnect through the gateway")
+		return
+	}
+	defer m.unregisterSession(session)
 	session.run()
 }
 
@@ -188,6 +206,7 @@ func (m *WebSocketManager) Snapshot() map[string]any {
 	snapshot := m.queue.Snapshot()
 	return map[string]any{
 		"enabled":                  true,
+		"draining":                 m.IsDraining(),
 		"clients":                  snapshot.Clients,
 		"active_upstreams":         snapshot.ActiveUpstreams,
 		"waiting":                  snapshot.Waiting,
@@ -195,8 +214,105 @@ func (m *WebSocketManager) Snapshot() map[string]any {
 		"max_upstream_connections": snapshot.MaxUpstreams,
 		"effective_max_upstreams":  snapshot.EffectiveMax,
 		"connect_rps":              snapshot.ConnectRPS,
+		"slow_start_rps":           snapshot.SlowStartRPS,
+		"current_ramp_rps":         snapshot.CurrentRampRPS,
 		"effective_connect_rps":    snapshot.EffectiveConnectRPS,
 	}
+}
+
+func (m *WebSocketManager) IsDraining() bool {
+	if m == nil {
+		return false
+	}
+	m.sessionsMu.Lock()
+	defer m.sessionsMu.Unlock()
+	return m.draining
+}
+
+func (m *WebSocketManager) BeginDrain(grace time.Duration) {
+	if m == nil {
+		return
+	}
+	if grace < 0 {
+		grace = 0
+	}
+	m.sessionsMu.Lock()
+	if m.draining {
+		m.sessionsMu.Unlock()
+		return
+	}
+	m.draining = true
+	sessions := m.sessionSnapshotLocked()
+	m.sessionsMu.Unlock()
+
+	for _, session := range sessions {
+		go func(s *webSocketSession) {
+			_ = s.client.WriteJSON(WebSocketEnvelope{
+				Type:         "status",
+				State:        "server_draining",
+				Reason:       "reconnect through the gateway",
+				RetryAfterMS: grace.Milliseconds(),
+			})
+		}(session)
+	}
+
+	go func() {
+		timer := time.NewTimer(grace)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-m.ctx.Done():
+		}
+		m.sessionsMu.Lock()
+		current := m.sessionSnapshotLocked()
+		m.sessionsMu.Unlock()
+		for _, session := range current {
+			session.client.Close(websocket.CloseServiceRestart, "aquifer is draining; reconnect through the gateway")
+		}
+	}()
+}
+
+func (m *WebSocketManager) WaitDrained(ctx context.Context) error {
+	if m == nil {
+		return nil
+	}
+	done := make(chan struct{})
+	go func() {
+		m.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (m *WebSocketManager) registerSession(session *webSocketSession) bool {
+	m.sessionsMu.Lock()
+	defer m.sessionsMu.Unlock()
+	if m.draining {
+		return false
+	}
+	m.sessions[session] = struct{}{}
+	m.wg.Add(1)
+	return true
+}
+
+func (m *WebSocketManager) unregisterSession(session *webSocketSession) {
+	m.sessionsMu.Lock()
+	delete(m.sessions, session)
+	m.sessionsMu.Unlock()
+	m.wg.Done()
+}
+
+func (m *WebSocketManager) sessionSnapshotLocked() []*webSocketSession {
+	sessions := make([]*webSocketSession, 0, len(m.sessions))
+	for session := range m.sessions {
+		sessions = append(sessions, session)
+	}
+	return sessions
 }
 
 func (m *WebSocketManager) Close() {
@@ -204,6 +320,7 @@ func (m *WebSocketManager) Close() {
 		return
 	}
 	m.closeOnce.Do(func() {
+		m.BeginDrain(0)
 		m.cancel()
 		m.queue.Close()
 		m.wg.Wait()
@@ -246,7 +363,7 @@ func (s *webSocketSession) run() {
 	s.cancel()
 	s.client.Close(websocket.CloseNormalClosure, "session closed")
 	wg.Wait()
-	if err != nil && !errors.Is(err, context.Canceled) && !websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+	if err != nil && !s.manager.IsDraining() && !errors.Is(err, context.Canceled) && !websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 		log.Printf("websocket session %s closed: %v", s.sessionID, err)
 	}
 }
@@ -260,6 +377,10 @@ func (s *webSocketSession) readClient() error {
 		message, err := decodeClientWebSocketMessage(raw)
 		if err != nil {
 			_ = s.client.WriteJSON(WebSocketEnvelope{Type: "error", Reason: err.Error()})
+			continue
+		}
+		if s.manager.IsDraining() {
+			_ = s.client.WriteJSON(WebSocketEnvelope{Type: "error", Reason: ErrAquiferDraining.Error()})
 			continue
 		}
 		streamID, err := s.manager.store.Append(s.ctx, s.sessionID, "client", message)
@@ -401,7 +522,6 @@ func (s *webSocketSession) connectUpstream() error {
 		if s.ctx.Err() != nil {
 			return s.ctx.Err()
 		}
-		s.manager.queue.ReportFailure()
 		attempt++
 		backoff := reconnectBackoff(attempt, 0, s.manager.cfg.ReconnectMax)
 		if writeErr := s.client.WriteJSON(WebSocketEnvelope{

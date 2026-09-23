@@ -1,6 +1,7 @@
 package aquifer
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -179,8 +180,12 @@ func (r *Registry) drainBatchLoop() {
 // successful flush, or nothing to flush at all) and false when it should
 // be retried on the next watchdog tick.
 func (r *Registry) attemptDrainFlush() bool {
+	return r.attemptDrainFlushContext(context.Background())
+}
+
+func (r *Registry) attemptDrainFlushContext(ctx context.Context) bool {
 	for {
-		events, ok := r.flushDrainEventBatch("instance_idle")
+		events, ok := r.flushDrainEventBatchContext(ctx, "instance_idle")
 		if !ok {
 			return false
 		}
@@ -195,6 +200,16 @@ func (r *Registry) attemptDrainFlush() bool {
 }
 
 func (r *Registry) flushDrainEventBatch(eventName string) ([]DrainEvent, bool) {
+	return r.flushDrainEventBatchContext(context.Background(), eventName)
+}
+
+func (r *Registry) flushDrainEventBatchContext(ctx context.Context, eventName string) ([]DrainEvent, bool) {
+	r.drainFlushMu.Lock()
+	defer r.drainFlushMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, false
+	}
+
 	limit := r.drainCfg.BatchMaxEvents
 	if limit <= 0 {
 		limit = defaultDrainBatchMax
@@ -206,7 +221,7 @@ func (r *Registry) flushDrainEventBatch(eventName string) ([]DrainEvent, bool) {
 
 	start := events[0].Sequence
 	end := events[len(events)-1].Sequence
-	if !r.deliverDrainBatch(eventName, events, start, end) {
+	if !r.deliverDrainBatchContext(ctx, eventName, events, start, end) {
 		r.metrics.DrainFlushFailed(r.drainCfg.WebhookURL, len(events))
 		log.Printf("drain: failed to deliver ledger batch (%d events) after retries — not acknowledging, will retry", len(events))
 		return events, false
@@ -219,6 +234,10 @@ func (r *Registry) flushDrainEventBatch(eventName string) ([]DrainEvent, bool) {
 }
 
 func (r *Registry) deliverDrainBatch(eventName string, events []DrainEvent, start, end int64) bool {
+	return r.deliverDrainBatchContext(context.Background(), eventName, events, start, end)
+}
+
+func (r *Registry) deliverDrainBatchContext(ctx context.Context, eventName string, events []DrainEvent, start, end int64) bool {
 	if r.drainCfg.Sink == "valkey" {
 		remote := r.drainRemoteOrNil()
 		if remote == nil {
@@ -236,5 +255,5 @@ func (r *Registry) deliverDrainBatch(eventName string, events []DrainEvent, star
 		"flushed_at":     time.Now().UTC().Format(time.RFC3339),
 		"ledger":         events,
 	}
-	return deliverWebhookSync(r.drainCfg.WebhookURL, payload, r.l8, r.metrics)
+	return deliverWebhookSyncContext(ctx, r.drainCfg.WebhookURL, payload, r.l8, r.metrics)
 }

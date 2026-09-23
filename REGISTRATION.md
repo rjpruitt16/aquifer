@@ -33,6 +33,9 @@ it exists and is reachable.
 ```json
 {
   "port": "8080",
+  "state": "active",
   "reported_at": "2026-09-03T22:00:00Z"
 }
 ```
+
+`state` is `active`, `draining`, or `offline`. Normal heartbeats report `active`. On `SIGTERM`, Aquifer immediately sends `draining` before its quiescence window so the control plane can stop assigning new work, then makes one best-effort `offline` report after accepted work and WebSockets have drained. Receivers should still expire nodes that stop heartbeating because abrupt termination cannot send either transition.

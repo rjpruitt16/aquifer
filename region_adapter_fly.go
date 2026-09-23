@@ -85,7 +85,7 @@ func NewFlyRegionAdapter() *FlyRegionAdapter {
 		done:         make(chan struct{}),
 	}
 	a.healthCheckURL = func(region string) string {
-		return fmt.Sprintf("http://%s.%s.internal:%s/health", region, appName, port)
+		return fmt.Sprintf("http://%s.%s.internal:%s/ready", region, appName, port)
 	}
 
 	// Populate immediately (bounded by flyHealthCheckTimeout since checks

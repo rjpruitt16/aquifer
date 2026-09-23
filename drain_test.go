@@ -390,3 +390,52 @@ func TestFlushDrainEventBatchDeliversAndAcknowledges(t *testing.T) {
 		t.Fatalf("expected idempotency ledger to remain until final idle clear, got %d entries", len(entries))
 	}
 }
+
+func TestFlushDrainEventBatchSerializesConcurrentFlushes(t *testing.T) {
+	var attempts atomic.Int64
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if skipL8Probe(w, req) {
+			return
+		}
+		attempts.Add(1)
+		started <- struct{}{}
+		<-release
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	r := drainTestRegistry(t, NoopMetricsAdapter{})
+	r.drainCfg = DrainConfig{Enabled: true, TimerSeconds: 1, WebhookURL: srv.URL, BatchMaxEvents: 10}
+	seedLedgerEntry(t, r)
+
+	results := make(chan bool, 2)
+	go func() {
+		_, ok := r.flushDrainEventBatch("periodic")
+		results <- ok
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("first flush did not reach webhook")
+	}
+	go func() {
+		_, ok := r.flushDrainEventBatch("shutdown")
+		results <- ok
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	if got := attempts.Load(); got != 1 {
+		t.Fatalf("concurrent flush delivered the same ledger batch %d times", got)
+	}
+	close(release)
+	for range 2 {
+		if !<-results {
+			t.Fatal("expected both serialized flush calls to succeed")
+		}
+	}
+	if got := attempts.Load(); got != 1 {
+		t.Fatalf("expected one delivery after acknowledgement, got %d", got)
+	}
+}

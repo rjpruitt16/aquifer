@@ -1,6 +1,7 @@
 package aquifer
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -88,5 +89,48 @@ func TestRegistrationPingsImmediatelyAndOnInterval(t *testing.T) {
 	}
 	if got := pings.Load(); got < 2 {
 		t.Fatalf("expected at least 2 pings within two intervals, got %d", got)
+	}
+}
+
+func TestRegistrationReportsShutdownLifecycle(t *testing.T) {
+	states := make(chan string, 8)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if skipL8Probe(w, r) {
+			return
+		}
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if state, ok := body["state"].(string); ok {
+			states <- state
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	t.Setenv("AQUIFER_REGISTRY_URL", srv.URL)
+	t.Setenv("AQUIFER_REGISTRY_INTERVAL_SECONDS", "3600")
+	r := drainTestRegistry(t, NoopMetricsAdapter{})
+
+	waitForRegistrationState(t, states, string(LifecycleStateActive))
+	r.BeginDrain()
+	waitForRegistrationState(t, states, string(LifecycleStateDraining))
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	r.ReportOffline(ctx)
+	waitForRegistrationState(t, states, string(LifecycleStateOffline))
+}
+
+func waitForRegistrationState(t *testing.T, states <-chan string, expected string) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case state := <-states:
+			if state == expected {
+				return
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for registration state %q", expected)
+		}
 	}
 }

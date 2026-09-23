@@ -1,6 +1,7 @@
 package aquifer
 
 import (
+	"context"
 	"log"
 	"os"
 	"time"
@@ -71,11 +72,27 @@ func (r *Registry) registrationLoop() {
 }
 
 func (r *Registry) pingRegistry() {
-	payload := map[string]any{
-		"port":        r.registrationCfg.Port,
-		"reported_at": time.Now().UTC().Format(time.RFC3339),
-	}
-	if !deliverWebhookSync(r.registrationCfg.URL, payload, r.l8, r.metrics) {
+	state, _ := r.registrationState.Load().(LifecycleState)
+	payload := r.registrationPayload(state)
+	if !deliverWebhookSyncContext(r.ctx, r.registrationCfg.URL, payload, r.l8, r.metrics) && r.ctx.Err() == nil {
 		log.Printf("registration: failed to report state to %s after retries", r.registrationCfg.URL)
+	}
+}
+
+func (r *Registry) ReportOffline(ctx context.Context) {
+	if r == nil || !r.registrationCfg.Enabled() {
+		return
+	}
+	r.registrationState.Store(LifecycleStateOffline)
+	if !deliverWebhookOnceContext(ctx, r.registrationCfg.URL, r.registrationPayload(LifecycleStateOffline), r.l8, r.metrics) {
+		log.Printf("registration: failed to report offline state to %s", r.registrationCfg.URL)
+	}
+}
+
+func (r *Registry) registrationPayload(state LifecycleState) map[string]any {
+	return map[string]any{
+		"port":        r.registrationCfg.Port,
+		"state":       state,
+		"reported_at": time.Now().UTC().Format(time.RFC3339),
 	}
 }

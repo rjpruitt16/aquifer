@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/rjpruitt16/aquifer"
 	"github.com/rjpruitt16/aquifer/a2aadapter"
@@ -58,7 +60,10 @@ func main() {
 		log.Printf("Aquifer %s running %s (db: %s)", version, adapter.Name(), dbPath)
 	}
 
-	if err := aquifer.RunAdapter(context.Background(), adapter, aquifer.RuntimeOptions{
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := aquifer.RunAdapter(ctx, adapter, aquifer.RuntimeOptions{
 		DBPath:     dbPath,
 		ConfigPath: os.Getenv("CONFIG_PATH"),
 		L8KeyPath:  l8KeyPath,

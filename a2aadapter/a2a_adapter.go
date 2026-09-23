@@ -86,7 +86,7 @@ func (a *Adapter) Start(ctx context.Context, aq *aquifer.Aquifer) error {
 
 	go func() {
 		<-ctx.Done()
-		server.Shutdown(context.Background())
+		aquifer.ShutdownHTTPServer(server)
 	}()
 
 	err := server.ListenAndServe()
@@ -100,7 +100,7 @@ func agentCard(publicURL string, capabilities a2a.AgentCapabilities) *a2a.AgentC
 	return &a2a.AgentCard{
 		Name:        "Aquifer",
 		Description: "Durable, rate-controlled HTTP dispatch queue, reachable over A2A.",
-		Version:     "0.1.0",
+		Version:     aquifer.Version,
 		Provider: &a2a.AgentProvider{
 			Org: "rjpruitt16",
 			URL: "https://github.com/rjpruitt16/aquifer",

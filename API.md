@@ -137,6 +137,7 @@ Aquifer also sends non-durable control messages:
 {"type":"status","state":"connecting"}
 {"type":"status","state":"connected","generation":7}
 {"type":"status","state":"reconnecting","retry_after_ms":914,"reason":"..."}
+{"type":"status","state":"server_draining","retry_after_ms":5000,"reason":"reconnect through the gateway"}
 ```
 
 While a session waits, Aquifer emits another `waiting` status whenever its FIFO position changes (for example, `2` then `1`). These progress messages are live control state and are not appended to the durable transcript.
@@ -145,7 +146,7 @@ On upstream loss, Aquifer keeps the client connection open and reconnects with j
 
 Each session transcript retains approximately the newest `AQUIFER_WS_STREAM_MAX_EVENTS` entries and expires `AQUIFER_WS_STREAM_TTL_SECONDS` after its last recorded entry. Every append refreshes that TTL. Expired history is treated as a replay gap when a client supplies a nonzero cursor, so deletion cannot silently skip events.
 
-Two clients may temporarily attach to the same `session_id` during an application-managed handoff; both follow the same durable backend event stream, and the client decides when to close the old socket. Process termination currently closes active sessions, so clients must reconnect through the gateway; [graceful SIGTERM quiescing and handoff](https://github.com/rjpruitt16/aquifer/issues/15) is intentionally a follow-up rather than an implicit redirect inside Aquifer.
+Two clients may temporarily attach to the same `session_id` during an application-managed handoff; both follow the same durable backend event stream, and the client decides when to close the old socket. On `SIGTERM`, Aquifer sends `server_draining`, leaves the old socket open for `AQUIFER_WS_DRAIN_GRACE_SECONDS`, then closes it with WebSocket code **1012 Service Restart**. The client should open its replacement through the gateway using its last processed stream cursor. New handshakes receive **503** while the node drains.
 
 ### Capacity
 
@@ -160,7 +161,7 @@ X-Aqueduct-WS-Connect-Rps: 20
 
 It can update either value on an established socket with `{"type":"aqueduct.capacity","max_connections":250,"connect_rps":20}`. Dynamic signals can only lower operator-configured ceilings, never raise them. `Retry-After` on a rejected upstream handshake becomes the minimum reconnect delay.
 
-Opening starts at `AQUIFER_WS_SLOW_START_RPS` for each Aquifer process. Every successful upstream handshake doubles the current ramp rate until `AQUIFER_WS_CONNECT_RPS` is reached; a failed handshake or lost upstream resets the ramp. Backend capacity signals can still lower the effective rate at any point.
+Opening starts at `AQUIFER_WS_SLOW_START_RPS` for each Aquifer process. Every successful upstream handshake doubles the current ramp rate until `AQUIFER_WS_CONNECT_RPS` is reached; a failed handshake resets the ramp. An established socket disconnecting does not penalize unrelated connections by resetting the process-wide ramp. Backend capacity signals can still lower the effective rate at any point. Set `AQUIFER_WS_SLOW_START_RPS` equal to `AQUIFER_WS_CONNECT_RPS` to disable ramping.
 
 | Env var | Default | Description |
 |---|---:|---|
@@ -179,8 +180,9 @@ Opening starts at `AQUIFER_WS_SLOW_START_RPS` for each Aquifer process. Every su
 | `AQUIFER_WS_MAX_WAITING_CONNECTIONS` | `1000` | Local queue ceiling for sessions waiting on an upstream slot |
 | `AQUIFER_WS_CONNECT_RPS` | `20` | Maximum upstream connection openings per second on this instance |
 | `AQUIFER_WS_SLOW_START_RPS` | `1` | Initial and post-failure connection-opening rate before successful handshakes ramp it up |
+| `AQUIFER_WS_DRAIN_GRACE_SECONDS` | `5` | Handoff window between `server_draining` and close code 1012 on `SIGTERM`; `0` closes immediately |
 
-Handshake errors are returned before upgrade: **400** for invalid protocol/session/upstream input, **409** for a replay gap, **429** for a local connection or waiting ceiling, and **503** when Valkey is unavailable. `GET /health` exposes this instance's client, waiting, active-upstream, configured, ramp, and effective limits under `websocket`.
+Handshake errors are returned before upgrade: **400** for invalid protocol/session/upstream input, **409** for a replay gap, **429** for a local connection or waiting ceiling, and **503** when Valkey is unavailable or the node is draining. `GET /health` exposes this instance's client, waiting, active-upstream, configured, ramp, and effective limits under `websocket`.
 
 Measure a deployment with a controlled upstream before raising the defaults:
 
@@ -289,6 +291,32 @@ curl -N http://localhost:8080/jobs/<id>/stream
 
 `admission.enabled` is `false` (with only that key present) when none of the
 `AQUIFER_*` admission env vars are set.
+
+`GET /health` is a liveness endpoint. It remains **200** during graceful shutdown, with `status: "draining"`, so an orchestrator does not kill the process before accepted work has a chance to finish.
+
+## GET /ready
+
+Readiness for load balancers and fleet discovery. An active node returns **200** with `{"status":"ready"}`. A draining node returns **503**, `Retry-After`, and both `X-Aqueduct-Node-State: draining` and the compatibility alias `X-Aquifer-Node-State: draining`.
+
+Use `/ready`, not `/health`, for routing decisions. Fly region discovery uses `/ready`; cluster forwarding also soft-prunes a ranked owner when it returns the draining signal and tries the next owner.
+
+## Graceful shutdown
+
+The built-in HTTP, MCP stdio, and A2A adapters handle `SIGINT`/`SIGTERM` through the same bounded lifecycle:
+
+1. Mark the node draining, fail `/ready`, reject new jobs, proxy work, and WebSocket handshakes with **503**, and announce `state: "draining"` when external registration is enabled.
+2. Keep the listener available for a short quiescence window so gateways and peers can observe the transition, then stop accepting connections.
+3. Let already-accepted jobs and their completion webhooks finish. Notify active WebSockets, allow their handoff grace period, then close them with code 1012.
+4. Flush the drain-event ledger once more. Events are acknowledged locally only after the configured sink confirms receipt, and periodic/final flushes are serialized to prevent duplicate concurrent batches.
+5. Report `state: "offline"` to the external registry and exit. When the total deadline expires, Aquifer closes with durable queued work left for normal startup recovery.
+
+| Env var | Default | Description |
+|---|---:|---|
+| `AQUIFER_SHUTDOWN_TIMEOUT_SECONDS` | `30` | Total graceful-drain deadline; must be positive |
+| `AQUIFER_SHUTDOWN_QUIESCE_MS` | `500` | Time to expose draining readiness before stopping the listener; `0` disables the delay |
+| `AQUIFER_WS_DRAIN_GRACE_SECONDS` | `5` | WebSocket replacement window, capped at the shutdown timeout |
+
+The process termination grace configured by your orchestrator must exceed `AQUIFER_SHUTDOWN_TIMEOUT_SECONDS`; otherwise the orchestrator may send `SIGKILL` before Aquifer can finish or preserve the intended shutdown sequence.
 
 ## Webhooks
 

@@ -30,47 +30,64 @@ func (a *MCPStdioAdapter) Start(ctx context.Context, aquifer *Aquifer) error {
 	scanner.Buffer(make([]byte, 1024), 1024*1024*16)
 	encoder := json.NewEncoder(a.out)
 
-	for scanner.Scan() {
+	lines := make(chan []byte)
+	scanDone := make(chan error, 1)
+	go func() {
+		defer close(lines)
+		for scanner.Scan() {
+			line := append([]byte(nil), scanner.Bytes()...)
+			select {
+			case lines <- line:
+			case <-ctx.Done():
+				scanDone <- nil
+				return
+			}
+		}
+		scanDone <- scanner.Err()
+	}()
+
+	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		default:
-		}
-
-		var req mcpRequest
-		if err := json.Unmarshal(scanner.Bytes(), &req); err != nil {
-			writeMCPError(encoder, nil, -32700, "parse error")
-			continue
-		}
-
-		if req.JSONRPC != "2.0" {
-			writeMCPError(encoder, req.ID, -32600, "invalid request")
-			continue
-		}
-
-		if req.ID == nil {
-			continue
-		}
-
-		result, err := handleMCPRequest(aquifer, req)
-		if err != nil {
-			var rpcErr *mcpRPCError
-			if errors.As(err, &rpcErr) {
-				writeMCPError(encoder, req.ID, rpcErr.Code, rpcErr.Message)
-			} else {
-				writeMCPError(encoder, req.ID, -32603, err.Error())
+		case line, ok := <-lines:
+			if !ok {
+				return <-scanDone
 			}
-			continue
+
+			var req mcpRequest
+			if err := json.Unmarshal(line, &req); err != nil {
+				writeMCPError(encoder, nil, -32700, "parse error")
+				continue
+			}
+
+			if req.JSONRPC != "2.0" {
+				writeMCPError(encoder, req.ID, -32600, "invalid request")
+				continue
+			}
+
+			if req.ID == nil {
+				continue
+			}
+
+			result, err := handleMCPRequest(aquifer, req)
+			if err != nil {
+				var rpcErr *mcpRPCError
+				if errors.As(err, &rpcErr) {
+					writeMCPError(encoder, req.ID, rpcErr.Code, rpcErr.Message)
+				} else {
+					writeMCPError(encoder, req.ID, -32603, err.Error())
+				}
+				continue
+			}
+
+			encoder.Encode(mcpResponse{
+				JSONRPC: "2.0",
+				ID:      req.ID,
+				Result:  result,
+			})
 		}
-
-		encoder.Encode(mcpResponse{
-			JSONRPC: "2.0",
-			ID:      req.ID,
-			Result:  result,
-		})
 	}
-
-	return scanner.Err()
 }
 
 type mcpRequest struct {
@@ -123,7 +140,7 @@ func handleMCPRequest(aquifer *Aquifer, req mcpRequest) (any, error) {
 			},
 			"serverInfo": map[string]any{
 				"name":    "aquifer",
-				"version": "0.1.0",
+				"version": Version,
 			},
 		}, nil
 	case "ping":

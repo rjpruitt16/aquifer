@@ -177,6 +177,55 @@ func TestClusterJobsForwardToOwnerBeforeLocalPersistence(t *testing.T) {
 	}
 }
 
+func TestClusterSkipsAndPrunesDrainingOwner(t *testing.T) {
+	ownerApp, ownerStore := testClusterAquifer(t)
+	owner := ClusterMember{ID: "owner", Address: "http://owner.invalid"}
+	peer := ClusterMember{ID: "peer", Address: "http://peer.invalid"}
+	router := testClusterRouter(peer, owner, peer)
+	userID := keyRankedBy(t, router, owner.ID, peer.ID)
+
+	ownerApp.BeginDrain(0)
+	ownerHTTP := httptest.NewServer(NewServer(ownerApp).Routes())
+	t.Cleanup(ownerHTTP.Close)
+	owner.Address = ownerHTTP.URL
+	router = testClusterRouter(peer, owner, peer)
+
+	peerApp, peerStore := testClusterAquifer(t)
+	peerApp.SetClusterRouter(router)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(webhook.Close)
+
+	body, _ := json.Marshal(JobRequest{
+		UserID:        userID,
+		IdempotentKey: "draining-owner-key",
+		URL:           upstream.URL,
+		Method:        http.MethodPost,
+		WebhookURL:    webhook.URL,
+	})
+	rec := httptest.NewRecorder()
+	NewServer(peerApp).Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/jobs", bytes.NewReader(body)))
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected next owner to accept locally, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if ownerStore.Counts().TotalJobs != 0 {
+		t.Fatalf("draining owner must not persist new work, got %+v", ownerStore.Counts())
+	}
+	var result EnqueueResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil || peerStore.GetJob(result.JobID) == nil {
+		t.Fatalf("expected peer to persist the rerouted job, response=%s err=%v", rec.Body.String(), err)
+	}
+	if router.prunedCount() != 1 {
+		t.Fatalf("expected draining owner to be soft-pruned, got %d", router.prunedCount())
+	}
+}
+
 func TestClusterJobsPruneFailedOwnerAndForwardToNextRankedPeer(t *testing.T) {
 	fallbackApp, fallbackStore := testClusterAquifer(t)
 	fallbackHTTP := httptest.NewServer(NewServer(fallbackApp).Routes())
