@@ -186,6 +186,8 @@ Aquifer has a framework-neutral core — idempotency, persistence, rate control,
 
 The upstream controls pace at runtime via response headers — `X-Aqueduct-Rps`, `X-Aqueduct-Max-Concurrent`, and per-tenant queue isolation — and Aquifer honors a lower pace immediately, recovering gradually once pressure clears. For backends that can't speak Aqueduct directly, Aquifer also reads the real open [ORCA](https://github.com/cncf/xds/blob/main/xds/data/orca/v3/orca_load_report.proto) standard as a fallback signal — vLLM and Triton/TensorRT-LLM both work today, verified against their actual source.
 
+![Traditional circuit breaking rejecting requests outright, forcing clients to retry independently into a thundering herd on reopen, versus Aqueduct's per-client queues pacing release via X-Aqueduct-Rps until the backend catches up](docs/images/circuit-breaking-vs-queue.gif)
+
 <details>
 <summary>Full pacing reference — header table, account-queue isolation, ORCA details</summary>
 
