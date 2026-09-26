@@ -17,6 +17,7 @@ type Registry struct {
 	l8                *L8Registry
 	metrics           MetricsAdapter
 	pools             *PoolRegistry
+	clusterRouter     *ClusterRouter
 	drainRemote       RemoteIdempotency
 	resultRecorder    JobResultRecorder
 	totalJobs         atomic.Int64
@@ -33,6 +34,15 @@ type Registry struct {
 	cancel            context.CancelFunc
 	stop              chan struct{}
 	wg                sync.WaitGroup
+}
+
+func (r *Registry) SetClusterRouter(router *ClusterRouter) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.clusterRouter = router
+	r.mu.Unlock()
 }
 
 // NewRegistry reads drain mode's config from AQUIFER_DRAIN_* env vars
@@ -285,10 +295,16 @@ func (r *Registry) Enqueue(job *Job, accountQueueHeader string) {
 			w.handleAccountQueueHeader(accountQueueHeader)
 		}
 
+		if r.clusterRouter != nil {
+			r.clusterRouter.TrackLocalJob(job.UserID)
+		}
 		if w.Enqueue(job) {
 			r.metrics.JobQueued(job.UserID, key)
 			r.metrics.QueueDepth(key, int(r.queueDepth.Load()))
 			return
+		}
+		if r.clusterRouter != nil {
+			r.clusterRouter.CompleteLocalJob(job.UserID)
 		}
 
 		// The worker can self-stop after its last AccountQueue idles out.
@@ -333,7 +349,11 @@ func (r *Registry) resolveWorkerLocked(job *Job) (string, *URLWorker) {
 
 	w, ok := r.workers[key]
 	if !ok {
-		w = NewURLWorker(key, rc.RPS, rc.MaxConcurrent, pool, r.store, r.broker, r.l8, r.metrics, r.EnqueueWebhook, r.resultRecorder, func(k string, idleWorker *URLWorker) {
+		w = NewURLWorker(key, rc.RPS, rc.MaxConcurrent, pool, r.store, r.broker, r.l8, r.metrics, r.EnqueueWebhook, r.resultRecorder, func(userID string) {
+			if r.clusterRouter != nil {
+				r.clusterRouter.CompleteLocalJob(userID)
+			}
+		}, func(k string, idleWorker *URLWorker) {
 			r.mu.Lock()
 			if current := r.workers[k]; current == idleWorker {
 				delete(r.workers, k)

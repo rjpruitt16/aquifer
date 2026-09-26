@@ -128,6 +128,25 @@ func TestClusterRouterSoftPrunesMember(t *testing.T) {
 	}
 }
 
+func TestClusterRoutingPreservesRequestValidation(t *testing.T) {
+	app, _ := testClusterAquifer(t)
+	self := ClusterMember{ID: "node-a", Address: "http://node-a"}
+	app.SetClusterRouter(testClusterRouter(self, self))
+	body, _ := json.Marshal(JobRequest{
+		IdempotentKey: "missing-user",
+		URL:           "https://example.com/task",
+		Method:        http.MethodPost,
+		WebhookURL:    "https://example.com/webhook",
+	})
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/jobs", bytes.NewReader(body))
+	NewServer(app).Routes().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected validation 400, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestClusterJobsForwardToOwnerBeforeLocalPersistence(t *testing.T) {
 	ownerApp, ownerStore := testClusterAquifer(t)
 	ownerHTTP := httptest.NewServer(NewServer(ownerApp).Routes())

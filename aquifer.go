@@ -67,6 +67,9 @@ func (a *Aquifer) Close() {
 	}
 	if a.registry != nil {
 		a.registry.Close()
+		if a.clusterRouter != nil {
+			a.clusterRouter.Close()
+		}
 		return
 	}
 	if a.pools != nil {
@@ -77,6 +80,9 @@ func (a *Aquifer) Close() {
 	}
 	if a.store != nil {
 		a.store.Close()
+	}
+	if a.clusterRouter != nil {
+		a.clusterRouter.Close()
 	}
 }
 
@@ -91,6 +97,9 @@ func (a *Aquifer) SetRegionAdapter(adapter RegionAdapter) {
 
 func (a *Aquifer) SetClusterRouter(router *ClusterRouter) {
 	a.clusterRouter = router
+	if a.registry != nil {
+		a.registry.SetClusterRouter(router)
+	}
 }
 
 func (a *Aquifer) SetRemoteIdempotency(remote RemoteIdempotency) {

@@ -22,34 +22,62 @@ Idempotent — duplicate `idempotent_key` per `user_id` returns the existing job
 
 **201** new job queued · **200 + `"duplicate": true`** already exists
 
-## Static cluster routing
+## Regional cluster routing
 
-Static cluster routing is optional HTTP-level partitioning for `POST /jobs` and `POST /proxy`. When enabled, every node builds the same rendezvous-hash ranking by `user_id`: if the receiving node is the highest-ranked healthy owner, it handles the request locally; otherwise it forwards to the highest-ranked peer and relays that peer's response back to the caller. Callers can hit any node; they do not need to know the topology.
+Cluster routing is optional HTTP-level partitioning for `POST /jobs` and `POST /proxy`. Callers may hit any Aquifer instance; the receiving node resolves an owner by `user_id`, forwards when necessary, and returns `X-Aquifer-Cluster-Owner` with the instance that handled the request. This changes where a user is processed, not how local account queues are grouped: `X-Aqueduct-Account-Queue` still controls whether a URL worker isolates `(user_id, api_key)` queues locally.
 
-If a peer cannot be reached during forwarding, Aquifer temporarily soft-prunes that member from this node's local routing view and tries the next ranked candidate. This is not gossip or consensus: the configured member list remains the source of truth, and the failed peer rejoins this node's routing view automatically when the prune TTL expires.
+Two providers are available:
+
+- `static` (default) builds a deterministic rendezvous ranking from `AQUIFER_CLUSTER_MEMBERS`. An unreachable peer is soft-pruned from that instance's local view and retried after the prune TTL. There is no shared assignment state.
+- `valkey` makes Aquifer instances heartbeat directly into a regional Valkey and atomically claims user assignments there. No separate control plane is required. Existing assignments stay sticky while their owner is active. For a new user, Aquifer walks the rendezvous ranking and chooses the first node below its active-user capacity. If every active node is full, it chooses the least-loaded node by `active_users / capacity` instead of rejecting work.
+
+`AQUIFER_CLUSTER_MAX_ACTIVE_USERS` is therefore a soft placement target, not an admission-control ceiling. An active user is a distinct `user_id` with outstanding local work or a recently used assignment. Once its work reaches zero and it remains idle for `AQUIFER_CLUSTER_ASSIGNMENT_IDLE_SECONDS`, the owner releases it so that capacity becomes available again.
 
 Configuration:
 
 | Env var | Default | Description |
 |---|---|---|
 | `AQUIFER_CLUSTER_ENABLED` | `false` | Enables HTTP cluster routing |
+| `AQUIFER_CLUSTER_PROVIDER` | `static` | `static` or `valkey` |
 | `AQUIFER_CLUSTER_SELF_ID` | _(required when enabled)_ | Stable id for this node |
 | `AQUIFER_CLUSTER_SELF_ADDR` | _(required when enabled)_ | Base HTTP URL other nodes use to reach this node |
-| `AQUIFER_CLUSTER_MEMBERS` | _(none)_ | Comma-separated `id=http://host:port` entries for the other known nodes; `SELF` is added automatically if omitted |
+| `AQUIFER_CLUSTER_MEMBERS` | _(none)_ | Comma-separated `id=http://host:port` bootstrap/static members; self is added automatically |
 | `AQUIFER_CLUSTER_PRUNE_TTL_SECONDS` | `30` | How long this node excludes an unreachable peer before trying it again |
+| `AQUIFER_CLUSTER_VALKEY_URL` | `AQUIFER_VALKEY_URL` | Shared regional `redis://`, `rediss://`, `valkey://`, or `valkeys://` endpoint |
+| `AQUIFER_CLUSTER_VALKEY_PREFIX` | `aqueduct:` | Generic membership and assignment key prefix |
+| `AQUIFER_CLUSTER_MAX_ACTIVE_USERS` | `100` | Soft active-user placement capacity advertised by this instance |
+| `AQUIFER_CLUSTER_HEARTBEAT_SECONDS` | `5` | Membership refresh and assignment-renew interval |
+| `AQUIFER_CLUSTER_INSTANCE_TTL_SECONDS` | `15` | Time without a heartbeat before an instance is no longer assignable; forced to at least three heartbeat intervals |
+| `AQUIFER_CLUSTER_ASSIGNMENT_IDLE_SECONDS` | `300` | Completed user's idle window before its assignment is released |
+| `AQUIFER_CLUSTER_VALKEY_TIMEOUT_MS` | `50` | Per-operation coordination budget before local fallback |
 
 Example:
 
 ```bash
 AQUIFER_CLUSTER_ENABLED=true
+AQUIFER_CLUSTER_PROVIDER=valkey
 AQUIFER_CLUSTER_SELF_ID=aquifer-a
 AQUIFER_CLUSTER_SELF_ADDR=http://aquifer-a:8080
-AQUIFER_CLUSTER_MEMBERS=aquifer-b=http://aquifer-b:8080,aquifer-c=http://aquifer-c:8080
+AQUIFER_CLUSTER_VALKEY_URL=valkey://valkey.internal:6379
+AQUIFER_CLUSTER_MAX_ACTIVE_USERS=500
 ```
 
-This is not a distributed database or a Redis Cluster clone. Aquifer still stores idempotency and account-queue state locally. Rendezvous ranking reduces tenant fragmentation during normal routing, but membership changes or soft pruning can move a `user_id` to a node that does not have that user's previous idempotency records. During that window, duplicate execution is possible unless a shared control plane such as Canalis or Valkey remote idempotency owns cross-node idempotency.
+The Valkey provider uses these generic keys:
 
-Membership changes can also temporarily create duplicate account queues for the same upstream URL on different nodes: old work may still be draining on the previous owner while new work hashes to the new owner. That is expected during rebalance/reconfiguration and should be short-lived under normal TTL/drain cleanup. If that tradeoff is unacceptable, keep membership stable or put a shared assignment/control plane in front.
+```text
+aqueduct:instances
+aqueduct:instance:<instance_id>
+aqueduct:instance:<instance_id>:assignments
+aqueduct:assignment:<sha256(user_id)>
+```
+
+Assignment and capacity selection happen in one Valkey Lua transaction using Valkey's clock, so concurrent healthy nodes converge on the first successful claim immediately rather than waiting for gossip. Heartbeats refresh membership; a graceful drain advertises `draining` before shutdown, and a crashed node becomes ineligible when its instance TTL expires. This mode is intended for Aquifer and Valkey instances in one region. The current multi-key transaction expects one Valkey primary/endpoint, not a sharded Redis Cluster keyspace.
+
+If Valkey exceeds the operation timeout or is unavailable, Aquifer keeps serving through its cached deterministic rendezvous view. That availability choice means two nodes with temporarily different views can both accept the same user. Healthy coordination converges again on the next successful assignment operation; dead-node membership normally converges within the instance TTL. Use the separate [Valkey remote-idempotency](#remote-idempotency) feature when duplicate execution across such a partition is unacceptable.
+
+This is not a distributed database. Job idempotency, queue contents, and pacing state remain local. A reassignment can therefore move a `user_id` to a node that does not have the previous owner's local history.
+
+Membership changes can also temporarily create duplicate account queues for the same upstream URL on different nodes: old work may still be draining on the previous owner while new work moves to the new owner. That is expected during rebalance or a coordination outage and should be short-lived under normal TTL/drain cleanup. This availability-first mode does not provide a strict single-owner option.
 
 ## POST /proxy
 

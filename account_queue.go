@@ -51,6 +51,7 @@ func sleepWhilePoolEmpty(d time.Duration) {
 }
 
 type jobDoneMsg struct {
+	userID        string
 	rps           *float64
 	maxConcurrent *int
 	accountQueue  *string
@@ -77,6 +78,7 @@ type AccountQueue struct {
 	metrics        MetricsAdapter
 	enqueueWebhook webhookEnqueuer
 	resultRecorder JobResultRecorder
+	onJobDone      func(string)
 	currentRPS     atomic.Int64 // stored as rps * 100
 	backlog        atomic.Int32 // len(queue) + inFlight, live — see run()
 	stop           chan struct{}
@@ -115,7 +117,7 @@ func (q *AccountQueue) Throttle(rps float64) {
 	}
 }
 
-func NewAccountQueue(key, upstream string, rps float64, maxConc int, pool *Pool, store JobStore, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, enqueueWebhook webhookEnqueuer, resultRecorder JobResultRecorder, onIdle func(string), slowStart bool, onSlowStartSignal func(bool)) *AccountQueue {
+func NewAccountQueue(key, upstream string, rps float64, maxConc int, pool *Pool, store JobStore, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, enqueueWebhook webhookEnqueuer, resultRecorder JobResultRecorder, onJobDone func(string), onIdle func(string), slowStart bool, onSlowStartSignal func(bool)) *AccountQueue {
 	q := &AccountQueue{
 		key:            key,
 		upstream:       upstream,
@@ -128,6 +130,7 @@ func NewAccountQueue(key, upstream string, rps float64, maxConc int, pool *Pool,
 		metrics:        ensureMetrics(metrics),
 		enqueueWebhook: enqueueWebhook,
 		resultRecorder: resultRecorder,
+		onJobDone:      onJobDone,
 		stop:           make(chan struct{}),
 		stopped:        make(chan struct{}),
 	}
@@ -294,12 +297,13 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 							})
 						}
 						select {
-						case q.done <- jobDoneMsg{}:
+						case q.done <- jobDoneMsg{userID: j.UserID}:
 						case <-q.stop:
 						}
 					}
 				}()
 				msg := execute(q.ctx, j, url, q.upstream, q.store, q.broker, q.l8, q.metrics, q.pool, m, flowRate, q.enqueueWebhook, q.resultRecorder)
+				msg.userID = j.UserID
 				select {
 				case q.done <- msg:
 				case <-q.stop:
@@ -316,6 +320,9 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 
 		case msg := <-q.done:
 			inFlight--
+			if q.onJobDone != nil && msg.userID != "" {
+				q.onJobDone(msg.userID)
+			}
 			q.backlog.Store(int32(len(queue) + inFlight))
 			prevRPS := rps
 			if msg.rps != nil {

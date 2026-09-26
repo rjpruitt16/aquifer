@@ -150,7 +150,7 @@ func TestSlowStartBeginsAtMinRPS(t *testing.T) {
 	})
 
 	const configuredRPS = 100.0
-	q := NewAccountQueue("tenant-1", "https://example.com", configuredRPS, 5, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, map[string]any) {}, nil, func(string) {}, true, func(bool) {})
+	q := NewAccountQueue("tenant-1", "https://example.com", configuredRPS, 5, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, map[string]any) {}, nil, nil, func(string) {}, true, func(bool) {})
 	t.Cleanup(q.Stop)
 
 	deadline := time.Now().Add(time.Second)
@@ -180,7 +180,7 @@ func TestSlowStartOffByDefaultStartsAtConfiguredRPS(t *testing.T) {
 	})
 
 	const configuredRPS = 12.0
-	q := NewAccountQueue("tenant-1", "https://example.com", configuredRPS, 5, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, map[string]any) {}, nil, func(string) {}, false, func(bool) {})
+	q := NewAccountQueue("tenant-1", "https://example.com", configuredRPS, 5, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, map[string]any) {}, nil, nil, func(string) {}, false, func(bool) {})
 	t.Cleanup(q.Stop)
 
 	deadline := time.Now().Add(time.Second)

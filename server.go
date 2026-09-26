@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -15,6 +16,13 @@ import (
 type Server struct {
 	aquifer *Aquifer
 }
+
+var clusterForwardClient = func() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext
+	transport.ResponseHeaderTimeout = 10 * time.Second
+	return &http.Client{Transport: transport}
+}()
 
 func NewServer(aquifer *Aquifer) *Server {
 	return &Server{aquifer: aquifer}
@@ -132,6 +140,8 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 	if s.forwardClusterRequest(w, r, "/jobs", req) {
 		return
 	}
+	finishClusterRequest := s.trackLocalClusterRequest(w, req)
+	defer finishClusterRequest()
 
 	result, err := s.aquifer.Enqueue(req)
 	if err != nil {
@@ -349,6 +359,8 @@ func (s *Server) proxyJob(w http.ResponseWriter, r *http.Request) {
 	if s.forwardClusterRequest(w, r, "/proxy", req) {
 		return
 	}
+	finishClusterRequest := s.trackLocalClusterRequest(w, req)
+	defer finishClusterRequest()
 
 	outcome := s.aquifer.AttemptDirect(r.Context(), req, proxyDirectAttemptTimeout())
 
@@ -536,10 +548,11 @@ func (s *Server) forwardClusterRequest(w http.ResponseWriter, r *http.Request, p
 	}
 
 	key := clusterRoutingKey(req)
-	owners := s.aquifer.clusterRouter.RankedOwners(key)
-	if len(owners) == 0 {
+	knownOwners := len(s.aquifer.clusterRouter.RankedOwners(key))
+	if knownOwners == 0 {
 		return false
 	}
+	maxAttempts := knownOwners + 1
 
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -547,15 +560,23 @@ func (s *Server) forwardClusterRequest(w http.ResponseWriter, r *http.Request, p
 		return true
 	}
 
+	triedSet := make(map[string]bool, maxAttempts)
 	var tried []string
-	for _, owner := range owners {
+	for len(tried) < maxAttempts {
+		owner, ok := s.aquifer.clusterRouter.ResolveOwner(key, triedSet)
+		if !ok {
+			break
+		}
 		if owner.ID == s.aquifer.clusterRouter.self.ID {
 			if s.aquifer.IsDraining() {
+				triedSet[owner.ID] = true
 				tried = append(tried, owner.ID)
+				s.aquifer.clusterRouter.MarkUnavailable(key, owner.ID)
 				continue
 			}
 			return false
 		}
+		triedSet[owner.ID] = true
 		tried = append(tried, owner.ID)
 
 		target := strings.TrimRight(owner.Address, "/") + path
@@ -570,14 +591,16 @@ func (s *Server) forwardClusterRequest(w http.ResponseWriter, r *http.Request, p
 			setLoadHeader(outbound.Header, "Account-Queue", accountQueue)
 		}
 
-		resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(outbound)
+		// Bound connection and response-header setup, but not the response body:
+		// /proxy may legitimately relay a paced SSE stream for much longer.
+		resp, err := clusterForwardClient.Do(outbound)
 		if err != nil {
-			s.aquifer.clusterRouter.PruneMember(owner.ID)
+			s.aquifer.clusterRouter.MarkUnavailable(key, owner.ID)
 			continue
 		}
 		if resp.StatusCode == http.StatusServiceUnavailable && pacingHeader(resp.Header, "Node-State") == "draining" {
 			resp.Body.Close()
-			s.aquifer.clusterRouter.PruneMember(owner.ID)
+			s.aquifer.clusterRouter.MarkUnavailable(key, owner.ID)
 			continue
 		}
 		defer resp.Body.Close()
@@ -615,6 +638,17 @@ func (s *Server) forwardClusterRequest(w http.ResponseWriter, r *http.Request, p
 		"tried_owner_ids": tried,
 	})
 	return true
+}
+
+func (s *Server) trackLocalClusterRequest(w http.ResponseWriter, req JobRequest) func() {
+	if s.aquifer == nil || s.aquifer.clusterRouter == nil || req.UserID == "" {
+		return func() {}
+	}
+	w.Header().Set("X-Aquifer-Cluster-Owner", s.aquifer.clusterRouter.self.ID)
+	s.aquifer.clusterRouter.TrackLocalJob(clusterRoutingKey(req))
+	return func() {
+		s.aquifer.clusterRouter.CompleteLocalJob(clusterRoutingKey(req))
+	}
 }
 
 func jsonError(w http.ResponseWriter, msg string, code int) {
