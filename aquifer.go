@@ -10,10 +10,11 @@ var ErrJobNotFound = errors.New("job not found")
 var ErrJobResultNotFound = errors.New("job result not found")
 
 type EnqueueResult struct {
-	JobID     string `json:"job_id"`
-	Status    Status `json:"status"`
-	Duplicate bool   `json:"duplicate,omitempty"`
-	ResultKey string `json:"result_key,omitempty"`
+	JobID     string        `json:"job_id"`
+	Status    Status        `json:"status"`
+	Duplicate bool          `json:"duplicate,omitempty"`
+	ResultKey string        `json:"result_key,omitempty"`
+	Queue     QueueSnapshot `json:"-"`
 }
 
 type Aquifer struct {
@@ -144,8 +145,11 @@ func (a *Aquifer) Enqueue(req JobRequest) (EnqueueResult, error) {
 		return *duplicate, nil
 	}
 
-	a.Dispatch(job, req.AccountQueueMode)
-	return EnqueueResult{JobID: job.ID, Status: StatusQueued}, nil
+	queue, err := a.Dispatch(job, req.AccountQueueMode)
+	if err != nil {
+		return EnqueueResult{}, err
+	}
+	return EnqueueResult{JobID: job.ID, Status: StatusQueued, Queue: queue}, nil
 }
 
 // PrepareJob validates, persists (idempotency-checked), and admission-checks
@@ -203,8 +207,13 @@ func (a *Aquifer) PrepareJob(req JobRequest) (job *Job, duplicate *EnqueueResult
 // Dispatch hands an already-persisted, admission-approved job to the
 // durable paced queue — Enqueue's last step, exposed for a caller (proxy
 // mode) that already ran PrepareJob itself.
-func (a *Aquifer) Dispatch(job *Job, accountQueueHeader string) {
-	a.registry.Enqueue(job, accountQueueHeader)
+func (a *Aquifer) Dispatch(job *Job, accountQueueHeader string) (QueueSnapshot, error) {
+	snapshot, err := a.registry.AdmitAndEnqueue(job, accountQueueHeader)
+	if err != nil {
+		a.store.DeleteJob(job.ID)
+		return snapshot, err
+	}
+	return snapshot, nil
 }
 
 // AdmissionSnapshot reports current admission pressure for /health. Returns
@@ -278,6 +287,7 @@ func (a *Aquifer) Health() map[string]any {
 		"l8_protocol":   "0.1",
 		"l8_public_key": a.l8.PubB64,
 		"admission":     a.AdmissionSnapshot(),
+		"queues":        a.registry.QueueSnapshot(),
 	}
 	if a.pools != nil {
 		h["pools"] = a.pools.Snapshot()

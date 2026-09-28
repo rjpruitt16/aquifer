@@ -151,6 +151,9 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		}
 		var admissionErr *AdmissionRejectedError
 		if errors.As(err, &admissionErr) {
+			if admissionErr.Decision.Queue != nil {
+				setQueueHeaders(w.Header(), *admissionErr.Decision.Queue)
+			}
 			w.Header().Set("Retry-After", fmt.Sprintf("%d", s.aquifer.RetryAfterSeconds()))
 			jsonErrorFields(w, err.Error(), http.StatusTooManyRequests, map[string]any{
 				"limit_reason": admissionErr.Decision.Reason,
@@ -163,6 +166,9 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !result.Duplicate {
+		setQueueHeaders(w.Header(), result.Queue)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	if result.Duplicate {
 		w.WriteHeader(http.StatusOK)
@@ -182,11 +188,12 @@ func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
-		"job_id":     job.ID,
-		"status":     job.Status,
-		"url":        job.URL,
-		"method":     job.Method,
-		"created_at": job.CreatedAt,
+		"job_id":         job.ID,
+		"status":         job.Status,
+		"url":            job.URL,
+		"method":         job.Method,
+		"created_at":     job.CreatedAt,
+		"execute_before": job.ExecuteBefore,
 	})
 }
 
@@ -371,6 +378,9 @@ func (s *Server) proxyJob(w http.ResponseWriter, r *http.Request) {
 		}
 		var admissionErr *AdmissionRejectedError
 		if errors.As(outcome.Err, &admissionErr) {
+			if admissionErr.Decision.Queue != nil {
+				setQueueHeaders(w.Header(), *admissionErr.Decision.Queue)
+			}
 			w.Header().Set("Retry-After", fmt.Sprintf("%d", s.aquifer.RetryAfterSeconds()))
 			jsonErrorFields(w, outcome.Err.Error(), http.StatusTooManyRequests, map[string]any{
 				"limit_reason": admissionErr.Decision.Reason,
@@ -439,11 +449,35 @@ func (s *Server) proxyJob(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "job not found", http.StatusNotFound)
 		return
 	}
-	s.aquifer.Dispatch(outcome.Job, req.AccountQueueMode)
+	queue, err := s.aquifer.Dispatch(outcome.Job, req.AccountQueueMode)
+	if err != nil {
+		unsubscribe()
+		var admissionErr *AdmissionRejectedError
+		if errors.As(err, &admissionErr) {
+			setQueueHeaders(w.Header(), queue)
+			w.Header().Set("Retry-After", fmt.Sprintf("%d", s.aquifer.RetryAfterSeconds()))
+			jsonErrorFields(w, err.Error(), http.StatusTooManyRequests, map[string]any{
+				"limit_reason": admissionErr.Decision.Reason,
+				"limit":        admissionErr.Decision.Limit,
+				"current":      admissionErr.Decision.Current,
+			})
+			return
+		}
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	setQueueHeaders(w.Header(), queue)
 	s.streamEvents(w, r, outcome.Job, events, unsubscribe, &ProxyFallbackInfo{
 		Reason: outcome.FallbackReason,
 		Status: outcome.FallbackStatus,
 	})
+}
+
+func setQueueHeaders(headers http.Header, snapshot QueueSnapshot) {
+	setLoadHeader(headers, "Active-Queues", fmt.Sprintf("%d", snapshot.ActiveQueues))
+	setLoadHeader(headers, "Upstream-Backlog", fmt.Sprintf("%d", snapshot.UpstreamBacklog))
+	setLoadHeader(headers, "Queue-Backlog", fmt.Sprintf("%d", snapshot.QueueBacklog))
+	setLoadHeader(headers, "Admission-Pressure", fmt.Sprintf("%.3f", snapshot.AdmissionPressure))
 }
 
 func writeNodeDraining(w http.ResponseWriter, retryAfter int) {

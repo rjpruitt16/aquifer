@@ -75,20 +75,20 @@ func envInt64(key string, def int64) int64 {
 // AdmissionDecision is the result of an admission check on a new (non-duplicate) job.
 type AdmissionDecision struct {
 	Allowed bool
-	Reason  string // "memory" or "db_size"
+	Reason  string // "memory", "db_size", "upstream_queue", or "queue_fair_share"
 	Limit   int64
 	Current int64
+	Queue   *QueueSnapshot
 }
 
-// AdmissionRejectedError is returned by Aquifer.Enqueue when a genuinely new
-// job is rejected due to memory or DB size pressure. Callers (the HTTP
-// server) type-assert on this to build a 429 with Retry-After.
+// AdmissionRejectedError is returned when a genuinely new job is rejected by
+// process, storage, or queue pressure. The HTTP server turns it into a 429.
 type AdmissionRejectedError struct {
 	Decision AdmissionDecision
 }
 
 func (e *AdmissionRejectedError) Error() string {
-	return fmt.Sprintf("admission rejected: %s at %d exceeds limit %d", e.Decision.Reason, e.Decision.Current, e.Decision.Limit)
+	return fmt.Sprintf("admission rejected: %s (current %d, limit %d)", e.Decision.Reason, e.Decision.Current, e.Decision.Limit)
 }
 
 // AdmissionController evaluates memory and DB size limits at request time.

@@ -274,19 +274,24 @@ func (r *Registry) startRegistrationLoop() {
 // that doesn't care about it shouldn't be able to flip it off for every
 // other concurrent tenant relying on it being on.
 func (r *Registry) Enqueue(job *Job, accountQueueHeader string) {
+	_, _ = r.enqueue(job, accountQueueHeader, false)
+}
+
+func (r *Registry) AdmitAndEnqueue(job *Job, accountQueueHeader string) (QueueSnapshot, error) {
+	return r.enqueue(job, accountQueueHeader, true)
+}
+
+func (r *Registry) enqueue(job *Job, accountQueueHeader string, enforceAdmission bool) (QueueSnapshot, error) {
 	if r.stopping() {
-		return
+		return QueueSnapshot{}, ErrAquiferDraining
 	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	if r.stopping() {
-		return
+		return QueueSnapshot{}, ErrAquiferDraining
 	}
-
-	r.totalJobs.Add(1)
-	r.queueDepth.Add(1)
 
 	for {
 		key, w := r.resolveWorkerLocked(job)
@@ -298,10 +303,29 @@ func (r *Registry) Enqueue(job *Job, accountQueueHeader string) {
 		if r.clusterRouter != nil {
 			r.clusterRouter.TrackLocalJob(job.UserID)
 		}
-		if w.Enqueue(job) {
+		var snapshot QueueSnapshot
+		var admissionErr *AdmissionRejectedError
+		var workerLive bool
+		if enforceAdmission {
+			snapshot, admissionErr, workerLive = w.AdmitAndEnqueue(job)
+		} else {
+			workerLive = w.Enqueue(job)
+			if workerLive {
+				snapshot = w.Snapshot()
+			}
+		}
+		if admissionErr != nil {
+			if r.clusterRouter != nil {
+				r.clusterRouter.CompleteLocalJob(job.UserID)
+			}
+			return snapshot, admissionErr
+		}
+		if workerLive {
+			r.totalJobs.Add(1)
+			r.queueDepth.Add(1)
 			r.metrics.JobQueued(job.UserID, key)
 			r.metrics.QueueDepth(key, int(r.queueDepth.Load()))
-			return
+			return snapshot, nil
 		}
 		if r.clusterRouter != nil {
 			r.clusterRouter.CompleteLocalJob(job.UserID)
@@ -314,6 +338,23 @@ func (r *Registry) Enqueue(job *Job, accountQueueHeader string) {
 			delete(r.workers, key)
 		}
 	}
+}
+
+func (r *Registry) QueueSnapshot() QueueSnapshot {
+	r.mu.Lock()
+	workers := make([]*URLWorker, 0, len(r.workers))
+	for _, worker := range r.workers {
+		workers = append(workers, worker)
+	}
+	r.mu.Unlock()
+
+	var snapshot QueueSnapshot
+	for _, worker := range workers {
+		workerSnapshot := worker.Snapshot()
+		snapshot.ActiveQueues += workerSnapshot.ActiveQueues
+		snapshot.UpstreamBacklog += workerSnapshot.UpstreamBacklog
+	}
+	return snapshot
 }
 
 // workerFor resolves (creating if necessary) the URLWorker that would

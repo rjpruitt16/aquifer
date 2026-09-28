@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"math"
 	"net/url"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -18,6 +20,9 @@ type URLWorker struct {
 	pool             *Pool // nil unless this worker dispatches into a registered pool instead of a fixed domain
 	accountQueueMode bool
 	slowStart        bool // set by an upstream's X-Aqueduct-Slow-Start response header; applies to the *next* new queue created for this domain, not retroactively
+	maxBacklog       atomic.Int64
+	activeQueues     atomic.Int64
+	backlog          atomic.Int64
 	queues           map[string]*AccountQueue
 	store            JobStore
 	broker           *Broker
@@ -71,6 +76,14 @@ func (w *URLWorker) TripBreaker(cooldown time.Duration, kind string) {
 	w.breakerKind = kind
 }
 
+func (w *URLWorker) HandleMaxBacklogHeader(value string) {
+	maxBacklog, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || maxBacklog < 0 {
+		return
+	}
+	w.maxBacklog.Store(maxBacklog)
+}
+
 // QueueActive reports whether any of this domain's account queues currently
 // has real backlog (queued or in-flight work). Distinct from BreakerOpen: a
 // breaker cooldown is a fixed clock that can expire while a real backlog is
@@ -108,6 +121,7 @@ func NewURLWorker(domain string, rps float64, maxConc int, pool *Pool, store Job
 		stop:           make(chan struct{}),
 		done:           make(chan struct{}),
 	}
+	w.maxBacklog.Store(configuredMaxPendingPerUpstream())
 	go w.enforceAggregateBudget()
 	return w
 }
@@ -165,7 +179,9 @@ func (w *URLWorker) checkAndThrottle() {
 	w.mu.Lock()
 	queues := make([]*AccountQueue, 0, len(w.queues))
 	for _, q := range w.queues {
-		queues = append(queues, q)
+		if q.Active() {
+			queues = append(queues, q)
+		}
 	}
 	w.mu.Unlock()
 
@@ -204,7 +220,9 @@ func (w *URLWorker) aggregateRPS() float64 {
 	defer w.mu.Unlock()
 	var total float64
 	for _, q := range w.queues {
-		total += q.RPS()
+		if q.Active() {
+			total += q.RPS()
+		}
 	}
 	return total
 }
@@ -220,12 +238,21 @@ func (w *URLWorker) budgetCeiling() float64 {
 }
 
 func (w *URLWorker) Enqueue(job *Job) bool {
+	_, _, enqueued := w.enqueue(job, false)
+	return enqueued
+}
+
+func (w *URLWorker) AdmitAndEnqueue(job *Job) (QueueSnapshot, *AdmissionRejectedError, bool) {
+	return w.enqueue(job, true)
+}
+
+func (w *URLWorker) enqueue(job *Job, enforceAdmission bool) (QueueSnapshot, *AdmissionRejectedError, bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
 	select {
 	case <-w.stop:
-		return false
+		return QueueSnapshot{}, nil, false
 	default:
 	}
 
@@ -235,8 +262,44 @@ func (w *URLWorker) Enqueue(job *Job) bool {
 	}
 
 	q, ok := w.queues[key]
+	if enforceAdmission {
+		var totalPending, queuePending int64
+		activeQueues := 0
+		for queueKey, candidate := range w.queues {
+			pending := candidate.Backlog()
+			if pending <= 0 {
+				continue
+			}
+			totalPending += pending
+			activeQueues++
+			if queueKey == key {
+				queuePending = pending
+			}
+		}
+		if !ok || queuePending == 0 {
+			activeQueues++
+		}
+		if !w.accountQueueMode {
+			activeQueues = 1
+			queuePending = totalPending
+		}
+
+		maxBacklog := w.maxBacklog.Load()
+		decision := decideFairAdmission(queuePending, totalPending, activeQueues, maxBacklog, randomAdmissionDraw())
+		if !decision.Allowed {
+			snapshot := decision.Snapshot
+			return snapshot, &AdmissionRejectedError{Decision: AdmissionDecision{
+				Allowed: false,
+				Reason:  decision.Reason,
+				Limit:   maxBacklog,
+				Current: totalPending,
+				Queue:   &snapshot,
+			}}, true
+		}
+	}
+
 	if !ok {
-		q = NewAccountQueue(key, w.domain, w.rps, w.maxConc, w.pool, w.store, w.broker, w.l8, w.metrics, w.enqueueWebhook, w.resultRecorder, w.onJobDone, func(k string) {
+		q = NewAccountQueue(key, w.domain, w.rps, w.maxConc, w.pool, w.store, w.broker, w.l8, w.metrics, w.enqueueWebhook, w.resultRecorder, &w.activeQueues, &w.backlog, w.onJobDone, func(k string) {
 			w.mu.Lock()
 			delete(w.queues, k)
 			empty := len(w.queues) == 0
@@ -255,12 +318,46 @@ func (w *URLWorker) Enqueue(job *Job) bool {
 			w.mu.Lock()
 			w.slowStart = v
 			w.mu.Unlock()
+		}, func(v int64) {
+			w.maxBacklog.Store(v)
 		})
 		w.queues[key] = q
 	}
 
-	q.Enqueue(job)
-	return true
+	if !q.Enqueue(job) {
+		return QueueSnapshot{}, nil, false
+	}
+	return w.snapshotForQueueLocked(key), nil, true
+}
+
+func (w *URLWorker) snapshotForQueueLocked(key string) QueueSnapshot {
+	snapshot := QueueSnapshot{MaxBacklog: w.maxBacklog.Load()}
+	for queueKey, q := range w.queues {
+		pending := q.Backlog()
+		if pending <= 0 {
+			continue
+		}
+		snapshot.ActiveQueues++
+		snapshot.UpstreamBacklog += pending
+		if queueKey == key {
+			snapshot.QueueBacklog = pending
+		}
+	}
+	if !w.accountQueueMode && snapshot.UpstreamBacklog > 0 {
+		snapshot.ActiveQueues = 1
+		snapshot.QueueBacklog = snapshot.UpstreamBacklog
+	}
+	if snapshot.MaxBacklog > 0 {
+		start := fairAdmissionStart * float64(snapshot.MaxBacklog)
+		snapshot.AdmissionPressure = clampFloat((float64(snapshot.UpstreamBacklog)-start)/(float64(snapshot.MaxBacklog)-start), 0, 1)
+	}
+	return snapshot
+}
+
+func (w *URLWorker) Snapshot() QueueSnapshot {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.snapshotForQueueLocked("")
 }
 
 func (w *URLWorker) handleAccountQueueHeader(val string) {

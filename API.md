@@ -10,9 +10,12 @@
   "method":         "POST",
   "headers":        { "Authorization": "Bearer sk-..." },
   "body":           "{\"model\":\"gpt-4o\",\"messages\":[...]}",
-  "webhook_url":    "https://yourapp.com/webhooks/aquifer"
+  "webhook_url":    "https://yourapp.com/webhooks/aquifer",
+  "execute_before": 1798761600000
 }
 ```
+
+`execute_before` is optional Unix time in milliseconds. Aquifer checks it immediately before dispatch and before every retry. A job that has not started its next attempt by that time is never sent upstream; it becomes `failed` with reason `execution_deadline_exceeded`, remains available through the normal status/result retention window, and emits the normal failed SSE/webhook event.
 
 **Do not expose Aquifer directly to untrusted callers.** `url` is dispatched as a real HTTP request — if an arbitrary or untrusted party can set it, Aquifer becomes an open relay/SSRF vector: it can be pointed at your internal network, cloud metadata endpoints (`169.254.169.254`), or anything else the machine Aquifer runs on can reach, using Aquifer's own network position and identity. The intended caller is **your own trusted backend or gateway code** dispatching to a destination it already knows about — not an agent, end user, or any other party choosing the destination itself. Run Aquifer on a private network, not bound to a public address, and put your own authorization and destination allow-listing in front if agents need to reach it indirectly.
 
@@ -21,6 +24,23 @@ As a second, narrower layer on top of that — `AQUIFER_ALLOWED_URL_DOMAINS` (co
 Idempotent — duplicate `idempotent_key` per `user_id` returns the existing job.
 
 **201** new job queued · **200 + `"duplicate": true`** already exists
+
+### Fair queue admission
+
+Each upstream has a soft shared backlog budget `B`, defaulting to `AQUIFER_MAX_PENDING_PER_UPSTREAM=10000`. The upstream may update it at runtime with `X-Aqueduct-Max-Backlog` (or `X-Aquifer-Max-Backlog`); `0` disables this count-based limit. Dynamic values are learned from direct proxy responses and queued dispatch responses.
+
+With AccountQueue mode enabled, Aquifer gives idle capacity to whoever can use it while protecting smaller queues once the upstream becomes congested. For a prospective request, let `q` be its queue's projected backlog, `Q` the projected upstream backlog, and `N` the projected number of active account queues:
+
+```text
+F        = B / N
+pressure = clamp((Q - 0.70B) / 0.30B, 0, 1)
+excess   = clamp((q - F) / (B - F), 0, 1)
+P(429)   = pressure * excess
+```
+
+A lone queue is never fairness-rejected and may use the whole budget. A queue at or below `F` is not fairness-rejected. Above 70% total pressure, disproportionately large queues receive progressively more `429` responses; when competitors drain, their capacity becomes borrowable again. If admitting a request would put `Q` above `B`, it is rejected deterministically. Without AccountQueue mode, traffic remains one shared queue (`N=1`), so only the shared backlog ceiling applies. Duplicates, recovered work, and internal webhook deliveries bypass this admission decision; accepted jobs are never discarded by it.
+
+Accepted and fairness-rejected responses report `X-Aqueduct-Active-Queues`, `X-Aqueduct-Upstream-Backlog`, `X-Aqueduct-Queue-Backlog`, and `X-Aqueduct-Admission-Pressure` (with `X-Aquifer-*` aliases). Outbound dispatches report active queues and upstream backlog to the backend alongside the existing load headers. These values cover the relevant upstream on the serving node. `GET /health` reports node-wide local totals under `queues`; it is deliberately not presented as a fleet-wide count.
 
 ## Regional cluster routing
 
