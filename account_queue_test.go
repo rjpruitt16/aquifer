@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -36,7 +37,7 @@ func TestMakeRequestRequestsOrcaMetricsByDefault(t *testing.T) {
 	defer srv.Close()
 
 	job := &Job{Method: "POST"}
-	resp, err := makeRequest(context.Background(), job, srv.URL, 0, 0, 0, nil)
+	resp, err := makeRequest(context.Background(), job, srv.URL, 0, 0, 0, 0, 0, nil)
 	if err != nil {
 		t.Fatalf("makeRequest failed: %v", err)
 	}
@@ -59,7 +60,7 @@ func TestMakeRequestDoesNotOverrideExplicitOrcaHeader(t *testing.T) {
 		Method:  "POST",
 		Headers: map[string]string{orcaRequestHeaderName: "JSON"},
 	}
-	resp, err := makeRequest(context.Background(), job, srv.URL, 0, 0, 0, nil)
+	resp, err := makeRequest(context.Background(), job, srv.URL, 0, 0, 0, 0, 0, nil)
 	if err != nil {
 		t.Fatalf("makeRequest failed: %v", err)
 	}
@@ -150,7 +151,7 @@ func TestSlowStartBeginsAtMinRPS(t *testing.T) {
 	})
 
 	const configuredRPS = 100.0
-	q := NewAccountQueue("tenant-1", "https://example.com", configuredRPS, 5, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, map[string]any) {}, nil, func(string) {}, true, func(bool) {})
+	q := NewAccountQueue("tenant-1", "https://example.com", configuredRPS, 5, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, map[string]any) {}, nil, nil, nil, nil, func(string) {}, true, func(bool) {}, nil)
 	t.Cleanup(q.Stop)
 
 	deadline := time.Now().Add(time.Second)
@@ -180,7 +181,7 @@ func TestSlowStartOffByDefaultStartsAtConfiguredRPS(t *testing.T) {
 	})
 
 	const configuredRPS = 12.0
-	q := NewAccountQueue("tenant-1", "https://example.com", configuredRPS, 5, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, map[string]any) {}, nil, func(string) {}, false, func(bool) {})
+	q := NewAccountQueue("tenant-1", "https://example.com", configuredRPS, 5, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, map[string]any) {}, nil, nil, nil, nil, func(string) {}, false, func(bool) {}, nil)
 	t.Cleanup(q.Stop)
 
 	deadline := time.Now().Add(time.Second)
@@ -194,4 +195,83 @@ func TestSlowStartOffByDefaultStartsAtConfiguredRPS(t *testing.T) {
 	if got := q.RPS(); got != configuredRPS {
 		t.Fatalf("expected non-slow-start queue to begin at configuredRPS (%v), got %v", configuredRPS, got)
 	}
+}
+
+func TestExpiredQueuedJobFailsWithoutDispatch(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(dir + "/aquifer.db")
+	broker := NewBroker()
+	l8 := NewL8Registry(dir+"/.l8-key", dir+"/l8-trust")
+	t.Cleanup(func() {
+		l8.Close()
+		store.Close()
+	})
+
+	job := &Job{
+		ID: generateID(), UserID: "deadline-user", IdempotentKey: "expired-key",
+		URL: "http://127.0.0.1:1/should-not-run", Method: "POST", WebhookURL: "http://127.0.0.1:1/hook",
+		Status: StatusQueued, CreatedAt: time.Now().UnixMilli(), ExecuteBefore: time.Now().Add(-time.Second).UnixMilli(),
+	}
+	store.CheckOrInsert(job)
+	q := NewAccountQueue("deadline-user", "http://127.0.0.1:1", 100, 1, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, map[string]any) {}, nil, nil, nil, nil, func(string) {}, false, func(bool) {}, nil)
+	t.Cleanup(q.Stop)
+	q.Enqueue(job)
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if stored := store.GetJob(job.ID); stored != nil && stored.Status == StatusFailed {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("expired job did not become failed: %+v", store.GetJob(job.ID))
+}
+
+func TestJobExpiringDuringPacingDelayFailsWithoutDispatch(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(dir + "/aquifer.db")
+	broker := NewBroker()
+	l8 := NewL8Registry(dir+"/.l8-key", dir+"/l8-trust")
+	t.Cleanup(func() {
+		l8.Close()
+		store.Close()
+	})
+
+	var requests atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+
+	first := &Job{
+		ID: generateID(), UserID: "deadline-user", IdempotentKey: "first",
+		URL: upstream.URL, Method: "POST", WebhookURL: "http://127.0.0.1:1/hook",
+		Status: StatusQueued, CreatedAt: time.Now().UnixMilli(),
+	}
+	expiring := &Job{
+		ID: generateID(), UserID: "deadline-user", IdempotentKey: "expiring",
+		URL: upstream.URL, Method: "POST", WebhookURL: "http://127.0.0.1:1/hook",
+		Status: StatusQueued, CreatedAt: time.Now().UnixMilli(),
+		ExecuteBefore: time.Now().Add(150 * time.Millisecond).UnixMilli(),
+	}
+	store.CheckOrInsert(first)
+	store.CheckOrInsert(expiring)
+
+	q := NewAccountQueue("deadline-user", upstream.URL, 1, 2, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, map[string]any) {}, nil, nil, nil, nil, func(string) {}, false, func(bool) {}, nil)
+	t.Cleanup(q.Stop)
+	q.Enqueue(first)
+	q.Enqueue(expiring)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if stored := store.GetJob(expiring.ID); stored != nil && stored.Status == StatusFailed {
+			if got := requests.Load(); got != 1 {
+				t.Fatalf("expected only the first job to reach upstream, got %d requests", got)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("job that expired during pacing did not fail: %+v", store.GetJob(expiring.ID))
 }

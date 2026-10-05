@@ -80,6 +80,9 @@ func (a *Aquifer) AttemptDirect(ctx context.Context, req JobRequest, timeout tim
 	if duplicate != nil {
 		return ProxyOutcome{Duplicate: true, ExistingJob: a.store.GetJob(duplicate.JobID)}
 	}
+	if job.ExecutionExpired(time.Now()) {
+		return ProxyOutcome{Job: job, FallbackReason: "execution_deadline_exceeded"}
+	}
 
 	// Pool-routed jobs have no single canonical upstream to try directly —
 	// pool routing's whole premise (spread across members, one might be
@@ -115,11 +118,13 @@ func (a *Aquifer) AttemptDirect(ctx context.Context, req JobRequest, timeout tim
 	defer cancel()
 
 	counts := a.store.Counts()
-	resp, attemptErr := makeRequest(attemptCtx, job, job.URL, counts.TotalJobs, counts.QueueDepth, 0, a.l8)
+	queues := worker.Snapshot()
+	resp, attemptErr := makeRequest(attemptCtx, job, job.URL, counts.TotalJobs, counts.QueueDepth, 0, queues.ActiveQueues, queues.UpstreamBacklog, a.l8)
 	if attemptErr != nil {
 		return a.fallbackOutcome(ctx, req, job, "upstream_unreachable", 0, timeout, true)
 	}
 	defer resp.Body.Close()
+	worker.HandleMaxBacklogHeader(pacingHeader(resp.Header, "Max-Backlog"))
 
 	if overloadCooldown, kind, overloaded := isOverloadSignal(resp); overloaded {
 		worker.TripBreaker(overloadCooldown, kind)

@@ -50,6 +50,27 @@ func TestStoreListAndClearIdempotentKeys(t *testing.T) {
 	}
 }
 
+func TestStorePersistsExecuteBefore(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(filepath.Join(dir, "aquifer.db"))
+	t.Cleanup(func() { store.Close() })
+
+	executeBefore := time.Now().Add(time.Minute).UnixMilli()
+	job := &Job{
+		ID: generateID(), UserID: "deadline-user", IdempotentKey: "deadline-key",
+		URL: "https://example.com", Method: "POST", WebhookURL: "https://example.com/hook",
+		Status: StatusQueued, CreatedAt: time.Now().UnixMilli(), ExecuteBefore: executeBefore,
+	}
+	if _, duplicate := store.CheckOrInsert(job); duplicate {
+		t.Fatal("new deadline job was unexpectedly treated as a duplicate")
+	}
+
+	stored := store.GetJob(job.ID)
+	if stored == nil || stored.ExecuteBefore != executeBefore {
+		t.Fatalf("expected execute_before %d after SQLite round trip, got %+v", executeBefore, stored)
+	}
+}
+
 func TestStoreDrainEventsAreAcknowledgedBySequence(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(filepath.Join(dir, "aquifer.db"))

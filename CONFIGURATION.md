@@ -15,3 +15,7 @@ See [benchmark.md](benchmark.md) for real numbers, including what happens under 
 Retry-After backs off exponentially under sustained pressure. A single rejection returns your configured base value (default 5s). Each additional *consecutive* rejection — with no allowed request in between — doubles it: 5s → 10s → 20s → 40s → capped at 60s. The moment a request is allowed again, it resets to the base.
 
 This exists so that clients retrying into a sustained overload spread out over time instead of all hammering the same fixed 5-second ceiling forever, which is exactly the pattern that keeps an overloaded instance from ever catching up.
+
+## Fair queue admission
+
+`AQUIFER_MAX_PENDING_PER_UPSTREAM` defaults to 10,000 queued plus in-flight jobs per upstream. It is a shared safety budget, not a fixed per-user reservation: a lone active account queue may use all of it. Once total backlog exceeds 70%, an above-share queue receives probabilistic `429` responses according to the formula in [API.md](API.md#fair-queue-admission). The upstream can change the budget dynamically with `X-Aqueduct-Max-Backlog`; set either control to `0` to disable count-based fair admission.

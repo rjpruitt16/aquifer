@@ -30,6 +30,7 @@ type Job struct {
 	WebhookURL    string            `json:"webhook_url"`
 	Status        Status            `json:"status"`
 	CreatedAt     int64             `json:"created_at"`
+	ExecuteBefore int64             `json:"execute_before,omitempty"`
 
 	// Cross-region /proxy redirect fields — see proxy.go's AttemptDirect.
 	// Absent/zero on a fresh top-level request; that absence IS the signal
@@ -72,6 +73,7 @@ type JobRequest struct {
 	Headers       map[string]string `json:"headers,omitempty"`
 	Body          string            `json:"body,omitempty"`
 	WebhookURL    string            `json:"webhook_url"`
+	ExecuteBefore int64             `json:"execute_before,omitempty"`
 
 	// Cross-region /proxy redirect fields — see Job's own doc comment and
 	// proxy.go's AttemptDirect. Only ever set on an internal redirect hop
@@ -103,6 +105,8 @@ type JobRequest struct {
 
 func (r *JobRequest) Validate() string {
 	switch {
+	case r.ExecuteBefore < 0:
+		return "execute_before must be a positive Unix timestamp in milliseconds"
 	case r.UserID == "":
 		return "user_id is required"
 	case r.IdempotentKey == "":
@@ -172,11 +176,18 @@ func NewJob(r *JobRequest) *Job {
 		WebhookURL:      r.WebhookURL,
 		Status:          StatusQueued,
 		CreatedAt:       time.Now().UnixMilli(),
+		ExecuteBefore:   r.ExecuteBefore,
 		OriginMachineID: r.OriginMachineID,
 		OriginRegion:    r.OriginRegion,
 		VisitedRegions:  r.VisitedRegions,
 		RerouteCount:    r.RerouteCount,
 	}
+}
+
+// ExecutionExpired reports whether this job's caller-supplied dispatch
+// deadline has passed. A zero deadline means the job may wait indefinitely.
+func (j *Job) ExecutionExpired(now time.Time) bool {
+	return j != nil && j.ExecuteBefore > 0 && now.UnixMilli() >= j.ExecuteBefore
 }
 
 // isWebhookDeliveryJob reports whether this job represents a webhook

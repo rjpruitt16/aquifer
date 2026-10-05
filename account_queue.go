@@ -51,10 +51,13 @@ func sleepWhilePoolEmpty(d time.Duration) {
 }
 
 type jobDoneMsg struct {
+	userID        string
+	completed     bool
 	rps           *float64
 	maxConcurrent *int
 	accountQueue  *string
 	slowStart     *bool
+	maxBacklog    *int64
 }
 
 // webhookEnqueuer queues a webhook delivery through the same account-queue
@@ -66,25 +69,28 @@ type jobDoneMsg struct {
 type webhookEnqueuer func(originalJobID, userID, webhookURL string, payload map[string]any)
 
 type AccountQueue struct {
-	key            string
-	upstream       string
-	pool           *Pool // nil unless this queue dispatches into a registered pool instead of a fixed URL
-	cmds           chan *Job
-	done           chan jobDoneMsg
-	store          JobStore
-	broker         *Broker
-	l8             *L8Registry
-	metrics        MetricsAdapter
-	enqueueWebhook webhookEnqueuer
-	resultRecorder JobResultRecorder
-	currentRPS     atomic.Int64 // stored as rps * 100
-	backlog        atomic.Int32 // len(queue) + inFlight, live — see run()
-	stop           chan struct{}
-	stopped        chan struct{}
-	stopOnce       sync.Once
-	wg             sync.WaitGroup
-	ctx            context.Context
-	cancel         context.CancelFunc
+	key                string
+	upstream           string
+	pool               *Pool // nil unless this queue dispatches into a registered pool instead of a fixed URL
+	cmds               chan *Job
+	done               chan jobDoneMsg
+	store              JobStore
+	broker             *Broker
+	l8                 *L8Registry
+	metrics            MetricsAdapter
+	enqueueWebhook     webhookEnqueuer
+	resultRecorder     JobResultRecorder
+	workerActiveQueues *atomic.Int64
+	workerBacklog      *atomic.Int64
+	onJobDone          func(string)
+	currentRPS         atomic.Int64 // stored as rps * 100
+	backlog            atomic.Int64 // accepted queued + in-flight work
+	stop               chan struct{}
+	stopped            chan struct{}
+	stopOnce           sync.Once
+	wg                 sync.WaitGroup
+	ctx                context.Context
+	cancel             context.CancelFunc
 }
 
 func (q *AccountQueue) RPS() float64 {
@@ -98,6 +104,53 @@ func (q *AccountQueue) RPS() float64 {
 // the backlog it caused has actually finished draining yet.
 func (q *AccountQueue) Active() bool {
 	return q.backlog.Load() > 0
+}
+
+func (q *AccountQueue) Backlog() int64 {
+	return q.backlog.Load()
+}
+
+func (q *AccountQueue) reserveBacklog() {
+	if q.backlog.Add(1) == 1 && q.workerActiveQueues != nil {
+		q.workerActiveQueues.Add(1)
+	}
+	if q.workerBacklog != nil {
+		q.workerBacklog.Add(1)
+	}
+}
+
+func (q *AccountQueue) releaseBacklog() {
+	if q.backlog.Add(-1) == 0 && q.workerActiveQueues != nil {
+		q.workerActiveQueues.Add(-1)
+	}
+	if q.workerBacklog != nil {
+		q.workerBacklog.Add(-1)
+	}
+}
+
+func (q *AccountQueue) clearBacklog() {
+	remaining := q.backlog.Swap(0)
+	if remaining <= 0 {
+		return
+	}
+	if q.workerActiveQueues != nil {
+		q.workerActiveQueues.Add(-1)
+	}
+	if q.workerBacklog != nil {
+		q.workerBacklog.Add(-remaining)
+	}
+}
+
+func qLoad(activeQueues, backlog *atomic.Int64) (int, int64) {
+	var active int
+	var pending int64
+	if activeQueues != nil {
+		active = int(activeQueues.Load())
+	}
+	if backlog != nil {
+		pending = backlog.Load()
+	}
+	return active, pending
 }
 
 // Throttle pushes an external rate adjustment into the queue's dispatch
@@ -115,32 +168,39 @@ func (q *AccountQueue) Throttle(rps float64) {
 	}
 }
 
-func NewAccountQueue(key, upstream string, rps float64, maxConc int, pool *Pool, store JobStore, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, enqueueWebhook webhookEnqueuer, resultRecorder JobResultRecorder, onIdle func(string), slowStart bool, onSlowStartSignal func(bool)) *AccountQueue {
+func NewAccountQueue(key, upstream string, rps float64, maxConc int, pool *Pool, store JobStore, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, enqueueWebhook webhookEnqueuer, resultRecorder JobResultRecorder, workerActiveQueues, workerBacklog *atomic.Int64, onJobDone func(string), onIdle func(string), slowStart bool, onSlowStartSignal func(bool), onMaxBacklogSignal func(int64)) *AccountQueue {
 	q := &AccountQueue{
-		key:            key,
-		upstream:       upstream,
-		pool:           pool,
-		cmds:           make(chan *Job, 1000),
-		done:           make(chan jobDoneMsg, 100),
-		store:          store,
-		broker:         broker,
-		l8:             l8,
-		metrics:        ensureMetrics(metrics),
-		enqueueWebhook: enqueueWebhook,
-		resultRecorder: resultRecorder,
-		stop:           make(chan struct{}),
-		stopped:        make(chan struct{}),
+		key:                key,
+		upstream:           upstream,
+		pool:               pool,
+		cmds:               make(chan *Job, 1000),
+		done:               make(chan jobDoneMsg, 100),
+		store:              store,
+		broker:             broker,
+		l8:                 l8,
+		metrics:            ensureMetrics(metrics),
+		enqueueWebhook:     enqueueWebhook,
+		resultRecorder:     resultRecorder,
+		workerActiveQueues: workerActiveQueues,
+		workerBacklog:      workerBacklog,
+		onJobDone:          onJobDone,
+		stop:               make(chan struct{}),
+		stopped:            make(chan struct{}),
 	}
 	q.ctx, q.cancel = context.WithCancel(context.Background())
-	go q.supervise(rps, maxConc, onIdle, slowStart, onSlowStartSignal)
+	go q.supervise(rps, maxConc, onIdle, slowStart, onSlowStartSignal, onMaxBacklogSignal)
 	return q
 }
 
-func (q *AccountQueue) Enqueue(job *Job) {
+func (q *AccountQueue) Enqueue(job *Job) bool {
 	q.store.SetQueueKey(job.ID, q.key)
+	q.reserveBacklog()
 	select {
 	case q.cmds <- job:
+		return true
 	case <-q.stop:
+		q.releaseBacklog()
+		return false
 	}
 }
 
@@ -153,7 +213,7 @@ func (q *AccountQueue) Stop() {
 	})
 }
 
-func (q *AccountQueue) supervise(rps float64, maxConc int, onIdle func(string), slowStart bool, onSlowStartSignal func(bool)) {
+func (q *AccountQueue) supervise(rps float64, maxConc int, onIdle func(string), slowStart bool, onSlowStartSignal func(bool), onMaxBacklogSignal func(int64)) {
 	defer close(q.stopped)
 
 	for {
@@ -165,7 +225,7 @@ func (q *AccountQueue) supervise(rps float64, maxConc int, onIdle func(string), 
 					panicked = true
 				}
 			}()
-			q.run(rps, maxConc, slowStart, onSlowStartSignal)
+			q.run(rps, maxConc, slowStart, onSlowStartSignal, onMaxBacklogSignal)
 		}()
 
 		select {
@@ -205,7 +265,7 @@ func accountQueueIdleTimeout() time.Duration {
 	return time.Duration(envInt64("AQUIFER_IDLE_TIMEOUT_SECONDS", defaultAccountQueueIdleTimeoutSeconds)) * time.Second
 }
 
-func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowStart bool, onSlowStartSignal func(bool)) {
+func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowStart bool, onSlowStartSignal func(bool), onMaxBacklogSignal func(int64)) {
 	idleTimeout := accountQueueIdleTimeout()
 	idle := time.NewTimer(idleTimeout)
 	defer idle.Stop()
@@ -228,6 +288,8 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 	q.currentRPS.Store(int64(rps * 100))
 
 	for {
+		queue = q.dropExpiredJobs(queue)
+
 		// Pool-backed queues don't have a fixed configured ceiling — the
 		// pool's aggregate capacity is the live sum of whatever its
 		// current members are individually reporting, so it's resampled
@@ -241,6 +303,11 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 		}
 
 		for len(queue) > 0 && inFlight < maxConc {
+			if queue[0].ExecutionExpired(time.Now()) {
+				queue = q.dropExpiredJobs(queue)
+				continue
+			}
+
 			var member *PoolMember
 			if q.pool != nil {
 				member = q.pool.Pick()
@@ -261,12 +328,15 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 			if elapsed < interval {
 				time.Sleep(withJitter(interval - elapsed))
 			}
+			if queue[0].ExecutionExpired(time.Now()) {
+				queue = q.dropExpiredJobs(queue)
+				continue
+			}
 
 			job := queue[0]
 			queue = queue[1:]
 			q.metrics.QueueDepth(q.upstream, len(queue))
 			inFlight++
-			q.backlog.Store(int32(len(queue) + inFlight))
 			lastRequestAt = time.Now()
 
 			q.store.MarkInFlight(job.ID)
@@ -278,8 +348,9 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 			}
 
 			currentRPS := rps
+			activeQueues, upstreamBacklog := qLoad(q.workerActiveQueues, q.workerBacklog)
 			q.wg.Add(1)
-			go func(j *Job, url string, m *PoolMember, flowRate float64) {
+			go func(j *Job, url string, m *PoolMember, flowRate float64, active int, backlog int64) {
 				defer q.wg.Done()
 				defer func() {
 					if r := recover(); r != nil {
@@ -294,29 +365,35 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 							})
 						}
 						select {
-						case q.done <- jobDoneMsg{}:
+						case q.done <- jobDoneMsg{userID: j.UserID, completed: true}:
 						case <-q.stop:
 						}
 					}
 				}()
-				msg := execute(q.ctx, j, url, q.upstream, q.store, q.broker, q.l8, q.metrics, q.pool, m, flowRate, q.enqueueWebhook, q.resultRecorder)
+				msg := execute(q.ctx, j, url, q.upstream, q.store, q.broker, q.l8, q.metrics, q.pool, m, flowRate, active, backlog, q.enqueueWebhook, q.resultRecorder)
+				msg.userID = j.UserID
+				msg.completed = true
 				select {
 				case q.done <- msg:
 				case <-q.stop:
 				}
-			}(job, dispatchURL, member, currentRPS)
+			}(job, dispatchURL, member, currentRPS, activeQueues, upstreamBacklog)
 		}
 
 		select {
 		case job := <-q.cmds:
 			queue = append(queue, job)
 			q.metrics.QueueDepth(q.upstream, len(queue))
-			q.backlog.Store(int32(len(queue) + inFlight))
 			idle.Reset(idleTimeout)
 
 		case msg := <-q.done:
-			inFlight--
-			q.backlog.Store(int32(len(queue) + inFlight))
+			if msg.completed {
+				inFlight--
+				q.releaseBacklog()
+				if q.onJobDone != nil && msg.userID != "" {
+					q.onJobDone(msg.userID)
+				}
+			}
 			prevRPS := rps
 			if msg.rps != nil {
 				rps = math.Max(math.Min(*msg.rps, configuredRPS), minRPS)
@@ -333,9 +410,13 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 			if msg.slowStart != nil && onSlowStartSignal != nil {
 				onSlowStartSignal(*msg.slowStart)
 			}
+			if msg.maxBacklog != nil && onMaxBacklogSignal != nil {
+				onMaxBacklogSignal(*msg.maxBacklog)
+			}
 			idle.Reset(idleTimeout)
 
 		case <-positionTicker.C:
+			queue = q.dropExpiredJobs(queue)
 			for i, j := range queue {
 				q.broker.Publish(j.ID, SSEEvent{
 					Event: "position",
@@ -350,13 +431,36 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 			idle.Reset(idleTimeout)
 
 		case <-q.stop:
-			q.backlog.Store(0)
+			q.clearBacklog()
 			return
 		}
 	}
 }
 
-func execute(ctx context.Context, job *Job, dispatchURL, upstream string, store JobStore, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, pool *Pool, member *PoolMember, flowRate float64, enqueueWebhook webhookEnqueuer, resultRecorder JobResultRecorder) jobDoneMsg {
+func (q *AccountQueue) dropExpiredJobs(queue []*Job) []*Job {
+	if len(queue) == 0 {
+		return queue
+	}
+	now := time.Now()
+	kept := queue[:0]
+	for _, job := range queue {
+		if !job.ExecutionExpired(now) {
+			kept = append(kept, job)
+			continue
+		}
+		q.releaseBacklog()
+		failExpiredJob(job, q.upstream, q.store, q.broker, q.metrics, q.enqueueWebhook, q.resultRecorder)
+		if q.onJobDone != nil {
+			q.onJobDone(job.UserID)
+		}
+	}
+	if len(kept) != len(queue) {
+		q.metrics.QueueDepth(q.upstream, len(kept))
+	}
+	return kept
+}
+
+func execute(ctx context.Context, job *Job, dispatchURL, upstream string, store JobStore, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, pool *Pool, member *PoolMember, flowRate float64, activeQueues int, upstreamBacklog int64, enqueueWebhook webhookEnqueuer, resultRecorder JobResultRecorder) jobDoneMsg {
 	metrics = ensureMetrics(metrics)
 	startedAt := time.Now()
 
@@ -372,6 +476,11 @@ func execute(ctx context.Context, job *Job, dispatchURL, upstream string, store 
 	reason := "connection error"
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if job.ExecutionExpired(time.Now()) {
+			reason = "execution_deadline_exceeded"
+			err = fmt.Errorf("%s", reason)
+			break
+		}
 		if attempt > 0 {
 			backoff := withJitter(time.Duration(math.Pow(2, float64(attempt-1))) * time.Second)
 			log.Printf("[AccountQueue] retry %d/%d for %s in %s", attempt, maxRetries, currentURL, backoff)
@@ -379,10 +488,15 @@ func execute(ctx context.Context, job *Job, dispatchURL, upstream string, store 
 				store.UpdateStatus(job.ID, StatusQueued)
 				return jobDoneMsg{}
 			}
+			if job.ExecutionExpired(time.Now()) {
+				reason = "execution_deadline_exceeded"
+				err = fmt.Errorf("%s", reason)
+				break
+			}
 		}
 
 		counts := store.Counts()
-		resp, err = makeRequest(ctx, job, currentURL, counts.TotalJobs, counts.QueueDepth, flowRate, l8)
+		resp, err = makeRequest(ctx, job, currentURL, counts.TotalJobs, counts.QueueDepth, flowRate, activeQueues, upstreamBacklog, l8)
 		if err != nil {
 			if ctx.Err() != nil {
 				store.UpdateStatus(job.ID, StatusQueued)
@@ -512,7 +626,30 @@ func execute(ctx context.Context, job *Job, dispatchURL, upstream string, store 
 		enabled := val == "true"
 		msg.slowStart = &enabled
 	}
+	if val := pacingHeader(resp.Header, "Max-Backlog"); val != "" {
+		var max int64
+		if _, err := fmt.Sscanf(val, "%d", &max); err == nil && max >= 0 {
+			msg.maxBacklog = &max
+		}
+	}
 	return msg
+}
+
+func failExpiredJob(job *Job, upstream string, store JobStore, broker *Broker, metrics MetricsAdapter, enqueueWebhook webhookEnqueuer, resultRecorder JobResultRecorder) {
+	const reason = "execution_deadline_exceeded"
+	store.UpdateStatus(job.ID, StatusFailed)
+	resultKey := recordJobResult(job, resultRecorder, StatusFailed, 0, "", "")
+	broker.Publish(job.ID, SSEEvent{Event: "failed", Data: map[string]any{
+		"job_id": job.ID, "reason": reason,
+	}})
+	metrics.JobFailed(job.UserID, upstream, reason)
+	if !job.isWebhookDeliveryJob() {
+		payload := map[string]any{"job_id": job.ID, "status": "failed", "reason": reason}
+		if resultKey != "" {
+			payload["result_key"] = resultKey
+		}
+		go enqueueWebhook(job.ID, job.UserID, job.WebhookURL, payload)
+	}
 }
 
 func recordJobResult(job *Job, recorder JobResultRecorder, status Status, responseStatus int, contentType string, body string) string {
@@ -541,7 +678,7 @@ func pacingHeader(headers http.Header, name string) string {
 	return headers.Get("X-Aquifer-" + name)
 }
 
-func makeRequest(ctx context.Context, job *Job, dispatchURL string, totalJobs, queueDepth int64, flowRate float64, l8 *L8Registry) (*http.Response, error) {
+func makeRequest(ctx context.Context, job *Job, dispatchURL string, totalJobs, queueDepth int64, flowRate float64, activeQueues int, upstreamBacklog int64, l8 *L8Registry) (*http.Response, error) {
 	var bodyReader io.Reader
 	if job.Body != "" {
 		bodyReader = strings.NewReader(job.Body)
@@ -572,6 +709,8 @@ func makeRequest(ctx context.Context, job *Job, dispatchURL string, totalJobs, q
 	setLoadHeader(req.Header, "Total-Jobs", fmt.Sprintf("%d", totalJobs))
 	setLoadHeader(req.Header, "Queue-Depth", fmt.Sprintf("%d", queueDepth))
 	setLoadHeader(req.Header, "Flow-Rate", fmt.Sprintf("%.2f", flowRate))
+	setLoadHeader(req.Header, "Active-Queues", fmt.Sprintf("%d", activeQueues))
+	setLoadHeader(req.Header, "Upstream-Backlog", fmt.Sprintf("%d", upstreamBacklog))
 
 	// Opt in to ORCA endpoint-load-metrics on every dispatch. In current
 	// vLLM, this is entirely request-driven -- the backend only includes

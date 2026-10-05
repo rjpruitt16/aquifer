@@ -17,6 +17,7 @@ type Registry struct {
 	l8                *L8Registry
 	metrics           MetricsAdapter
 	pools             *PoolRegistry
+	clusterRouter     *ClusterRouter
 	drainRemote       RemoteIdempotency
 	resultRecorder    JobResultRecorder
 	totalJobs         atomic.Int64
@@ -33,6 +34,15 @@ type Registry struct {
 	cancel            context.CancelFunc
 	stop              chan struct{}
 	wg                sync.WaitGroup
+}
+
+func (r *Registry) SetClusterRouter(router *ClusterRouter) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.clusterRouter = router
+	r.mu.Unlock()
 }
 
 // NewRegistry reads drain mode's config from AQUIFER_DRAIN_* env vars
@@ -264,19 +274,24 @@ func (r *Registry) startRegistrationLoop() {
 // that doesn't care about it shouldn't be able to flip it off for every
 // other concurrent tenant relying on it being on.
 func (r *Registry) Enqueue(job *Job, accountQueueHeader string) {
+	_, _ = r.enqueue(job, accountQueueHeader, false)
+}
+
+func (r *Registry) AdmitAndEnqueue(job *Job, accountQueueHeader string) (QueueSnapshot, error) {
+	return r.enqueue(job, accountQueueHeader, true)
+}
+
+func (r *Registry) enqueue(job *Job, accountQueueHeader string, enforceAdmission bool) (QueueSnapshot, error) {
 	if r.stopping() {
-		return
+		return QueueSnapshot{}, ErrAquiferDraining
 	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	if r.stopping() {
-		return
+		return QueueSnapshot{}, ErrAquiferDraining
 	}
-
-	r.totalJobs.Add(1)
-	r.queueDepth.Add(1)
 
 	for {
 		key, w := r.resolveWorkerLocked(job)
@@ -285,10 +300,35 @@ func (r *Registry) Enqueue(job *Job, accountQueueHeader string) {
 			w.handleAccountQueueHeader(accountQueueHeader)
 		}
 
-		if w.Enqueue(job) {
+		if r.clusterRouter != nil {
+			r.clusterRouter.TrackLocalJob(job.UserID)
+		}
+		var snapshot QueueSnapshot
+		var admissionErr *AdmissionRejectedError
+		var workerLive bool
+		if enforceAdmission {
+			snapshot, admissionErr, workerLive = w.AdmitAndEnqueue(job)
+		} else {
+			workerLive = w.Enqueue(job)
+			if workerLive {
+				snapshot = w.Snapshot()
+			}
+		}
+		if admissionErr != nil {
+			if r.clusterRouter != nil {
+				r.clusterRouter.CompleteLocalJob(job.UserID)
+			}
+			return snapshot, admissionErr
+		}
+		if workerLive {
+			r.totalJobs.Add(1)
+			r.queueDepth.Add(1)
 			r.metrics.JobQueued(job.UserID, key)
 			r.metrics.QueueDepth(key, int(r.queueDepth.Load()))
-			return
+			return snapshot, nil
+		}
+		if r.clusterRouter != nil {
+			r.clusterRouter.CompleteLocalJob(job.UserID)
 		}
 
 		// The worker can self-stop after its last AccountQueue idles out.
@@ -298,6 +338,23 @@ func (r *Registry) Enqueue(job *Job, accountQueueHeader string) {
 			delete(r.workers, key)
 		}
 	}
+}
+
+func (r *Registry) QueueSnapshot() QueueSnapshot {
+	r.mu.Lock()
+	workers := make([]*URLWorker, 0, len(r.workers))
+	for _, worker := range r.workers {
+		workers = append(workers, worker)
+	}
+	r.mu.Unlock()
+
+	var snapshot QueueSnapshot
+	for _, worker := range workers {
+		workerSnapshot := worker.Snapshot()
+		snapshot.ActiveQueues += workerSnapshot.ActiveQueues
+		snapshot.UpstreamBacklog += workerSnapshot.UpstreamBacklog
+	}
+	return snapshot
 }
 
 // workerFor resolves (creating if necessary) the URLWorker that would
@@ -333,7 +390,11 @@ func (r *Registry) resolveWorkerLocked(job *Job) (string, *URLWorker) {
 
 	w, ok := r.workers[key]
 	if !ok {
-		w = NewURLWorker(key, rc.RPS, rc.MaxConcurrent, pool, r.store, r.broker, r.l8, r.metrics, r.EnqueueWebhook, r.resultRecorder, func(k string, idleWorker *URLWorker) {
+		w = NewURLWorker(key, rc.RPS, rc.MaxConcurrent, pool, r.store, r.broker, r.l8, r.metrics, r.EnqueueWebhook, r.resultRecorder, func(userID string) {
+			if r.clusterRouter != nil {
+				r.clusterRouter.CompleteLocalJob(userID)
+			}
+		}, func(k string, idleWorker *URLWorker) {
 			r.mu.Lock()
 			if current := r.workers[k]; current == idleWorker {
 				delete(r.workers, k)

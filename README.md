@@ -152,6 +152,7 @@ upstreams:
 | `AQUIFER_MEMORY_LIMIT_MB` | _(none, disabled)_ | Reject new jobs with `429` once process memory exceeds this many MB |
 | `AQUIFER_MAX_BODY_BYTES` | `1048576` (1MB) | Reject oversized request bodies with `413` |
 | `AQUIFER_DB_MAX_BYTES` | `838860800` (800MB) | Reject new jobs with `429` once the SQLite file exceeds this size |
+| `AQUIFER_MAX_PENDING_PER_UPSTREAM` | `10000` | Shared per-upstream backlog budget used by fair admission; `0` disables it |
 | `AQUIFER_RETRY_AFTER_SECONDS` | `5` | Base `Retry-After` value sent on `429` admission rejections |
 | `AQUIFER_IDLE_TIMEOUT_SECONDS` | `300` (5min) | How long a per-tenant/per-domain queue can sit idle before self-tearing-down; see [drain mode](#partitioning-strategies) for why this gates a real drain flush |
 | `AQUIFER_ALLOWED_URL_DOMAINS` | _(none, unrestricted)_ | Comma-separated hostnames `url`-routed jobs are permitted to target; see [`POST /jobs`](API.md#post-jobs) |
@@ -197,10 +198,13 @@ The upstream controls pace at runtime via response headers (`X-Aqueduct-Rps`, `X
 | `X-Aqueduct-Max-Concurrent` | `X-Aquifer-Max-Concurrent`    | Reduce max in-flight requests           |
 | `X-Aqueduct-Account-Queue`  | `X-Aquifer-Account-Queue`     | `enabled`: isolate each tenant's queue |
 | `X-Aqueduct-Slow-Start`     | `X-Aquifer-Slow-Start`        | `true`: new queues ramp up instead of firing at full rate immediately |
+| `X-Aqueduct-Max-Backlog`    | `X-Aquifer-Max-Backlog`       | Set the shared backlog budget used by fair admission |
 
 Aquifer reads both namespaces, preferring `X-Aqueduct-*` when both are present.
 
 With `X-Aqueduct-Account-Queue: enabled`, each `(user_id, api_key)` pair gets its own independently paced queue, so one tenant's burst can't slow down another. Each queue's pace still stays inside the upstream's actual budget: a background check throttles the *sum* of every active tenant queue proportionally if too many are active at once, so isolation never means an unbounded copy of the full rate per tenant.
+
+When that shared backlog crosses 70% of `X-Aqueduct-Max-Backlog`, queues holding more than their current fair share receive progressively more `429` responses while smaller queues continue entering. One active queue can still use the whole budget. See [API.md](API.md#fair-queue-admission) for the formula, response headers, and scope.
 
 A backend can lower RPS at any time via these headers when it's under pressure; Aquifer honors the lower pace immediately and recovers gradually toward the configured ceiling once pressure clears.
 
@@ -340,9 +344,7 @@ Running one instance for everything works fine until you have multiple tenants o
 
 **Static partitioning**: decided once, at deploy time. Dedicate one instance to a single protected resource (a CI runner, a database, a GPU, or a rate-limited external API you want to be nice to) so that resource only ever sees traffic paced the way you configured, up to whatever it can actually bear. Multiple tenants can safely share that same instance: turn on [account-queue isolation](#dynamic-pacing) and each tenant gets their own independently-paced queue, so one tenant's burst doesn't starve another's, and the resource itself never sees more aggregate load than it's rated for. The mistake to avoid: pointing multiple *instances* at the *same* resource instead of routing everyone through this one pacing checkpoint, which just multiplies your total request rate against it. Same rule for pools: a given `pool_id` should belong to exactly one instance, since pool state isn't shared across instances.
 
-Optional HTTP cluster routing can hash `user_id` across a static member list so callers can hit any node and still land on that user's owner. See [API.md](API.md#static-cluster-routing) for config and caveats.
-
-For a regional deployment that does not need a separate control plane, combine static cluster routing with Valkey remote idempotency: any node can receive the request, rendezvous ranking keeps a user's normal traffic on one owner and soft-prunes unreachable peers, and `AQUIFER_DRAIN_SINK=valkey` publishes completed/failed idempotency records under the generic `aqueduct:idempotency:` prefix so another node can reject duplicates before dispatch. If enabled, bounded result snapshots are written under `aqueduct:result:` too. See [API.md](API.md#remote-idempotency) for the exact key contract.
+Optional regional cluster routing supports either a static rendezvous member list or Valkey-coordinated, load-aware rendezvous. The Valkey mode discovers Aquifer instances, keeps active users sticky while capacity is available, and releases idle assignments without requiring another control plane. See [API.md](API.md#regional-cluster-routing) for failure semantics and configuration.
 
 **Dynamic partitioning (drain mode)**: off by default, for a more specific shape. Instead of deciding every assignment up front, an instance gets handed to one tenant at a time, absorbs and drains whatever burst that tenant sends, then frees itself up to be handed to a *different* tenant next, useful when you want dedicated capacity per user without hand-assigning it at deploy time. Aquifer can stream completed/failed job ledger events in acknowledged batches to a webhook or Valkey, and when idle for `AQUIFER_DRAIN_TIMER_SECONDS`, it flushes anything remaining before clearing local state and moving through an `active` → `draining` → `unassigned` state machine visible via `GET /health`. See **[DRAIN_MODE.md](DRAIN_MODE.md)** for the full state machine, env vars, and payload shape.
 

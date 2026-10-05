@@ -308,6 +308,7 @@ func (a *Aquifer) tryRedirectHop(ctx context.Context, job *Job, region, accountQ
 		Headers:          job.Headers,
 		Body:             job.Body,
 		WebhookURL:       job.WebhookURL,
+		ExecuteBefore:    job.ExecuteBefore,
 		OriginMachineID:  job.OriginMachineID,
 		OriginRegion:     job.OriginRegion,
 		VisitedRegions:   append(append([]string{}, job.VisitedRegions...), region),

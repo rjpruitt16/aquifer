@@ -27,6 +27,9 @@ func (a *Aquifer) BeginDrain(webSocketGrace time.Duration) bool {
 	if a.registry != nil {
 		a.registry.BeginDrain()
 	}
+	if a.clusterRouter != nil {
+		a.clusterRouter.SetState(LifecycleStateDraining)
+	}
 	return true
 }
 

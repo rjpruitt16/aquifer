@@ -91,11 +91,13 @@ func (s *Store) migrate() {
 			status              TEXT NOT NULL DEFAULT 'queued',
 			queue_key           TEXT NOT NULL DEFAULT '',
 			created_at          INTEGER NOT NULL,
+			execute_before      INTEGER NOT NULL DEFAULT 0,
 			expires_at          INTEGER NOT NULL
 		)
 	`)
 	// safe to run on existing tables — ignored if column already exists
 	s.db.Exec(`ALTER TABLE jobs ADD COLUMN queue_key TEXT NOT NULL DEFAULT ''`)
+	s.db.Exec(`ALTER TABLE jobs ADD COLUMN execute_before INTEGER NOT NULL DEFAULT 0`)
 	s.db.Exec(`
 		CREATE TABLE IF NOT EXISTS drain_events (
 			sequence             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -124,9 +126,9 @@ func (s *Store) CheckOrInsert(job *Job) (string, bool) {
 
 	res, err := s.db.Exec(`
 		INSERT OR IGNORE INTO jobs
-			(id, user_id, idempotent_key_hash, url, method, body, headers, webhook_url, status, created_at, expires_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)
-	`, job.ID, job.UserID, hashed, job.URL, job.Method, job.Body, string(headers), job.WebhookURL, job.CreatedAt, expiresAt)
+			(id, user_id, idempotent_key_hash, url, method, body, headers, webhook_url, status, created_at, execute_before, expires_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)
+	`, job.ID, job.UserID, hashed, job.URL, job.Method, job.Body, string(headers), job.WebhookURL, job.CreatedAt, job.ExecuteBefore, expiresAt)
 
 	if err == nil {
 		if n, _ := res.RowsAffected(); n == 1 {
@@ -164,7 +166,7 @@ func (s *Store) MarkInFlight(jobID string) {
 
 func (s *Store) RecoverInFlight(queueKey string) []*Job {
 	rows, err := s.db.Query(`
-		SELECT id, user_id, url, method, body, headers, webhook_url, status, created_at
+		SELECT id, user_id, url, method, body, headers, webhook_url, status, created_at, execute_before
 		FROM jobs
 		WHERE queue_key = ? AND status = 'in_flight' AND expires_at > ?
 	`, queueKey, time.Now().UnixMilli())
@@ -226,7 +228,7 @@ func (s *Store) Counts() StoreCounts {
 
 func (s *Store) GetJob(jobID string) *Job {
 	row := s.db.QueryRow(`
-		SELECT id, user_id, url, method, body, headers, webhook_url, status, created_at
+		SELECT id, user_id, url, method, body, headers, webhook_url, status, created_at, execute_before
 		FROM jobs WHERE id = ? AND expires_at > ?
 	`, jobID, time.Now().UnixMilli())
 	return scanJob(row)
@@ -234,7 +236,7 @@ func (s *Store) GetJob(jobID string) *Job {
 
 func (s *Store) GetQueuedJobs() []*Job {
 	rows, err := s.db.Query(`
-		SELECT id, user_id, url, method, body, headers, webhook_url, status, created_at
+		SELECT id, user_id, url, method, body, headers, webhook_url, status, created_at, execute_before
 		FROM jobs WHERE status = 'queued' AND expires_at > ?
 	`, time.Now().UnixMilli())
 	if err != nil {
@@ -357,7 +359,7 @@ type scanner interface {
 func scanJob(s scanner) *Job {
 	var j Job
 	var headersJSON string
-	err := s.Scan(&j.ID, &j.UserID, &j.URL, &j.Method, &j.Body, &headersJSON, &j.WebhookURL, &j.Status, &j.CreatedAt)
+	err := s.Scan(&j.ID, &j.UserID, &j.URL, &j.Method, &j.Body, &headersJSON, &j.WebhookURL, &j.Status, &j.CreatedAt, &j.ExecuteBefore)
 	if err != nil {
 		return nil
 	}
