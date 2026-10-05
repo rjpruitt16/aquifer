@@ -354,3 +354,70 @@ func strconvItoa(n int) string {
 	}
 	return string(buf[i:])
 }
+
+func TestClusterRoutesSharedScopeBySharedKey(t *testing.T) {
+	t.Setenv("AQUIFER_SHARED_IDEMPOTENCY_ENABLED", "true")
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+
+	appA, storeA := testClusterAquifer(t)
+	appB, storeB := testClusterAquifer(t)
+	httpA := httptest.NewServer(NewServer(appA).Routes())
+	t.Cleanup(httpA.Close)
+	httpB := httptest.NewServer(NewServer(appB).Routes())
+	t.Cleanup(httpB.Close)
+	nodeA := ClusterMember{ID: "node-a", Address: httpA.URL}
+	nodeB := ClusterMember{ID: "node-b", Address: httpB.URL}
+	routerA := testClusterRouter(nodeA, nodeA, nodeB)
+	appA.SetClusterRouter(routerA)
+	appB.SetClusterRouter(testClusterRouter(nodeB, nodeA, nodeB))
+
+	// A shared key owned by node-a, sent by two users whose own per-user
+	// routing would have split them across both nodes.
+	var sharedKey string
+	for i := 0; i < 10000 && sharedKey == ""; i++ {
+		candidate := "weather:" + strconvItoa(i)
+		if owner, ok := routerA.OwnerFor("shared\x00" + candidate); ok && owner.ID == nodeA.ID {
+			sharedKey = candidate
+		}
+	}
+	userOnA, userOnB := keyOwnedBy(t, routerA, nodeA.ID), keyOwnedBy(t, routerA, nodeB.ID)
+
+	send := func(node *httptest.Server, userID string) (int, EnqueueResult) {
+		body, _ := json.Marshal(JobRequest{
+			UserID: userID, IdempotentKey: sharedKey, IdempotencyScope: IdempotencyScopeShared,
+			URL: upstream.URL, Method: http.MethodGet, WebhookURL: upstream.URL,
+		})
+		resp, err := http.Post(node.URL+"/jobs", "application/json", bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var result EnqueueResult
+		json.NewDecoder(resp.Body).Decode(&result)
+		return resp.StatusCode, result
+	}
+
+	firstCode, first := send(httpB, userOnB)
+	secondCode, second := send(httpA, userOnA)
+	if firstCode != http.StatusCreated || secondCode != http.StatusOK || !second.Duplicate || second.JobID != first.JobID {
+		t.Fatalf("expected both users to coalesce on one job: first=%d %+v second=%d %+v", firstCode, first, secondCode, second)
+	}
+	if storeA.GetJob(first.JobID) == nil || storeB.Counts().TotalJobs != 0 {
+		t.Fatalf("expected only the shared key's owner to persist the job (A has job: %v, B counts: %+v)", storeA.GetJob(first.JobID) != nil, storeB.Counts())
+	}
+}
+
+func TestClusterRoutingKeyKeepsUserRoutingByDefault(t *testing.T) {
+	req := JobRequest{UserID: "u1", IdempotentKey: "k"}
+	if clusterRoutingKey(req) != "u1" {
+		t.Fatal("per-user requests must keep routing by user_id")
+	}
+	req.IdempotencyScope = IdempotencyScopeShared
+	if clusterRoutingKey(req) != "shared\x00k" {
+		t.Fatal("shared requests must route by the shared key")
+	}
+}
