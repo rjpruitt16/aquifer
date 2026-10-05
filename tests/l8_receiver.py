@@ -5,7 +5,7 @@ Standalone L8-compliant webhook receiver for protocol tests.
 Runs on :9001. Implements:
   GET  /.well-known/l8   — publishes receiver identity and public key
   POST /l8/challenge     — completes the ownership handshake
-  POST /webhook          — receives signed webhook deliveries, stores headers
+  POST /webhook          — receives signed (and, in 0.2, encrypted) webhook deliveries
   GET  /deliveries/:id   — returns stored delivery + L8 headers for test assertions
   POST /reset            — clears state between tests
 """
@@ -22,6 +22,13 @@ try:
         Ed25519PrivateKey,
         Ed25519PublicKey,
     )
+    from cryptography.hazmat.primitives.asymmetric.x25519 import (
+        X25519PrivateKey,
+        X25519PublicKey,
+    )
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.primitives.hashes import SHA256
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
     from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
     from cryptography.exceptions import InvalidSignature
 except ImportError:
@@ -36,6 +43,29 @@ _pub  = _priv.public_key()
 PUBLIC_KEY_B64 = base64.b64encode(
     _pub.public_bytes(Encoding.Raw, PublicFormat.Raw)
 ).decode()
+
+# L8 0.2 payload encryption key, separate from the Ed25519 signing key.
+# Set L8_RECEIVER_ENCRYPT=0 to behave like a 0.1 (sign-only) receiver.
+ENCRYPT = __import__("os").getenv("L8_RECEIVER_ENCRYPT", "1") != "0"
+_enc_priv = X25519PrivateKey.generate()
+ENCRYPTION_PUBLIC_KEY_B64 = base64.b64encode(
+    _enc_priv.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+).decode()
+ENCRYPTION_ALGORITHM = "x25519-hkdf-sha256-aes256gcm"
+
+
+def _decrypt(ciphertext: bytes, headers) -> bytes:
+    """Open an x25519-hkdf-sha256-aes256gcm payload. Raises on any tampering."""
+    eph_raw = base64.b64decode(headers["X-L8-Ephemeral-Key"])
+    nonce = base64.b64decode(headers["X-L8-Nonce"])
+    receiver_raw = base64.b64decode(ENCRYPTION_PUBLIC_KEY_B64)
+    shared = _enc_priv.exchange(X25519PublicKey.from_public_bytes(eph_raw))
+    key = HKDF(
+        algorithm=SHA256(), length=32, salt=eph_raw + receiver_raw, info=b"l8/0.2 payload"
+    ).derive(shared)
+    aad = f"{headers['X-L8-Delivery-Id']}.{headers['X-L8-Timestamp']}".encode()
+    return AESGCM(key).decrypt(nonce, ciphertext, aad)
+
 
 def _sign(msg: bytes) -> str:
     return base64.b64encode(_priv.sign(msg)).decode()
@@ -60,14 +90,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/.well-known/l8":
-            self._json(200, {
-                "protocol_version":     "0.1",
+            meta = {
+                "protocol_version":     "0.2",
                 "service_name":         "l8-test-receiver",
                 "public_key":           PUBLIC_KEY_B64,
                 "challenge_endpoint":   "/l8/challenge",
                 "supported_algorithms": ["ed25519"],
                 "capabilities":         ["signed_payloads"],
-            })
+            }
+            if ENCRYPT:
+                meta["supported_algorithms"].append(ENCRYPTION_ALGORITHM)
+                meta["capabilities"].append("encrypted_payloads")
+                meta["encryption_public_key"] = ENCRYPTION_PUBLIC_KEY_B64
+            self._json(200, meta)
             return
 
         if self.path.startswith("/deliveries/"):
@@ -143,14 +178,24 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def _handle_webhook(self, body: bytes):
-        payload    = json.loads(body) if body else {}
-        job_id     = payload.get("job_id")
         l8_headers = {
             k: self.headers.get(k)
-            for k in ("X-L8-Delivery-Id", "X-L8-Timestamp", "X-L8-Key-Id", "X-L8-Signature")
+            for k in ("X-L8-Delivery-Id", "X-L8-Timestamp", "X-L8-Key-Id", "X-L8-Signature",
+                      "X-L8-Encryption", "X-L8-Ephemeral-Key", "X-L8-Nonce", "X-L8-Content-Type")
             if self.headers.get(k)
         }
-        signed = "signed" if l8_headers else "unsigned"
+        encrypted = l8_headers.get("X-L8-Encryption") == ENCRYPTION_ALGORITHM
+        # Encrypt-then-sign: a real receiver verifies the signature over the
+        # ciphertext before decrypting. test_l8.py does that check itself
+        # against the stored raw_body, so this reference only decrypts.
+        try:
+            plaintext = _decrypt(body, l8_headers) if encrypted else body
+        except Exception as e:
+            self._json(400, {"error": f"decrypt failed: {e}"})
+            return
+        payload    = json.loads(plaintext) if plaintext else {}
+        job_id     = payload.get("job_id")
+        signed = ("signed+encrypted" if encrypted else "signed") if l8_headers else "unsigned"
         print(f"[{datetime.now().strftime('%H:%M:%S')}] webhook  "
               f"job={str(job_id or '?')[:8]}  status={payload.get('status','?')}  [{signed}]",
               flush=True)
@@ -159,6 +204,7 @@ class Handler(BaseHTTPRequestHandler):
                 deliveries[job_id] = {
                     "payload":    payload,
                     "raw_body":   base64.b64encode(body).decode(),  # exact bytes Aquifer signed
+                    "encrypted":  encrypted,
                     "l8_headers": l8_headers,
                 }
         self._json(200, {"ok": True})

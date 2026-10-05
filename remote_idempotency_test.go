@@ -84,7 +84,7 @@ func TestGetJobResultLooksUpRemoteByIdempotencyHash(t *testing.T) {
 	}
 	app.SetRemoteIdempotency(remote)
 
-	result, err := app.GetJobResult("user-1", "key-1")
+	result, err := app.GetJobResult("user-1", "key-1", "")
 	if err != nil {
 		t.Fatalf("expected remote result, got error: %v", err)
 	}

@@ -179,7 +179,7 @@ func (a *Aquifer) PrepareJob(req JobRequest) (job *Job, duplicate *EnqueueResult
 	}
 
 	if a.remote != nil {
-		entry, found := a.remote.Lookup(hashKey(req.UserID + ":" + req.IdempotentKey))
+		entry, found := a.remote.Lookup(job.dedupHash())
 		if found {
 			a.store.DeleteJob(job.ID)
 			return nil, &EnqueueResult{
@@ -192,8 +192,14 @@ func (a *Aquifer) PrepareJob(req JobRequest) (job *Job, duplicate *EnqueueResult
 	}
 
 	// CheckOrInsert already wrote this job's row since it wasn't a duplicate.
-	// If admission rejects it now, that row must be deleted or it becomes a
-	// ghost "queued" entry that never dispatches.
+	// If schema validation or admission rejects it now, that row must be
+	// deleted or it becomes a ghost "queued" entry that never dispatches.
+	if job.URL != "" {
+		if err := a.l8.ValidateRequestBody(job.URL, job.Method, job.Body); err != nil {
+			a.store.DeleteJob(job.ID)
+			return nil, nil, err
+		}
+	}
 	if a.admission != nil {
 		if decision := a.admission.Check(); !decision.Allowed {
 			a.store.DeleteJob(job.ID)
@@ -253,15 +259,20 @@ func (a *Aquifer) GetJob(id string) (*Job, error) {
 	return job, nil
 }
 
-func (a *Aquifer) GetJobResult(userID, idempotentKey string) (JobResult, error) {
-	if userID == "" || idempotentKey == "" {
-		return JobResult{}, errors.New("user_id and idempotent_key are required")
+func (a *Aquifer) GetJobResult(userID, idempotentKey, scope string) (JobResult, error) {
+	switch {
+	case idempotentKey == "":
+		return JobResult{}, errors.New("idempotent_key is required")
+	case scope == IdempotencyScopeShared && !sharedIdempotencyEnabled():
+		return JobResult{}, errors.New(`idempotency_scope "shared" requires AQUIFER_SHARED_IDEMPOTENCY_ENABLED=true`)
+	case scope != IdempotencyScopeShared && userID == "":
+		return JobResult{}, errors.New("user_id is required unless idempotency_scope is shared")
 	}
 	reader, ok := a.remote.(JobResultReader)
 	if !ok {
 		return JobResult{}, ErrJobResultNotFound
 	}
-	if result, found := reader.LookupResult(hashKey(userID + ":" + idempotentKey)); found {
+	if result, found := reader.LookupResult(dedupHash(userID, idempotentKey, scope)); found {
 		return result, nil
 	}
 	return JobResult{}, ErrJobResultNotFound
@@ -284,7 +295,7 @@ func (a *Aquifer) Health() map[string]any {
 	}
 	h := map[string]any{
 		"status":        status,
-		"l8_protocol":   "0.1",
+		"l8_protocol":   l8Version,
 		"l8_public_key": a.l8.PubB64,
 		"admission":     a.AdmissionSnapshot(),
 		"queues":        a.registry.QueueSnapshot(),

@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -21,8 +22,9 @@ import (
 )
 
 const (
-	l8Version  = "0.1"
-	l8NonceTTL = 5 * time.Minute
+	l8Version      = "0.2"
+	l8NonceTTL     = 5 * time.Minute
+	l8MetaMaxBytes = 1 << 20
 )
 
 // ---- wire types ----
@@ -35,6 +37,11 @@ type L8Meta struct {
 	SupportedAlgos    []string `json:"supported_algorithms"`
 	Capabilities      []string `json:"capabilities"`
 	SpecURL           string   `json:"spec_url"`
+
+	SchemaHash     string                     `json:"schema_hash,omitempty"`
+	RequestSchemas map[string]json.RawMessage `json:"request_schemas,omitempty"`
+
+	EncryptionPublicKey string `json:"encryption_public_key,omitempty"`
 }
 
 type L8ChallengeReq struct {
@@ -59,6 +66,8 @@ type l8TrustFile struct {
 	ValidatedAt     int64    `json:"validated_at"`
 	ProtocolVersion string   `json:"protocol_version"`
 	Capabilities    []string `json:"capabilities"`
+
+	EncryptionPublicKey string `json:"encryption_public_key,omitempty"`
 }
 
 // ---- registry ----
@@ -69,8 +78,9 @@ type L8Registry struct {
 	PubB64     string // exported so server can embed in responses
 
 	trustDir string
-	trusts   sync.Map // domain -> ed25519.PublicKey (in-memory, loaded from disk on start)
+	trusts   sync.Map // domain -> *l8Peer (in-memory, loaded from disk on start)
 	nonces   sync.Map // nonce -> time.Time expiry
+	schemas  *l8SchemaCache
 
 	closeOnce sync.Once
 	stop      chan struct{}
@@ -89,6 +99,7 @@ func NewL8Registry(keyPath, trustDir string) *L8Registry {
 		publicKey:  pub,
 		PubB64:     base64.StdEncoding.EncodeToString(pub),
 		trustDir:   trustDir,
+		schemas:    newL8SchemaCache(),
 		stop:       make(chan struct{}),
 		done:       make(chan struct{}),
 	}
@@ -245,7 +256,7 @@ func (r *L8Registry) EnsureTrust(webhookURL string) {
 		return
 	}
 
-	r.trusts.Store(domain, ed25519.PublicKey(receiverPub))
+	r.trusts.Store(domain, &l8Peer{signing: ed25519.PublicKey(receiverPub), encryption: parseEncryptionKey(meta.Capabilities, meta.EncryptionPublicKey)})
 	r.saveTrustToDisk(domain, ed25519.PublicKey(receiverPub), meta)
 	log.Printf("[L8] trust established with %s", domain)
 }
@@ -260,10 +271,8 @@ func (r *L8Registry) IsTrusted(webhookURL string) bool {
 	return ok
 }
 
-// SignHeaders returns X-L8-* headers to attach to an outgoing webhook delivery.
-func (r *L8Registry) SignHeaders(body []byte) map[string]string {
-	deliveryID := uuid.New().String()
-	ts := time.Now().Unix()
+// signHeaders returns the X-L8-* signature headers for the exact bytes sent.
+func (r *L8Registry) signHeaders(body []byte, deliveryID string, ts int64) map[string]string {
 	h := sha256.Sum256(body)
 	msg := fmt.Sprintf("%s.%d.%s", deliveryID, ts, base64.StdEncoding.EncodeToString(h[:]))
 	sig := ed25519.Sign(r.privateKey, []byte(msg))
@@ -279,11 +288,12 @@ func (r *L8Registry) SignHeaders(body []byte) map[string]string {
 
 func (r *L8Registry) saveTrustToDisk(domain string, pub ed25519.PublicKey, meta *L8Meta) {
 	tf := l8TrustFile{
-		Domain:          domain,
-		PublicKey:       base64.StdEncoding.EncodeToString(pub),
-		ValidatedAt:     time.Now().Unix(),
-		ProtocolVersion: meta.ProtocolVersion,
-		Capabilities:    meta.Capabilities,
+		Domain:              domain,
+		PublicKey:           base64.StdEncoding.EncodeToString(pub),
+		ValidatedAt:         time.Now().Unix(),
+		ProtocolVersion:     meta.ProtocolVersion,
+		Capabilities:        meta.Capabilities,
+		EncryptionPublicKey: meta.EncryptionPublicKey,
 	}
 	data, _ := json.MarshalIndent(tf, "", "  ")
 	filename := filepath.Join(r.trustDir, sanitizeDomain(domain)+".json")
@@ -313,7 +323,7 @@ func (r *L8Registry) loadTrustsFromDisk() {
 		if err != nil || len(pub) != ed25519.PublicKeySize {
 			continue
 		}
-		r.trusts.Store(tf.Domain, ed25519.PublicKey(pub))
+		r.trusts.Store(tf.Domain, &l8Peer{signing: ed25519.PublicKey(pub), encryption: parseEncryptionKey(tf.Capabilities, tf.EncryptionPublicKey)})
 		log.Printf("[L8] loaded trust for %s", tf.Domain)
 	}
 }
@@ -330,7 +340,7 @@ func fetchL8Meta(baseURL string) (*L8Meta, error) {
 		return nil, fmt.Errorf("/.well-known/l8 returned %d", resp.StatusCode)
 	}
 	var meta L8Meta
-	if err := json.NewDecoder(resp.Body).Decode(&meta); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, l8MetaMaxBytes)).Decode(&meta); err != nil {
 		return nil, err
 	}
 	if meta.PublicKey == "" || meta.ChallengeEndpoint == "" {
@@ -374,7 +384,7 @@ func (r *L8Registry) sweepNonces() {
 }
 
 // l8SpecDocument is served at GET /l8-spec so agents and developers can discover the protocol.
-const l8SpecDocument = `# L8 Protocol — v0.1
+const l8SpecDocument = `# L8 Protocol — v0.2
 
 L8 is a lightweight challenge-response handshake for trustless webhook delivery.
 No shared secrets. No central authority. Ownership is proven once via Ed25519 signatures.
@@ -388,7 +398,7 @@ Returns your service identity and public key.
 
 ` + "```" + `json
 {
-  "protocol_version":   "0.1",
+  "protocol_version":   "0.2",
   "service_name":       "your-service",
   "public_key":         "<base64 ed25519 public key>",
   "challenge_endpoint": "/l8/challenge",
@@ -451,6 +461,48 @@ def verify_l8(headers, body, sender_public_key_b64):
     pub.verify(sig, msg)  # raises InvalidSignature if tampered
 ` + "```" + `
 
+## Payload encryption (0.2, optional)
+
+Advertise an X25519 key (separate from your Ed25519 signing key) to receive encrypted bodies:
+
+` + "```" + `json
+{
+  "capabilities":          ["signed_payloads", "encrypted_payloads"],
+  "supported_algorithms":  ["ed25519", "x25519-hkdf-sha256-aes256gcm"],
+  "encryption_public_key": "<base64 X25519 public key>"
+}
+` + "```" + `
+
+The sender generates an ephemeral X25519 key per delivery, derives a key with
+HKDF-SHA256(ECDH(ephemeral, yours), salt = ephemeral_pub || your_pub, info = "l8/0.2 payload"),
+and encrypts with AES-256-GCM using AAD "{delivery_id}.{timestamp}". Extra headers:
+
+` + "```" + `
+X-L8-Encryption:    x25519-hkdf-sha256-aes256gcm
+X-L8-Ephemeral-Key: <base64 ephemeral X25519 public key>
+X-L8-Nonce:         <base64 12-byte nonce>
+X-L8-Content-Type:  <original content type>
+Content-Type:       application/l8-encrypted
+` + "```" + `
+
+X-L8-Signature covers the ciphertext. Verify it first, then decrypt.
+
+## Request schemas (0.2, optional)
+
+An upstream can publish JSON Schemas (draft 2020-12) for its request bodies, keyed by "METHOD /path":
+
+` + "```" + `json
+{
+  "capabilities":    ["signed_payloads", "request_schemas"],
+  "schema_hash":     "sha256:<hex>",
+  "request_schemas": { "POST /v1/chat": { "type": "object", "required": ["model"] } }
+}
+` + "```" + `
+
+schema_hash is required when request_schemas is present; senders compare it for equality only.
+Send X-Aqueduct-Schema-Hash on responses so senders notice a change, refetch this document,
+and re-run the handshake. Senders cache schemas for at most 10 minutes and never fetch external $refs.
+
 ## Key rotation
 
 If signature verification fails, re-fetch the sender's ` + "`/.well-known/l8`" + ` to get the new public key
@@ -465,7 +517,7 @@ Store one file per trusted domain: ` + "`l8-trust/{domain}.json`" + `
   "domain":           "https://example.com",
   "public_key":       "<base64>",
   "validated_at":     1740000000,
-  "protocol_version": "0.1",
+  "protocol_version": "0.2",
   "capabilities":     ["signed_payloads"]
 }
 ` + "```" + `
