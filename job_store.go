@@ -11,8 +11,8 @@ import (
 // until now; *PebbleStore is an opt-in alternative for benchmarking whether
 // a memory-first LSM store changes the throughput ceiling the way it did
 // for the Elixir/Mnesia sibling of this project. Selected via
-// AQUIFER_STORE_BACKEND ("sqlite", the default, or "pebble") — existing
-// deployments that don't set it see no change at all.
+// AQUIFER_STORE_BACKEND ("pebble", the default, or "sqlite"). An existing
+// SQLite file at DB_PATH keeps an upgraded deployment on SQLite.
 type JobStore interface {
 	Path() string
 	Close() error
@@ -40,10 +40,19 @@ type JobStore interface {
 // SQLite it's a file path, for Pebble it's a directory.
 func NewJobStore(path string) JobStore {
 	switch os.Getenv("AQUIFER_STORE_BACKEND") {
+	case "sqlite":
+		return NewStore(path)
 	case "pebble":
 		log.Printf("store: using Pebble backend at %s", path)
 		return NewPebbleStore(path)
-	default:
+	}
+	// Pebble is the default. An existing SQLite file at DB_PATH means an
+	// upgrade from the old default: stay on it rather than orphan its queued
+	// jobs (Pebble needs a directory there and would start empty).
+	if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
+		log.Printf("store: found an existing SQLite database at %s, staying on SQLite; set AQUIFER_STORE_BACKEND=pebble with a new DB_PATH to switch", path)
 		return NewStore(path)
 	}
+	log.Printf("store: using Pebble backend at %s", path)
+	return NewPebbleStore(path)
 }

@@ -145,9 +145,9 @@ upstreams:
 | `AQUIFER_ADAPTER` | `http` for binary, `mcp-stdio` in Docker image | Runtime adapter: `http`, `mcp-stdio`, or `a2a` |
 | `AQUIFER_A2A_PUBLIC_URL` | `http://localhost:$PORT` | A2A adapter only: externally-reachable base URL advertised in the Agent Card |
 | `PORT`        | `8080`       | HTTP listen port               |
-| `DB_PATH`     | `aquifer.db` | Storage path: a SQLite file, or a directory if `AQUIFER_STORE_BACKEND=pebble` |
+| `DB_PATH`     | `aquifer.db` | Storage path: a directory for Pebble (the default), or a file for SQLite |
 | `CONFIG_PATH` | _(none)_     | Path to rate limit config YAML |
-| `AQUIFER_STORE_BACKEND` | `sqlite` | Storage engine: `sqlite` or `pebble` (opt-in, pure-Go LSM store; see [benchmark.md](benchmark.md) for why you might want it) |
+| `AQUIFER_STORE_BACKEND` | `pebble` | Storage engine: `pebble` (pure-Go LSM store, the faster backend; see [benchmark.md](benchmark.md)) or `sqlite`. If `DB_PATH` is an existing SQLite file, Aquifer stays on SQLite so an upgrade doesn't orphan queued jobs |
 | `AQUIFER_PEBBLE_WAL_SYNC_INTERVAL_MS` | `5` | Pebble only: batches concurrent durable writes into fewer real fsyncs under load (Pebble's own group-commit); each caller still blocks until its own write is actually durable |
 | `AQUIFER_MEMORY_LIMIT_MB` | _(none, disabled)_ | Reject new jobs with `429` once process memory exceeds this many MB |
 | `AQUIFER_MAX_BODY_BYTES` | `1048576` (1MB) | Reject oversized request bodies with `413` |

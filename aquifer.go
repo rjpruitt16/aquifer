@@ -46,6 +46,7 @@ type Aquifer struct {
 	clusterRouter     *ClusterRouter
 	webSockets        *WebSocketManager
 	draining          atomic.Bool
+	inbound           *InboundRateController
 }
 
 func NewAquifer(store JobStore, registry *Registry, broker *Broker, l8 *L8Registry, admission *AdmissionController, pools *PoolRegistry) *Aquifer {
@@ -53,6 +54,7 @@ func NewAquifer(store JobStore, registry *Registry, broker *Broker, l8 *L8Regist
 		store: store, registry: registry, broker: broker, l8: l8, admission: admission, pools: pools,
 		redirectGate:      &redirectGate{},
 		redirectTargetURL: defaultRedirectTargetURL,
+		inbound:           NewInboundRateController(),
 	}
 }
 
@@ -60,6 +62,7 @@ func (a *Aquifer) Close() {
 	if a == nil {
 		return
 	}
+	a.inbound.Close()
 	if closer, ok := a.regionAdapter.(interface{ Close() }); ok {
 		closer.Close()
 	}
@@ -170,7 +173,10 @@ func (a *Aquifer) PrepareJob(req JobRequest) (job *Job, duplicate *EnqueueResult
 
 	// Idempotency check comes first: a retried job that already exists must
 	// still succeed even while the system is over an admission limit.
-	if existingID, isDuplicate := a.store.CheckOrInsert(job); isDuplicate {
+	insertStarted := time.Now()
+	existingID, isDuplicate := a.store.CheckOrInsert(job)
+	a.inbound.Observe(req.UserID, time.Since(insertStarted), !isDuplicate)
+	if isDuplicate {
 		return nil, &EnqueueResult{
 			JobID:     existingID,
 			Status:    StatusQueued,
@@ -306,6 +312,9 @@ func (a *Aquifer) Health() map[string]any {
 	if drain := a.registry.DrainSnapshot(); drain != nil {
 		h["drain"] = drain
 	}
+	if inbound := a.inbound.Snapshot(); inbound != nil {
+		h["inbound"] = inbound
+	}
 	if cluster := a.clusterRouter.Snapshot(); cluster != nil {
 		h["cluster"] = cluster
 	}
@@ -324,4 +333,10 @@ func (a *Aquifer) L8Metadata(host string) L8Meta {
 
 func (a *Aquifer) HandleL8Challenge(req L8ChallengeReq) (*L8ChallengeResp, error) {
 	return a.l8.HandleChallenge(req)
+}
+
+// InboundRPS is the X-Aqueduct-Rps to advertise to userID, or 0 when inbound
+// pacing is disabled.
+func (a *Aquifer) InboundRPS(userID string) float64 {
+	return a.inbound.AdvertisedRPS(userID)
 }
