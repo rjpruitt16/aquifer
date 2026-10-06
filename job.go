@@ -32,6 +32,12 @@ type Job struct {
 	CreatedAt     int64             `json:"created_at"`
 	ExecuteBefore int64             `json:"execute_before,omitempty"`
 
+	IdempotencyScope string `json:"idempotency_scope,omitempty"`
+	// DedupHash caches dedupHash's result. SQLite never stores the plaintext
+	// idempotent key, so a job reloaded from it can only recover the hash
+	// from the idempotent_key_hash column, not recompute it.
+	DedupHash string `json:"-"`
+
 	// Cross-region /proxy redirect fields — see proxy.go's AttemptDirect.
 	// Absent/zero on a fresh top-level request; that absence IS the signal
 	// "I'm the origin, nobody redirected this to me." OriginMachineID set
@@ -75,6 +81,12 @@ type JobRequest struct {
 	WebhookURL    string            `json:"webhook_url"`
 	ExecuteBefore int64             `json:"execute_before,omitempty"`
 
+	// IdempotencyScope "shared" dedups on idempotent_key alone, across every
+	// user_id, so concurrent callers asking for the same resource coalesce
+	// onto one upstream call and one cached result. Empty or "user" keeps
+	// the default per-user scope. Requires AQUIFER_SHARED_IDEMPOTENCY_ENABLED.
+	IdempotencyScope string `json:"idempotency_scope,omitempty"`
+
 	// Cross-region /proxy redirect fields — see Job's own doc comment and
 	// proxy.go's AttemptDirect. Only ever set on an internal redirect hop
 	// (one Aquifer instance calling another's /proxy directly); a real
@@ -109,8 +121,14 @@ func (r *JobRequest) Validate() string {
 		return "execute_before must be a positive Unix timestamp in milliseconds"
 	case r.UserID == "":
 		return "user_id is required"
+	case strings.ContainsRune(r.UserID, 0):
+		return "user_id must not contain NUL characters"
 	case r.IdempotentKey == "":
 		return "idempotent_key is required"
+	case r.IdempotencyScope != "" && r.IdempotencyScope != IdempotencyScopeUser && r.IdempotencyScope != IdempotencyScopeShared:
+		return `idempotency_scope must be "user" or "shared"`
+	case r.IdempotencyScope == IdempotencyScopeShared && !sharedIdempotencyEnabled():
+		return `idempotency_scope "shared" requires AQUIFER_SHARED_IDEMPOTENCY_ENABLED=true`
 	case r.URL == "" && r.PoolID == "":
 		return "either url or pool_id is required"
 	case r.URL != "" && r.PoolID != "":
@@ -163,24 +181,52 @@ func domainAllowed(rawURL string) bool {
 	return false
 }
 
+const (
+	IdempotencyScopeUser   = "user"
+	IdempotencyScopeShared = "shared"
+)
+
+func sharedIdempotencyEnabled() bool {
+	return envBool("AQUIFER_SHARED_IDEMPOTENCY_ENABLED", false)
+}
+
+// dedupHash is the one place an idempotency identity is derived. The shared
+// form can't collide with a per-user one: a per-user key would need a user_id
+// containing NUL, which Validate rejects.
+func dedupHash(userID, idempotentKey, scope string) string {
+	if scope == IdempotencyScopeShared {
+		return hashKey("shared\x00" + idempotentKey)
+	}
+	return hashKey(userID + ":" + idempotentKey)
+}
+
+func (j *Job) dedupHash() string {
+	if j.DedupHash != "" {
+		return j.DedupHash
+	}
+	return dedupHash(j.UserID, j.IdempotentKey, j.IdempotencyScope)
+}
+
 func NewJob(r *JobRequest) *Job {
 	return &Job{
-		ID:              generateID(),
-		UserID:          r.UserID,
-		IdempotentKey:   r.IdempotentKey,
-		URL:             r.URL,
-		PoolID:          r.PoolID,
-		Method:          strings.ToUpper(r.Method),
-		Headers:         r.Headers,
-		Body:            r.Body,
-		WebhookURL:      r.WebhookURL,
-		Status:          StatusQueued,
-		CreatedAt:       time.Now().UnixMilli(),
-		ExecuteBefore:   r.ExecuteBefore,
-		OriginMachineID: r.OriginMachineID,
-		OriginRegion:    r.OriginRegion,
-		VisitedRegions:  r.VisitedRegions,
-		RerouteCount:    r.RerouteCount,
+		ID:               generateID(),
+		UserID:           r.UserID,
+		IdempotentKey:    r.IdempotentKey,
+		IdempotencyScope: r.IdempotencyScope,
+		DedupHash:        dedupHash(r.UserID, r.IdempotentKey, r.IdempotencyScope),
+		URL:              r.URL,
+		PoolID:           r.PoolID,
+		Method:           strings.ToUpper(r.Method),
+		Headers:          r.Headers,
+		Body:             r.Body,
+		WebhookURL:       r.WebhookURL,
+		Status:           StatusQueued,
+		CreatedAt:        time.Now().UnixMilli(),
+		ExecuteBefore:    r.ExecuteBefore,
+		OriginMachineID:  r.OriginMachineID,
+		OriginRegion:     r.OriginRegion,
+		VisitedRegions:   r.VisitedRegions,
+		RerouteCount:     r.RerouteCount,
 	}
 }
 

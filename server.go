@@ -162,6 +162,9 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+		if writeSchemaMismatch(w, err) {
+			return
+		}
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -198,7 +201,8 @@ func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getJobResult(w http.ResponseWriter, r *http.Request) {
-	result, err := s.aquifer.GetJobResult(r.URL.Query().Get("user_id"), r.URL.Query().Get("idempotent_key"))
+	q := r.URL.Query()
+	result, err := s.aquifer.GetJobResult(q.Get("user_id"), q.Get("idempotent_key"), q.Get("idempotency_scope"))
 	if err != nil {
 		if errors.Is(err, ErrJobResultNotFound) {
 			jsonError(w, "job result not found", http.StatusNotFound)
@@ -395,6 +399,9 @@ func (s *Server) proxyJob(w http.ResponseWriter, r *http.Request) {
 			jsonErrorFields(w, outcome.Err.Error(), http.StatusTooManyRequests, map[string]any{
 				"limit_reason": "redirect_exhausted",
 			})
+			return
+		}
+		if writeSchemaMismatch(w, outcome.Err) {
 			return
 		}
 		jsonError(w, outcome.Err.Error(), http.StatusBadRequest)
@@ -702,4 +709,17 @@ func jsonErrorFields(w http.ResponseWriter, msg string, code int, fields map[str
 		body[k] = v
 	}
 	json.NewEncoder(w).Encode(body)
+}
+
+func writeSchemaMismatch(w http.ResponseWriter, err error) bool {
+	var schemaErr *SchemaMismatchError
+	if !errors.As(err, &schemaErr) {
+		return false
+	}
+	jsonErrorFields(w, err.Error(), http.StatusUnprocessableEntity, map[string]any{
+		"schema_route":  schemaErr.Route,
+		"schema_hash":   schemaErr.SchemaHash,
+		"schema_errors": schemaErr.Detail,
+	})
+	return true
 }

@@ -303,6 +303,7 @@ func (a *Aquifer) tryRedirectHop(ctx context.Context, job *Job, region, accountQ
 	hopReq := JobRequest{
 		UserID:           job.UserID,
 		IdempotentKey:    job.IdempotentKey,
+		IdempotencyScope: job.IdempotencyScope,
 		URL:              job.URL,
 		Method:           job.Method,
 		Headers:          job.Headers,

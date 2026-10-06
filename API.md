@@ -25,6 +25,10 @@ Idempotent — duplicate `idempotent_key` per `user_id` returns the existing job
 
 **201** new job queued · **200 + `"duplicate": true`** already exists
 
+**Shared idempotency scope.** Set `"idempotency_scope": "shared"` to dedup on `idempotent_key` alone, across every `user_id`. Many agents asking for the same resource then coalesce onto one upstream call: the first request creates the job, later ones get `200 + "duplicate": true` with the same `job_id`. On `/proxy` they are streamed that job's result; with remote results enabled, `GET /results?idempotency_scope=shared&idempotent_key=...` serves the cached response to the whole pool. Followers do not get their own webhook. Requires `AQUIFER_SHARED_IDEMPOTENCY_ENABLED=true` (default `false`); otherwise `"shared"` is rejected with `400`. Anyone who knows a shared key can read its result, so use keys that name a public resource (`weather:sf:2026-10-05`), never one that carries a user's private data. In a cluster, shared requests are routed by the shared key instead of `user_id`, so every caller for that key reaches the same owner node and coalesces there; per-user requests keep routing by `user_id`. Independent instances that share only Valkey (not one cluster) can each run the job once before the first result lands; the last write to Valkey wins.
+
+**422** the upstream's L8 `request_schemas` rejects the body (see [Request schemas](#request-schemas-l8-02)).
+
 ### Fair queue admission
 
 Each upstream has a soft shared backlog budget `B`, defaulting to `AQUIFER_MAX_PENDING_PER_UPSTREAM=10000`. The upstream may update it at runtime with `X-Aqueduct-Max-Backlog` (or `X-Aquifer-Max-Backlog`); `0` disables this count-based limit. Dynamic values are learned from direct proxy responses and queued dispatch responses.
@@ -366,6 +370,36 @@ The built-in HTTP, MCP stdio, and A2A adapters handle `SIGINT`/`SIGTERM` through
 
 The process termination grace configured by your orchestrator must exceed `AQUIFER_SHUTDOWN_TIMEOUT_SECONDS`; otherwise the orchestrator may send `SIGKILL` before Aquifer can finish or preserve the intended shutdown sequence.
 
+## Request schemas (L8 0.2)
+
+An upstream that implements L8 0.2 can publish a JSON Schema (draft 2020-12) per route in its `GET /.well-known/l8`:
+
+```json
+{
+  "protocol_version": "0.2",
+  "public_key": "...",
+  "challenge_endpoint": "/l8/challenge",
+  "capabilities": ["signed_payloads", "request_schemas"],
+  "schema_hash": "sha256:9c1e...",
+  "request_schemas": {
+    "POST /v1/chat/completions": { "type": "object", "required": ["model", "messages"] }
+  }
+}
+```
+
+With `AQUIFER_L8_SCHEMA_VALIDATION=true`, Aquifer fetches this once per upstream domain, caches it for up to 10 minutes, and checks `url`-routed job bodies whose method and path match a route. A mismatch never reaches the upstream:
+
+```json
+{
+  "error": "request body does not match the schema the upstream advertises for POST /v1/chat/completions",
+  "schema_route": "POST /v1/chat/completions",
+  "schema_hash": "sha256:9c1e...",
+  "schema_errors": "..."
+}
+```
+
+When the upstream changes its contract it returns a new `X-Aqueduct-Schema-Hash` on any response. Aquifer then drops the cached schemas and the L8 trust for that domain, so the next request refetches metadata and re-runs the handshake. Routes without a schema, upstreams without L8, and metadata that fails to fetch or compile are all let through unchecked. External `$ref`s are never fetched.
+
 ## Webhooks
 
 **Completed**
@@ -393,6 +427,7 @@ The process termination grace configured by your orchestrator must exceed `AQUIF
 - Delivery is crash-durable — a webhook still pending when the process restarts is recovered and retried, the same way a queued job is, rather than being lost with an in-memory retry loop.
 - Retries trigger on `5xx` responses (not every non-`2xx`), matching forward dispatch's own retry condition — up to 4 attempts, exponential backoff 1 s · 2 s · 4 s · 8 s.
 - L8 signing (see [README.md](README.md#l8-protocol--trustless-webhook-delivery)) still applies exactly as before — trust is established and delivery is signed the same way, just from inside the paced dispatch path instead of a separate one-shot retry loop.
+- L8 encryption: when the receiver advertises `encrypted_payloads` and an X25519 `encryption_public_key`, the body is encrypted to that key (`x25519-hkdf-sha256-aes256gcm`) and the signature covers the ciphertext. The receiver verifies, then decrypts. See the [L8 spec](https://rjpruitt16.github.io/l8-protocol/) for the exact construction.
 
 Delivery is still at-least-once — see [Delivery semantics](README.md#how-it-works). Drain mode's own ledger webhook is separate: it sends acknowledged batches from the local drain-event journal and deletes only the events confirmed by a `2xx` response. See [DRAIN_MODE.md](DRAIN_MODE.md) for that payload contract.
 
@@ -418,6 +453,8 @@ Key:
 ```txt
 {AQUIFER_REMOTE_IDEMPOTENCY_PREFIX}{sha256(user_id + ":" + idempotent_key)}
 ```
+
+For `idempotency_scope: "shared"` jobs the hashed value is `"shared\0" + idempotent_key` instead, in both this key and the result key below.
 
 Value:
 
@@ -480,6 +517,12 @@ curl "http://localhost:8080/results?user_id=user-123&idempotent_key=invoice-42-n
 ```
 
 Returns **404** if remote result recording is disabled, the result has expired, or the job has not reached a terminal state yet.
+
+For a shared-scope job, drop `user_id` and pass the scope (requires `AQUIFER_SHARED_IDEMPOTENCY_ENABLED=true`):
+
+```bash
+curl "http://localhost:8080/results?idempotency_scope=shared&idempotent_key=weather:sf:2026-10-05"
+```
 
 ## Autoscaling
 

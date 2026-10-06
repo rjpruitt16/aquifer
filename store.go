@@ -120,7 +120,7 @@ func (s *Store) migrate() {
 // losing it. RowsAffected==1 is authoritative and atomic: it's exactly the
 // row this call just wrote, no read-your-own-write race possible.
 func (s *Store) CheckOrInsert(job *Job) (string, bool) {
-	hashed := hashKey(job.UserID + ":" + job.IdempotentKey)
+	hashed := job.dedupHash()
 	headers, _ := json.Marshal(job.Headers)
 	expiresAt := time.Now().Add(ttlQueued).UnixMilli()
 
@@ -166,7 +166,7 @@ func (s *Store) MarkInFlight(jobID string) {
 
 func (s *Store) RecoverInFlight(queueKey string) []*Job {
 	rows, err := s.db.Query(`
-		SELECT id, user_id, url, method, body, headers, webhook_url, status, created_at, execute_before
+		SELECT id, user_id, url, method, body, headers, webhook_url, status, created_at, execute_before, idempotent_key_hash
 		FROM jobs
 		WHERE queue_key = ? AND status = 'in_flight' AND expires_at > ?
 	`, queueKey, time.Now().UnixMilli())
@@ -228,7 +228,7 @@ func (s *Store) Counts() StoreCounts {
 
 func (s *Store) GetJob(jobID string) *Job {
 	row := s.db.QueryRow(`
-		SELECT id, user_id, url, method, body, headers, webhook_url, status, created_at, execute_before
+		SELECT id, user_id, url, method, body, headers, webhook_url, status, created_at, execute_before, idempotent_key_hash
 		FROM jobs WHERE id = ? AND expires_at > ?
 	`, jobID, time.Now().UnixMilli())
 	return scanJob(row)
@@ -236,7 +236,7 @@ func (s *Store) GetJob(jobID string) *Job {
 
 func (s *Store) GetQueuedJobs() []*Job {
 	rows, err := s.db.Query(`
-		SELECT id, user_id, url, method, body, headers, webhook_url, status, created_at, execute_before
+		SELECT id, user_id, url, method, body, headers, webhook_url, status, created_at, execute_before, idempotent_key_hash
 		FROM jobs WHERE status = 'queued' AND expires_at > ?
 	`, time.Now().UnixMilli())
 	if err != nil {
@@ -359,7 +359,7 @@ type scanner interface {
 func scanJob(s scanner) *Job {
 	var j Job
 	var headersJSON string
-	err := s.Scan(&j.ID, &j.UserID, &j.URL, &j.Method, &j.Body, &headersJSON, &j.WebhookURL, &j.Status, &j.CreatedAt, &j.ExecuteBefore)
+	err := s.Scan(&j.ID, &j.UserID, &j.URL, &j.Method, &j.Body, &headersJSON, &j.WebhookURL, &j.Status, &j.CreatedAt, &j.ExecuteBefore, &j.DedupHash)
 	if err != nil {
 		return nil
 	}

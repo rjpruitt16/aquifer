@@ -1,13 +1,13 @@
 package aquifer
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"log"
 	"math"
 	"net/http"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -656,7 +656,7 @@ func recordJobResult(job *Job, recorder JobResultRecorder, status Status, respon
 	if recorder == nil || job.isWebhookDeliveryJob() {
 		return ""
 	}
-	key, ok := recorder.RecordResult(hashKey(job.UserID+":"+job.IdempotentKey), JobResult{
+	key, ok := recorder.RecordResult(job.dedupHash(), JobResult{
 		JobID:          job.ID,
 		Status:         status,
 		ResponseStatus: responseStatus,
@@ -679,9 +679,29 @@ func pacingHeader(headers http.Header, name string) string {
 }
 
 func makeRequest(ctx context.Context, job *Job, dispatchURL string, totalJobs, queueDepth int64, flowRate float64, activeQueues int, upstreamBacklog int64, l8 *L8Registry) (*http.Response, error) {
+	// L8 signing and encryption prove Aquifer's identity to (and keep the
+	// payload private for) the *receiver* of a webhook — they have no meaning
+	// for forward dispatch to an arbitrary upstream API, so this only applies
+	// when the job being dispatched is itself a webhook delivery (see
+	// Job.isWebhookDeliveryJob).
+	body := []byte(job.Body)
+	var l8Headers map[string]string
+	if job.isWebhookDeliveryJob() && l8 != nil {
+		l8.EnsureTrust(dispatchURL)
+		contentType := job.Headers["Content-Type"]
+		if contentType == "" {
+			contentType = "application/json"
+		}
+		sealed, headers, err := l8.SealDelivery(dispatchURL, body, contentType)
+		if err != nil {
+			return nil, err
+		}
+		body, l8Headers = sealed, headers
+	}
+
 	var bodyReader io.Reader
-	if job.Body != "" {
-		bodyReader = strings.NewReader(job.Body)
+	if len(body) > 0 {
+		bodyReader = bytes.NewReader(body)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, job.Method, dispatchURL, bodyReader)
@@ -692,18 +712,8 @@ func makeRequest(ctx context.Context, job *Job, dispatchURL string, totalJobs, q
 	for k, v := range job.Headers {
 		req.Header.Set(k, v)
 	}
-
-	// L8 signing proves Aquifer's identity to the *receiver* of a webhook —
-	// it has no meaning for forward dispatch to an arbitrary upstream API,
-	// so this only applies when the job being dispatched is itself a
-	// webhook delivery (see Job.isWebhookDeliveryJob).
-	if job.isWebhookDeliveryJob() && l8 != nil {
-		l8.EnsureTrust(dispatchURL)
-		if l8.IsTrusted(dispatchURL) {
-			for k, v := range l8.SignHeaders([]byte(job.Body)) {
-				req.Header.Set(k, v)
-			}
-		}
+	for k, v := range l8Headers {
+		req.Header.Set(k, v)
 	}
 
 	setLoadHeader(req.Header, "Total-Jobs", fmt.Sprintf("%d", totalJobs))
@@ -732,7 +742,11 @@ func makeRequest(ctx context.Context, job *Job, dispatchURL string, totalJobs, q
 	}
 
 	client := &http.Client{Timeout: 30 * time.Second}
-	return client.Do(req)
+	resp, err := client.Do(req)
+	if err == nil {
+		l8.ObserveSchemaHash(dispatchURL, pacingHeader(resp.Header, "Schema-Hash"))
+	}
+	return resp, err
 }
 
 func setLoadHeader(headers http.Header, name, value string) {

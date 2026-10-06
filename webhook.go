@@ -29,16 +29,20 @@ func deliverWebhookSyncContext(ctx context.Context, url string, payload map[stri
 func deliverWebhookOnceContext(ctx context.Context, rawURL string, payload map[string]any, l8 *L8Registry, metrics MetricsAdapter) bool {
 	metrics = ensureMetrics(metrics)
 	body, _ := json.Marshal(payload)
+	body, l8Headers, err := l8.SealDelivery(rawURL, body, "application/json")
+	if err != nil {
+		log.Printf("[Webhook] %v", err)
+		metrics.WebhookFailed(rawURL, 1)
+		return false
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rawURL, bytes.NewReader(body))
 	if err != nil {
 		metrics.WebhookFailed(rawURL, 1)
 		return false
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if l8 != nil && l8.IsTrusted(rawURL) {
-		for key, value := range l8.SignHeaders(body) {
-			req.Header.Set(key, value)
-		}
+	for key, value := range l8Headers {
+		req.Header.Set(key, value)
 	}
 	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
 	if err != nil {
@@ -67,6 +71,12 @@ func deliverWithRetryContext(ctx context.Context, rawURL string, payload map[str
 	if l8 != nil {
 		l8.EnsureTrust(rawURL)
 	}
+	body, l8Headers, err := l8.SealDelivery(rawURL, body, "application/json")
+	if err != nil {
+		log.Printf("[Webhook] %v", err)
+		metrics.WebhookFailed(rawURL, attempt+1)
+		return false
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rawURL, bytes.NewReader(body))
 	if err != nil {
@@ -75,11 +85,8 @@ func deliverWithRetryContext(ctx context.Context, rawURL string, payload map[str
 		return false
 	}
 	req.Header.Set("Content-Type", "application/json")
-
-	if l8 != nil && l8.IsTrusted(rawURL) {
-		for k, v := range l8.SignHeaders(body) {
-			req.Header.Set(k, v)
-		}
+	for k, v := range l8Headers {
+		req.Header.Set(k, v)
 	}
 
 	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)

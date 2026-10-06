@@ -4,10 +4,12 @@ L8 protocol integration tests for Aquifer.
 
 Requires the 'cryptography' package: pip install cryptography
 
-Three cases:
-  1. Handshake    — Aquifer completes the challenge with the L8 receiver
-  2. Signed delivery — webhook arrives with valid X-L8-Signature
-  3. Signature valid — verify sig against Aquifer's public key from /.well-known/l8
+Cases:
+  1. /.well-known/l8 — Aquifer publishes 0.2 metadata
+  2. Signed delivery — handshake completes, webhook arrives with X-L8-* headers
+  3. Signature valid — verify sig (over the bytes sent) against Aquifer's public key
+  4. /health advertises the L8 version
+  5. Encrypted delivery — body arrives as ciphertext and decrypts to the payload
 """
 import base64
 import hashlib
@@ -119,10 +121,10 @@ def test_well_known_l8():
         else:
             ok(f"metadata contains {field}")
 
-    if meta.get("protocol_version") == "0.1":
-        ok("protocol_version is 0.1")
+    if meta.get("protocol_version") == "0.2":
+        ok("protocol_version is 0.2")
     else:
-        fail("protocol_version is 0.1", f"got {meta.get('protocol_version')}")
+        fail("protocol_version is 0.2", f"got {meta.get('protocol_version')}")
 
 
 # ---- Test 2: handshake + signed delivery -------------------------------------
@@ -193,8 +195,8 @@ def test_health_advertises_l8():
     r = requests.get(f"{AQUIFER_URL}/health", timeout=5)
     data = r.json()
 
-    if data.get("l8_protocol") == "0.1":
-        ok("health reports l8_protocol: 0.1")
+    if data.get("l8_protocol") == "0.2":
+        ok("health reports l8_protocol: 0.2")
     else:
         fail("health reports l8_protocol", f"got {data.get('l8_protocol')}")
 
@@ -202,6 +204,46 @@ def test_health_advertises_l8():
         ok("health includes l8_public_key")
     else:
         fail("health includes l8_public_key", "missing")
+
+
+# ---- Test 5: encrypted delivery ----------------------------------------------
+
+def test_encrypted_delivery():
+    print("\nTest 5: Webhook body is encrypted to the receiver's X25519 key")
+    meta = requests.get(f"{RECEIVER_URL}/.well-known/l8", timeout=5).json()
+    if "encrypted_payloads" not in meta.get("capabilities", []):
+        print("  (skipped: receiver started with L8_RECEIVER_ENCRYPT=0)")
+        return
+    reset()
+
+    job_id = submit_job()
+    entry  = wait_for_delivery(job_id, timeout=25)
+    if entry is None:
+        fail("encrypted webhook delivered", "no delivery within 25s")
+        return
+
+    l8_headers = entry.get("l8_headers", {})
+    if l8_headers.get("X-L8-Encryption") == "x25519-hkdf-sha256-aes256gcm" and entry.get("encrypted"):
+        ok("delivery carries X-L8-Encryption")
+    else:
+        fail("delivery carries X-L8-Encryption", f"headers: {l8_headers}")
+        return
+
+    raw_body = base64.b64decode(entry.get("raw_body", ""))
+    if job_id.encode() in raw_body:
+        fail("body is ciphertext", "job_id visible in the raw body")
+    else:
+        ok("body is ciphertext")
+
+    if verify_l8_signature(aquifer_public_key(), raw_body, l8_headers):
+        ok("signature covers the ciphertext")
+    else:
+        fail("signature covers the ciphertext", "verification failed")
+
+    if entry.get("payload", {}).get("job_id") == job_id:
+        ok("receiver decrypted the payload")
+    else:
+        fail("receiver decrypted the payload", f"got {entry.get('payload')}")
 
 
 # ---- Main --------------------------------------------------------------------
@@ -216,6 +258,7 @@ if __name__ == "__main__":
     test_signed_delivery()
     test_signature_valid()
     test_health_advertises_l8()
+    test_encrypted_delivery()
 
     print()
     if failures:

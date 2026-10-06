@@ -139,7 +139,7 @@ func drainSequenceMetaKey() []byte    { return []byte("meta:drain_sequence") }
 // was already accepted. The shard lock is what makes this atomic instead
 // of a racy Get-then-Set — see the package doc comment above.
 func (s *PebbleStore) CheckOrInsert(job *Job) (string, bool) {
-	hashed := hashKey(job.UserID + ":" + job.IdempotentKey)
+	hashed := job.dedupHash()
 	ik := idemKey(hashed)
 
 	lock := s.shardLock(hashed)
@@ -221,7 +221,7 @@ func (s *PebbleStore) DeleteJob(jobID string) {
 		return
 	}
 
-	hashed := hashKey(rec.Job.UserID + ":" + rec.Job.IdempotentKey)
+	hashed := rec.Job.dedupHash()
 
 	batch := s.db.NewBatch()
 	defer batch.Close()
@@ -276,7 +276,7 @@ func (s *PebbleStore) recordDrainEvent(rec *pebbleRecord, status Status) {
 
 	event := DrainEvent{
 		Sequence:   sequence,
-		HashKey:    hashKey(rec.Job.UserID + ":" + rec.Job.IdempotentKey),
+		HashKey:    rec.Job.dedupHash(),
 		JobID:      rec.Job.ID,
 		Status:     status,
 		RecordedAt: time.Now().UnixMilli(),
@@ -393,7 +393,7 @@ func (s *PebbleStore) ListIdempotentKeys() []LedgerEntry {
 			return
 		}
 		entries = append(entries, LedgerEntry{
-			HashKey: hashKey(rec.Job.UserID + ":" + rec.Job.IdempotentKey),
+			HashKey: rec.Job.dedupHash(),
 			JobID:   rec.Job.ID,
 			Status:  rec.Job.Status,
 		})
