@@ -211,11 +211,16 @@ func (e *executor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorContext)
 					if !yield(a2a.NewArtifactEvent(execCtx, a2a.NewDataPart(ev.Data)), nil) {
 						return
 					}
-					yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, nil), nil)
+					if yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, nil), nil) {
+						// The A2A client has the result: no webhook needed.
+						e.aq.ConfirmDelivered(job.ID)
+					}
 					return
 				case "failed":
 					failMsg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewDataPart(ev.Data))
-					yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, failMsg), nil)
+					if yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, failMsg), nil) {
+						e.aq.ConfirmDelivered(job.ID)
+					}
 					return
 				}
 			}

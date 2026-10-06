@@ -654,22 +654,13 @@ func execute(ctx context.Context, job *Job, dispatchURL, upstream string, store 
 
 const defaultStreamDeliveryWaitMS = 2000
 
-// publishTerminal publishes a job's final event. With
-// AQUIFER_WEBHOOK_SKIP_WHEN_STREAMED it reports whether a client streaming
-// the job received it, in which case the caller skips the webhook: the
-// result is also stored for GET /jobs/{id}. A client that drops before the
-// end, or never streams, still gets the webhook.
+// publishTerminal publishes a job's final event and reports whether a client
+// streaming the job received it, in which case the caller skips the webhook
+// (the result is also stored for GET /jobs/{id}). A client that drops before
+// the end, or never streams, still gets the webhook.
 func publishTerminal(broker *Broker, jobID string, event SSEEvent) bool {
-	if !webhookSkipWhenStreamed() {
-		broker.Publish(jobID, event)
-		return false
-	}
 	wait := time.Duration(envInt64("AQUIFER_STREAM_DELIVERY_WAIT_MS", defaultStreamDeliveryWaitMS)) * time.Millisecond
 	return broker.PublishTerminal(jobID, event, wait)
-}
-
-func webhookSkipWhenStreamed() bool {
-	return envBool("AQUIFER_WEBHOOK_SKIP_WHEN_STREAMED", false)
 }
 
 func failJob(job *Job, upstream, reason string, responseStatus int, body []byte, store JobStore, broker *Broker, metrics MetricsAdapter, enqueueWebhook webhookEnqueuer, resultRecorder JobResultRecorder) {

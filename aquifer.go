@@ -331,3 +331,11 @@ func (a *Aquifer) HandleL8Challenge(req L8ChallengeReq) (*L8ChallengeResp, error
 func (a *Aquifer) JobResult(jobID string) (JobResult, bool) {
 	return a.store.GetResult(jobID)
 }
+
+// ConfirmDelivered tells Aquifer a subscriber handed a job's final event to
+// its client, so the completion webhook is skipped. Every subscriber that
+// delivers results (SSE, /proxy, adapters) must call it, or the job waits
+// AQUIFER_STREAM_DELIVERY_WAIT_MS and then sends the webhook anyway.
+func (a *Aquifer) ConfirmDelivered(jobID string) {
+	a.broker.ConfirmDelivered(jobID)
+}

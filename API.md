@@ -445,14 +445,14 @@ With `AQUIFER_L8_SCHEMA_VALIDATION=true`, Aquifer fetches this once per upstream
 
 When the upstream changes its contract it returns a new `X-Aqueduct-Schema-Hash` on any response. Aquifer then drops the cached schemas and the L8 trust for that domain, so the next request refetches metadata and re-runs the handshake. Routes without a schema, upstreams without L8, and metadata that fails to fetch or compile are all let through unchecked. External `$ref`s are never fetched.
 
-### Skipping the webhook for streamed results
+### Webhooks are skipped for results you already received
 
-By default every job's completion webhook is sent, even if the caller watched the job finish over `GET /jobs/:id/stream` or a `/proxy` fallback stream. With `AQUIFER_WEBHOOK_SKIP_WHEN_STREAMED=true`, the webhook becomes a fallback instead:
+The completion webhook is a fallback, not a second copy. Aquifer never sends one for a result the caller already received:
 
-- If a stream writes and flushes the final `completed`/`failed` event while its client is still connected, the webhook is skipped.
-- A `/proxy` direct success works the same way: if the relayed response is written and flushed to a caller who is still connected, the webhook is skipped.
+- If a stream (`GET /jobs/:id/stream` or a `/proxy` fallback stream) writes and flushes the final `completed`/`failed` event while its client is still connected, no webhook is sent.
+- A `/proxy` direct success works the same way: if the relayed response is written and flushed to a caller who is still connected, no webhook is sent.
 - If the client disconnects before the end (for example, gives up while waiting in line), or nobody was streaming, the webhook is sent as usual.
-- Aquifer waits up to `AQUIFER_STREAM_DELIVERY_WAIT_MS` (default 2000) for that confirmation, and only when someone is actually streaming the job.
+- Aquifer waits up to `AQUIFER_STREAM_DELIVERY_WAIT_MS` (default 2000) for a stream's confirmation, and only when someone is actually streaming the job.
 
 A client that vanishes without closing its connection (a dropped network, a sleeping laptop) looks connected to the server, so it may miss both the final event and the webhook. That's why the result is stored: fetch it from `GET /jobs/:id`.
 

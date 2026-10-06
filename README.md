@@ -259,7 +259,7 @@ event: completed
 data: {"job_id":"abc123","response_status":200,"body":"..."}
 ```
 
-By default the webhook is sent either way. Set `AQUIFER_WEBHOOK_SKIP_WHEN_STREAMED=true` and it becomes a fallback instead: if you stayed on the line and received the final event (or a `/proxy` direct response), Aquifer skips the webhook, saving a request per job. If you hung up first, or never streamed, the webhook goes out as usual. A client that disappears without closing its connection (a dropped network, a sleeping laptop) can't be told apart from one that's still listening, so it may miss both; that's what the stored result on `GET /jobs/:id` is for.
+The webhook is only a fallback. If you stayed on the line and received the final event (or a `/proxy` direct response), Aquifer doesn't send it, so you never pay for the same result twice. If you hung up first, or never streamed, the webhook goes out as usual. A client that disappears without closing its connection (a dropped network, a sleeping laptop) can't be told apart from one that's still listening, so it may miss both; that's what the stored result on `GET /jobs/:id` is for.
 
 ---
 

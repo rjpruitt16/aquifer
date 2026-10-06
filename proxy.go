@@ -46,8 +46,8 @@ type ProxyOutcome struct {
 	FallbackStatus int
 
 	// pendingWebhook is a direct success's completion webhook, held back
-	// under AQUIFER_WEBHOOK_SKIP_WHEN_STREAMED until the handler knows
-	// whether the relayed response reached the caller. See SettleDirectWebhook.
+	// until the handler knows whether the relayed response reached the
+	// caller. See SettleDirectWebhook.
 	pendingWebhook map[string]any
 
 	// RelayFrom is set when this request was redirected to another region
@@ -158,11 +158,7 @@ func (a *Aquifer) AttemptDirect(ctx context.Context, req JobRequest, timeout tim
 		payload := map[string]any{
 			"job_id": job.ID, "status": "completed", "response_status": resp.StatusCode, "body": string(body),
 		}
-		if webhookSkipWhenStreamed() {
-			outcome.pendingWebhook = payload
-		} else {
-			a.registry.EnqueueWebhook(job.ID, job.UserID, job.WebhookURL, payload)
-		}
+		outcome.pendingWebhook = payload
 	}
 	return outcome
 }

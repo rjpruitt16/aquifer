@@ -122,7 +122,6 @@ func waitForEvent(t *testing.T, lines *bufio.Scanner, event string) {
 }
 
 func TestStreamedResultSkipsWebhookAndIsStored(t *testing.T) {
-	t.Setenv("AQUIFER_WEBHOOK_SKIP_WHEN_STREAMED", "true")
 	h := newStreamDeliveryHarness(t)
 	jobID := h.submit()
 	lines, cancel := h.stream(jobID)
@@ -146,7 +145,6 @@ func TestStreamedResultSkipsWebhookAndIsStored(t *testing.T) {
 }
 
 func TestDroppedStreamStillGetsWebhook(t *testing.T) {
-	t.Setenv("AQUIFER_WEBHOOK_SKIP_WHEN_STREAMED", "true")
 	h := newStreamDeliveryHarness(t)
 	jobID := h.submit()
 	_, cancel := h.stream(jobID)
@@ -161,24 +159,12 @@ func TestDroppedStreamStillGetsWebhook(t *testing.T) {
 }
 
 func TestUnstreamedJobGetsWebhookWithoutWaiting(t *testing.T) {
-	t.Setenv("AQUIFER_WEBHOOK_SKIP_WHEN_STREAMED", "true")
 	t.Setenv("AQUIFER_STREAM_DELIVERY_WAIT_MS", "10000")
 	h := newStreamDeliveryHarness(t)
 	h.submit()
 	close(h.release)
 	// Nobody streams, so there is nothing to wait for: well under the 10s grace.
 	h.expectWebhook(3 * time.Second)
-}
-
-func TestWebhookStillSentForStreamedJobWhenFlagOff(t *testing.T) {
-	h := newStreamDeliveryHarness(t)
-	jobID := h.submit()
-	lines, cancel := h.stream(jobID)
-	defer cancel()
-
-	close(h.release)
-	waitForEvent(t, lines, "completed")
-	h.expectWebhook(5 * time.Second)
 }
 
 func TestStoresKeepResults(t *testing.T) {
@@ -212,7 +198,6 @@ func (h *streamDeliveryHarness) proxy(ctx context.Context) (*http.Response, erro
 }
 
 func TestProxyDirectSuccessSkipsWebhookWhenRelayed(t *testing.T) {
-	t.Setenv("AQUIFER_WEBHOOK_SKIP_WHEN_STREAMED", "true")
 	h := newStreamDeliveryHarness(t)
 	close(h.release)
 
@@ -230,7 +215,6 @@ func TestProxyDirectSuccessSkipsWebhookWhenRelayed(t *testing.T) {
 }
 
 func TestProxyCallerWhoDropsStillGetsWebhook(t *testing.T) {
-	t.Setenv("AQUIFER_WEBHOOK_SKIP_WHEN_STREAMED", "true")
 	h := newStreamDeliveryHarness(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -249,15 +233,4 @@ func TestProxyCallerWhoDropsStillGetsWebhook(t *testing.T) {
 	if payload := h.expectWebhook(10 * time.Second); payload["status"] != "completed" {
 		t.Fatalf("expected the completion webhook for a caller who left, got %v", payload)
 	}
-}
-
-func TestProxyDirectSuccessSendsWebhookWhenFlagOff(t *testing.T) {
-	h := newStreamDeliveryHarness(t)
-	close(h.release)
-	resp, err := h.proxy(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	h.expectWebhook(5 * time.Second)
 }
