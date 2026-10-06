@@ -71,6 +71,18 @@ A lone queue is never fairness-rejected and may use the whole budget. A queue at
 
 Accepted and fairness-rejected responses report `X-Aqueduct-Active-Queues`, `X-Aqueduct-Upstream-Backlog`, `X-Aqueduct-Queue-Backlog`, and `X-Aqueduct-Admission-Pressure` (with `X-Aquifer-*` aliases). Outbound dispatches report active queues and upstream backlog to the backend alongside the existing load headers. These values cover the relevant upstream on the serving node. `GET /health` reports node-wide local totals under `queues`; it is deliberately not presented as a fleet-wide count.
 
+### Webhook backlog admission
+
+A user whose completion webhooks are piling up undelivered is consuming capacity faster than their receiver can absorb it. When other users are also active on the instance, new jobs from that user are rejected with **429** and `limit_reason: "webhook_backlog"` until they catch up:
+
+```text
+W      = AQUIFER_MAX_PENDING_WEBHOOKS_PER_USER (default 1000; 0 disables)
+w      = the user's queued + in-flight webhook deliveries on this instance
+P(429) = clamp((w - W) / W, 0, 1)    // 0 at or below W, certain at 2W
+```
+
+A user alone on the instance is never rejected for this, however large their backlog. The rule never drops accepted work or webhooks; it only slows new submissions. Counts are per instance, like `GET /health`.
+
 ## Regional cluster routing
 
 Cluster routing is optional HTTP-level partitioning for `POST /jobs` and `POST /proxy`. Callers may hit any Aquifer instance; the receiving node resolves an owner by `user_id`, forwards when necessary, and returns `X-Aquifer-Cluster-Owner` with the instance that handled the request. This changes where a user is processed, not how local account queues are grouped: `X-Aqueduct-Account-Queue` still controls whether a URL worker isolates `(user_id, api_key)` queues locally.

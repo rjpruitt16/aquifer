@@ -30,7 +30,7 @@ type URLWorker struct {
 	metrics          MetricsAdapter
 	enqueueWebhook   webhookEnqueuer
 	resultRecorder   JobResultRecorder
-	onJobDone        func(string)
+	onJobDone        func(*Job)
 	onIdle           func(string, *URLWorker)
 	breakerUntil     time.Time // zero value means the breaker is closed
 	breakerKind      string    // "queue" or "reroute" — which kind of signal tripped it, see classifyOverload
@@ -103,7 +103,7 @@ func (w *URLWorker) QueueActive() bool {
 	return false
 }
 
-func NewURLWorker(domain string, rps float64, maxConc int, pool *Pool, store JobStore, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, enqueueWebhook webhookEnqueuer, resultRecorder JobResultRecorder, onJobDone func(string), onIdle func(string, *URLWorker)) *URLWorker {
+func NewURLWorker(domain string, rps float64, maxConc int, pool *Pool, store JobStore, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, enqueueWebhook webhookEnqueuer, resultRecorder JobResultRecorder, onJobDone func(*Job), onIdle func(string, *URLWorker)) *URLWorker {
 	w := &URLWorker{
 		domain:         domain,
 		rps:            rps,
