@@ -144,6 +144,7 @@ func (a *Aquifer) AttemptDirect(ctx context.Context, req JobRequest, timeout tim
 
 	body, _ := io.ReadAll(resp.Body)
 	a.store.UpdateStatus(job.ID, StatusCompleted)
+	saveLocalResult(a.store, job, StatusCompleted, resp.StatusCode, resp.Header.Get("Content-Type"), string(body))
 	a.broker.Publish(job.ID, SSEEvent{Event: "completed", Data: map[string]any{
 		"job_id": job.ID, "response_status": resp.StatusCode, "body": string(body),
 	}})

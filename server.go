@@ -195,14 +195,23 @@ func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
+	body := map[string]any{
 		"job_id":         job.ID,
 		"status":         job.Status,
 		"url":            job.URL,
 		"method":         job.Method,
 		"created_at":     job.CreatedAt,
 		"execute_before": job.ExecuteBefore,
-	})
+	}
+	if result, ok := s.aquifer.JobResult(job.ID); ok {
+		body["result"] = map[string]any{
+			"response_status": result.ResponseStatus,
+			"content_type":    result.ContentType,
+			"body":            result.Body,
+			"body_truncated":  result.BodyTruncated,
+		}
+	}
+	json.NewEncoder(w).Encode(body)
 }
 
 func (s *Server) getJobResult(w http.ResponseWriter, r *http.Request) {
@@ -334,11 +343,16 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request, job *Job, 
 			if !ok {
 				return
 			}
-			writeSSE(w, event.Event, event.Data)
-			flusher.Flush()
+			writeErr := writeSSE(w, event.Event, event.Data)
 			if event.Event == "completed" || event.Event == "failed" {
+				// Confirm only a final event written and flushed while the
+				// client was still connected; anything else gets a webhook.
+				if writeErr == nil && http.NewResponseController(w).Flush() == nil && ctx.Err() == nil {
+					s.aquifer.broker.ConfirmDelivered(job.ID)
+				}
 				return
 			}
+			flusher.Flush()
 
 		case <-keepalive.C:
 			fmt.Fprintf(w, ": keepalive\n\n")

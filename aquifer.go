@@ -325,3 +325,9 @@ func (a *Aquifer) L8Metadata(host string) L8Meta {
 func (a *Aquifer) HandleL8Challenge(req L8ChallengeReq) (*L8ChallengeResp, error) {
 	return a.l8.HandleChallenge(req)
 }
+
+// JobResult returns a finished job's stored response, so a caller who
+// streamed instead of receiving a webhook can still fetch it.
+func (a *Aquifer) JobResult(jobID string) (JobResult, bool) {
+	return a.store.GetResult(jobID)
+}

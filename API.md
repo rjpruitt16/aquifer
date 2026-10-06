@@ -347,9 +347,17 @@ If literally no known-live region can help either — none live at all, or every
   "status":     "queued | in_flight | completed | failed",
   "url":        "https://api.openai.com/v1/chat/completions",
   "method":     "POST",
-  "created_at": 1715000000000
+  "created_at": 1715000000000,
+  "result": {
+    "response_status": 200,
+    "content_type":    "application/json",
+    "body":            "{...}",
+    "body_truncated":  false
+  }
 }
 ```
+
+`result` appears once the job has finished and stays for the job's retention window (30 minutes after completion, 2 hours after failure). The body is capped at `AQUIFER_RESULT_MAX_BYTES` (default 65536).
 
 ## GET /jobs/:id/stream
 
@@ -436,6 +444,16 @@ With `AQUIFER_L8_SCHEMA_VALIDATION=true`, Aquifer fetches this once per upstream
 ```
 
 When the upstream changes its contract it returns a new `X-Aqueduct-Schema-Hash` on any response. Aquifer then drops the cached schemas and the L8 trust for that domain, so the next request refetches metadata and re-runs the handshake. Routes without a schema, upstreams without L8, and metadata that fails to fetch or compile are all let through unchecked. External `$ref`s are never fetched.
+
+### Skipping the webhook for streamed results
+
+By default every job's completion webhook is sent, even if the caller watched the job finish over `GET /jobs/:id/stream` or a `/proxy` fallback stream. With `AQUIFER_WEBHOOK_SKIP_WHEN_STREAMED=true`, the webhook becomes a fallback instead:
+
+- If a stream writes and flushes the final `completed`/`failed` event while its client is still connected, the webhook is skipped.
+- If the client disconnects before the end (for example, gives up while waiting in line), or nobody was streaming, the webhook is sent as usual.
+- Aquifer waits up to `AQUIFER_STREAM_DELIVERY_WAIT_MS` (default 2000) for that confirmation, and only when someone is actually streaming the job.
+
+A client that vanishes without closing its connection (a dropped network, a sleeping laptop) looks connected to the server, so it may miss both the final event and the webhook. That's why the result is stored: fetch it from `GET /jobs/:id`.
 
 ## Webhooks
 

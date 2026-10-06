@@ -100,6 +100,7 @@ func (s *Store) migrate() {
 	s.db.Exec(`ALTER TABLE jobs ADD COLUMN execute_before INTEGER NOT NULL DEFAULT 0`)
 	s.db.Exec(`ALTER TABLE jobs ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 4`)
 	s.db.Exec(`ALTER TABLE jobs ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0`)
+	s.db.Exec(`ALTER TABLE jobs ADD COLUMN result TEXT NOT NULL DEFAULT ''`)
 	s.db.Exec(`
 		CREATE TABLE IF NOT EXISTS drain_events (
 			sequence             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -166,6 +167,26 @@ func (s *Store) DeleteJob(jobID string) {
 // restart while it waits out its backoff recovers it with its attempt count.
 func (s *Store) RecordRetry(jobID string, attempts int) {
 	s.db.Exec(`UPDATE jobs SET attempts = ?, status = 'queued' WHERE id = ?`, attempts, jobID)
+}
+
+func (s *Store) PutResult(jobID string, result JobResult) {
+	data, err := json.Marshal(result)
+	if err != nil {
+		return
+	}
+	s.db.Exec(`UPDATE jobs SET result = ? WHERE id = ?`, string(data), jobID)
+}
+
+func (s *Store) GetResult(jobID string) (JobResult, bool) {
+	var raw string
+	if err := s.db.QueryRow(`SELECT result FROM jobs WHERE id = ? AND expires_at > ?`, jobID, time.Now().UnixMilli()).Scan(&raw); err != nil || raw == "" {
+		return JobResult{}, false
+	}
+	var result JobResult
+	if json.Unmarshal([]byte(raw), &result) != nil {
+		return JobResult{}, false
+	}
+	return result, true
 }
 
 func (s *Store) MarkInFlight(jobID string) {

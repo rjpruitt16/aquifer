@@ -588,8 +588,9 @@ func execute(ctx context.Context, job *Job, dispatchURL, upstream string, store 
 		}
 		body, _ = io.ReadAll(resp.Body)
 		store.UpdateStatus(job.ID, StatusCompleted)
+		saveLocalResult(store, job, StatusCompleted, resp.StatusCode, resp.Header.Get("Content-Type"), string(body))
 		resultKey := recordJobResult(job, resultRecorder, StatusCompleted, resp.StatusCode, resp.Header.Get("Content-Type"), string(body))
-		broker.Publish(job.ID, SSEEvent{
+		streamed := publishTerminal(broker, job.ID, SSEEvent{
 			Event: "completed",
 			Data: map[string]any{
 				"job_id":          job.ID,
@@ -598,7 +599,7 @@ func execute(ctx context.Context, job *Job, dispatchURL, upstream string, store 
 			},
 		})
 		metrics.JobCompleted(job.UserID, upstream, time.Since(startedAt).Milliseconds())
-		if !job.isWebhookDeliveryJob() {
+		if !job.isWebhookDeliveryJob() && !streamed {
 			payload := map[string]any{
 				"job_id":          job.ID,
 				"status":          "completed",
@@ -651,15 +652,32 @@ func execute(ctx context.Context, job *Job, dispatchURL, upstream string, store 
 	return msg
 }
 
+const defaultStreamDeliveryWaitMS = 2000
+
+// publishTerminal publishes a job's final event. With
+// AQUIFER_WEBHOOK_SKIP_WHEN_STREAMED it reports whether a client streaming
+// the job received it, in which case the caller skips the webhook: the
+// result is also stored for GET /jobs/{id}. A client that drops before the
+// end, or never streams, still gets the webhook.
+func publishTerminal(broker *Broker, jobID string, event SSEEvent) bool {
+	if !envBool("AQUIFER_WEBHOOK_SKIP_WHEN_STREAMED", false) {
+		broker.Publish(jobID, event)
+		return false
+	}
+	wait := time.Duration(envInt64("AQUIFER_STREAM_DELIVERY_WAIT_MS", defaultStreamDeliveryWaitMS)) * time.Millisecond
+	return broker.PublishTerminal(jobID, event, wait)
+}
+
 func failJob(job *Job, upstream, reason string, responseStatus int, body []byte, store JobStore, broker *Broker, metrics MetricsAdapter, enqueueWebhook webhookEnqueuer, resultRecorder JobResultRecorder) {
 	store.UpdateStatus(job.ID, StatusFailed)
+	saveLocalResult(store, job, StatusFailed, responseStatus, "", string(body))
 	resultKey := recordJobResult(job, resultRecorder, StatusFailed, responseStatus, "", string(body))
-	broker.Publish(job.ID, SSEEvent{
+	streamed := publishTerminal(broker, job.ID, SSEEvent{
 		Event: "failed",
 		Data:  map[string]any{"job_id": job.ID, "reason": reason, "response_status": responseStatus, "body": string(body), "attempts": job.Attempts + 1},
 	})
 	metrics.JobFailed(job.UserID, upstream, reason)
-	if !job.isWebhookDeliveryJob() {
+	if !job.isWebhookDeliveryJob() && !streamed {
 		payload := map[string]any{
 			"job_id":          job.ID,
 			"status":          "failed",
@@ -741,6 +759,7 @@ func defaultRetryBackoff(attempts int) time.Duration {
 func failExpiredJob(job *Job, upstream string, store JobStore, broker *Broker, metrics MetricsAdapter, enqueueWebhook webhookEnqueuer, resultRecorder JobResultRecorder) {
 	const reason = "execution_deadline_exceeded"
 	store.UpdateStatus(job.ID, StatusFailed)
+	saveLocalResult(store, job, StatusFailed, 0, "", "")
 	resultKey := recordJobResult(job, resultRecorder, StatusFailed, 0, "", "")
 	broker.Publish(job.ID, SSEEvent{Event: "failed", Data: map[string]any{
 		"job_id": job.ID, "reason": reason,
@@ -753,6 +772,27 @@ func failExpiredJob(job *Job, upstream string, store JobStore, broker *Broker, m
 		}
 		go enqueueWebhook(job.ID, job.UserID, job.WebhookURL, payload)
 	}
+}
+
+const defaultLocalResultMaxBytes = 64 * 1024
+
+// saveLocalResult keeps the terminal response with the job (bounded by
+// AQUIFER_RESULT_MAX_BYTES) so GET /jobs/{id} can return it.
+func saveLocalResult(store JobStore, job *Job, status Status, responseStatus int, contentType, body string) {
+	if job.isWebhookDeliveryJob() {
+		return
+	}
+	truncated, wasTruncated := truncateStringBytes(body, envInt64("AQUIFER_RESULT_MAX_BYTES", defaultLocalResultMaxBytes))
+	store.PutResult(job.ID, JobResult{
+		JobID:          job.ID,
+		Status:         status,
+		ResponseStatus: responseStatus,
+		ContentType:    contentType,
+		Body:           truncated,
+		BodyTruncated:  wasTruncated,
+		RecordedAt:     time.Now().UnixMilli(),
+		Source:         "aquifer",
+	})
 }
 
 func recordJobResult(job *Job, recorder JobResultRecorder, status Status, responseStatus int, contentType string, body string) string {
