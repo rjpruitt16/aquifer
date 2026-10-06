@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -136,6 +137,10 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 	// mode unchanged rather than forcing it off for every request that
 	// doesn't happen to set this.
 	req.AccountQueueMode = pacingHeader(r.Header, "Account-Queue")
+	if err := applyMaxRetriesHeader(r.Header, &req); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	if s.forwardClusterRequest(w, r, "/jobs", req) {
 		return
@@ -366,6 +371,10 @@ func (s *Server) proxyJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.AccountQueueMode = pacingHeader(r.Header, "Account-Queue")
+	if err := applyMaxRetriesHeader(r.Header, &req); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	if s.forwardClusterRequest(w, r, "/proxy", req) {
 		return
@@ -722,4 +731,19 @@ func writeSchemaMismatch(w http.ResponseWriter, err error) bool {
 		"schema_errors": schemaErr.Detail,
 	})
 	return true
+}
+
+// applyMaxRetriesHeader lets X-Aqueduct-Max-Retries (or X-Aquifer-Max-Retries)
+// override the body's max_retries; -1 means retry until complete.
+func applyMaxRetriesHeader(header http.Header, req *JobRequest) error {
+	raw := pacingHeader(header, "Max-Retries")
+	if raw == "" {
+		return nil
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		return errors.New("X-Aqueduct-Max-Retries must be an integer: -1 (retry until complete) or 0-100")
+	}
+	req.MaxRetries = &n
+	return nil
 }

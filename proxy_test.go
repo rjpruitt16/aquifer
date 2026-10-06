@@ -430,6 +430,9 @@ func TestProxyJobHTTPDuplicateOfTerminalJobReturnsStatusWithoutHanging(t *testin
 func TestProxyJobHTTPFallsBackAndStreamsToEventualCompletion(t *testing.T) {
 	oldSleep := retrySleepFunc.Load()
 	retrySleepFunc.Store(func(time.Duration) {})
+	oldBackoff := retryBackoffFunc.Load()
+	retryBackoffFunc.Store(func(int) time.Duration { return 0 })
+	t.Cleanup(func() { retryBackoffFunc.Store(oldBackoff) })
 	t.Cleanup(func() { retrySleepFunc.Store(oldSleep) })
 
 	app, _ := testAquiferWithLimits(t, AdmissionLimits{})
@@ -483,6 +486,9 @@ func TestProxyJobHTTPFallsBackAndStreamsToEventualCompletion(t *testing.T) {
 func TestProxyJobHTTPFallbackStreamsAProxyFallbackEventFirst(t *testing.T) {
 	oldSleep := retrySleepFunc.Load()
 	retrySleepFunc.Store(func(time.Duration) {})
+	oldBackoff := retryBackoffFunc.Load()
+	retryBackoffFunc.Store(func(int) time.Duration { return 0 })
+	t.Cleanup(func() { retryBackoffFunc.Store(oldBackoff) })
 	t.Cleanup(func() { retrySleepFunc.Store(oldSleep) })
 
 	app, _ := testAquiferWithLimits(t, AdmissionLimits{})

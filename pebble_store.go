@@ -241,6 +241,16 @@ func (s *PebbleStore) MarkInFlight(jobID string) {
 	s.putRecord(jobID, rec)
 }
 
+func (s *PebbleStore) RecordRetry(jobID string, attempts int) {
+	rec, ok := s.getRecord(jobID)
+	if !ok {
+		return
+	}
+	rec.Job.Attempts = attempts
+	rec.Job.Status = StatusQueued
+	s.putRecord(jobID, rec)
+}
+
 func (s *PebbleStore) UpdateStatus(jobID string, status Status) {
 	rec, ok := s.getRecord(jobID)
 	if !ok {

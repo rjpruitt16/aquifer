@@ -8,6 +8,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -15,7 +16,6 @@ import (
 
 const (
 	minRPS                     = 0.5
-	maxRetries                 = 4
 	noPoolMembersRetryInterval = time.Second
 )
 
@@ -23,6 +23,7 @@ var retrySleepFunc atomic.Value
 var poolEmptySleepFunc atomic.Value
 
 func init() {
+	retryBackoffFunc.Store(defaultRetryBackoff)
 	retrySleepFunc.Store(time.Sleep)
 	poolEmptySleepFunc.Store(time.Sleep)
 }
@@ -58,6 +59,10 @@ type jobDoneMsg struct {
 	accountQueue  *string
 	slowStart     *bool
 	maxBacklog    *int64
+	// failed marks a retryable failure; the queue halves its rate for it.
+	failed  bool
+	retry   *Job
+	retryAt time.Time
 }
 
 // webhookEnqueuer queues a webhook delivery through the same account-queue
@@ -285,10 +290,17 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 	lastRequestAt := time.Time{}
 	inFlight := 0
 	queue := make([]*Job, 0, 64)
+	// waiting holds jobs backing off before a retry; they still count toward
+	// this queue's backlog but not its concurrency.
+	var waiting []waitingJob
+	retryTimer := time.NewTimer(time.Hour)
+	retryTimer.Stop()
+	defer retryTimer.Stop()
 	q.currentRPS.Store(int64(rps * 100))
 
 	for {
 		queue = q.dropExpiredJobs(queue)
+		waiting = q.dropExpiredWaiting(waiting)
 
 		// Pool-backed queues don't have a fixed configured ceiling — the
 		// pool's aggregate capacity is the live sum of whatever its
@@ -389,15 +401,26 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 		case msg := <-q.done:
 			if msg.completed {
 				inFlight--
-				q.releaseBacklog()
-				if q.onJobDone != nil && msg.userID != "" {
-					q.onJobDone(msg.userID)
+				if msg.retry != nil {
+					waiting = append(waiting, waitingJob{job: msg.retry, at: msg.retryAt})
+					resetRetryTimer(retryTimer, waiting)
+				} else {
+					q.releaseBacklog()
+					if q.onJobDone != nil && msg.userID != "" {
+						q.onJobDone(msg.userID)
+					}
 				}
 			}
 			prevRPS := rps
-			if msg.rps != nil {
+			switch {
+			case msg.rps != nil:
 				rps = math.Max(math.Min(*msg.rps, configuredRPS), minRPS)
-			} else if rps < configuredRPS {
+			case msg.failed:
+				// Each retryable failure halves this queue's pace; successes
+				// creep it back up below, so a struggling upstream sees fewer
+				// attempts per second from everyone sharing this queue.
+				rps = math.Max(rps/2, minRPS)
+			case rps < configuredRPS:
 				rps = math.Min(rps*1.05, configuredRPS)
 			}
 			if msg.maxConcurrent != nil && *msg.maxConcurrent > 0 {
@@ -424,8 +447,23 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 				})
 			}
 
+		case <-retryTimer.C:
+			now := time.Now()
+			kept := waiting[:0]
+			for _, w := range waiting {
+				if w.at.After(now) {
+					kept = append(kept, w)
+					continue
+				}
+				queue = append(queue, w.job)
+			}
+			waiting = kept
+			resetRetryTimer(retryTimer, waiting)
+			q.metrics.QueueDepth(q.upstream, len(queue))
+			idle.Reset(idleTimeout)
+
 		case <-idle.C:
-			if len(queue) == 0 && inFlight == 0 {
+			if len(queue) == 0 && inFlight == 0 && len(waiting) == 0 {
 				return
 			}
 			idle.Reset(idleTimeout)
@@ -435,6 +473,49 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 			return
 		}
 	}
+}
+
+type waitingJob struct {
+	job *Job
+	at  time.Time
+}
+
+func resetRetryTimer(timer *time.Timer, waiting []waitingJob) {
+	timer.Stop()
+	select {
+	case <-timer.C:
+	default:
+	}
+	if len(waiting) == 0 {
+		return
+	}
+	next := waiting[0].at
+	for _, w := range waiting[1:] {
+		if w.at.Before(next) {
+			next = w.at
+		}
+	}
+	timer.Reset(max(time.Until(next), 0))
+}
+
+func (q *AccountQueue) dropExpiredWaiting(waiting []waitingJob) []waitingJob {
+	if len(waiting) == 0 {
+		return waiting
+	}
+	now := time.Now()
+	kept := waiting[:0]
+	for _, w := range waiting {
+		if !w.job.ExecutionExpired(now) {
+			kept = append(kept, w)
+			continue
+		}
+		q.releaseBacklog()
+		failExpiredJob(w.job, q.upstream, q.store, q.broker, q.metrics, q.enqueueWebhook, q.resultRecorder)
+		if q.onJobDone != nil {
+			q.onJobDone(w.job.UserID)
+		}
+	}
+	return kept
 }
 
 func (q *AccountQueue) dropExpiredJobs(queue []*Job) []*Job {
@@ -460,107 +541,66 @@ func (q *AccountQueue) dropExpiredJobs(queue []*Job) []*Job {
 	return kept
 }
 
+// execute makes exactly one attempt. A retryable failure (connection error,
+// 5xx, 408, 429) with retries left comes back as msg.retry: the run loop
+// holds the job until msg.retryAt and frees its concurrency slot meanwhile,
+// instead of the attempt sleeping while it holds the slot.
 func execute(ctx context.Context, job *Job, dispatchURL, upstream string, store JobStore, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, pool *Pool, member *PoolMember, flowRate float64, activeQueues int, upstreamBacklog int64, enqueueWebhook webhookEnqueuer, resultRecorder JobResultRecorder) jobDoneMsg {
 	metrics = ensureMetrics(metrics)
 	startedAt := time.Now()
 
-	broker.Publish(job.ID, SSEEvent{
-		Event: "dispatching",
-		Data:  map[string]any{"job_id": job.ID},
-	})
-
-	var resp *http.Response
-	var err error
-	currentURL := dispatchURL
-	currentMember := member
-	reason := "connection error"
-
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		if job.ExecutionExpired(time.Now()) {
-			reason = "execution_deadline_exceeded"
-			err = fmt.Errorf("%s", reason)
-			break
-		}
-		if attempt > 0 {
-			backoff := withJitter(time.Duration(math.Pow(2, float64(attempt-1))) * time.Second)
-			log.Printf("[AccountQueue] retry %d/%d for %s in %s", attempt, maxRetries, currentURL, backoff)
-			if !sleepBeforeRetryContext(ctx, backoff) {
-				store.UpdateStatus(job.ID, StatusQueued)
-				return jobDoneMsg{}
-			}
-			if job.ExecutionExpired(time.Now()) {
-				reason = "execution_deadline_exceeded"
-				err = fmt.Errorf("%s", reason)
-				break
-			}
-		}
-
-		counts := store.Counts()
-		resp, err = makeRequest(ctx, job, currentURL, counts.TotalJobs, counts.QueueDepth, flowRate, activeQueues, upstreamBacklog, l8)
-		if err != nil {
-			if ctx.Err() != nil {
-				store.UpdateStatus(job.ID, StatusQueued)
-				return jobDoneMsg{}
-			}
-			reason = err.Error()
-			if pool != nil && currentMember != nil {
-				pool.RecordFailure(currentMember.ID)
-				if attempt < maxRetries {
-					currentMember = pool.Pick()
-					if currentMember == nil {
-						reason = "no pool members registered"
-						break
-					}
-					currentURL = currentMember.Address
-				}
-			}
-			continue
-		}
-		if resp.StatusCode >= 500 && attempt < maxRetries {
-			reason = fmt.Sprintf("upstream returned %d", resp.StatusCode)
-			resp.Body.Close()
-			resp = nil
-			if pool != nil && currentMember != nil {
-				pool.RecordFailure(currentMember.ID)
-				currentMember = pool.Pick()
-				if currentMember == nil {
-					reason = "no pool members registered"
-					break
-				}
-				currentURL = currentMember.Address
-			}
-			continue
-		}
-		break
+	if job.ExecutionExpired(startedAt) {
+		failJob(job, upstream, "execution_deadline_exceeded", 0, nil, store, broker, metrics, enqueueWebhook, resultRecorder)
+		return jobDoneMsg{}
 	}
 
-	if err != nil || resp == nil || resp.StatusCode >= 500 {
-		var body []byte
-		var responseStatus int
-		if resp != nil {
-			responseStatus = resp.StatusCode
-			body, _ = io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if reason == "connection error" {
-				reason = fmt.Sprintf("upstream returned %d", resp.StatusCode)
-			}
+	broker.Publish(job.ID, SSEEvent{
+		Event: "dispatching",
+		Data:  map[string]any{"job_id": job.ID, "attempt": job.Attempts + 1},
+	})
+
+	counts := store.Counts()
+	resp, err := makeRequest(ctx, job, dispatchURL, counts.TotalJobs, counts.QueueDepth, flowRate, activeQueues, upstreamBacklog, l8)
+	if err != nil && ctx.Err() != nil {
+		store.UpdateStatus(job.ID, StatusQueued)
+		return jobDoneMsg{}
+	}
+
+	var reason string
+	var responseStatus int
+	var body []byte
+	msg := jobDoneMsg{}
+	switch {
+	case err != nil:
+		reason = err.Error()
+	case retryableStatus(resp.StatusCode):
+		responseStatus = resp.StatusCode
+		reason = fmt.Sprintf("upstream returned %d", resp.StatusCode)
+		body, _ = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		msg = pacingSignals(resp.Header)
+	default:
+		defer resp.Body.Close()
+		if pool != nil && member != nil {
+			pool.RecordSuccess(member.ID)
 		}
-		if pool != nil && currentMember != nil && resp != nil {
-			pool.RecordFailure(currentMember.ID)
-		}
-		store.UpdateStatus(job.ID, StatusFailed)
-		resultKey := recordJobResult(job, resultRecorder, StatusFailed, responseStatus, "", string(body))
+		body, _ = io.ReadAll(resp.Body)
+		store.UpdateStatus(job.ID, StatusCompleted)
+		resultKey := recordJobResult(job, resultRecorder, StatusCompleted, resp.StatusCode, resp.Header.Get("Content-Type"), string(body))
 		broker.Publish(job.ID, SSEEvent{
-			Event: "failed",
-			Data:  map[string]any{"job_id": job.ID, "reason": reason, "response_status": responseStatus, "body": string(body)},
+			Event: "completed",
+			Data: map[string]any{
+				"job_id":          job.ID,
+				"response_status": resp.StatusCode,
+				"body":            string(body),
+			},
 		})
-		metrics.JobFailed(job.UserID, upstream, reason)
+		metrics.JobCompleted(job.UserID, upstream, time.Since(startedAt).Milliseconds())
 		if !job.isWebhookDeliveryJob() {
 			payload := map[string]any{
 				"job_id":          job.ID,
-				"status":          "failed",
-				"reason":          reason,
-				"response_status": responseStatus,
+				"status":          "completed",
+				"response_status": resp.StatusCode,
 				"body":            string(body),
 			}
 			if resultKey != "" {
@@ -568,31 +608,61 @@ func execute(ctx context.Context, job *Job, dispatchURL, upstream string, store 
 			}
 			enqueueWebhook(job.ID, job.UserID, job.WebhookURL, payload)
 		}
-		return jobDoneMsg{}
-	}
-	defer resp.Body.Close()
-
-	if pool != nil && currentMember != nil {
-		pool.RecordSuccess(currentMember.ID)
+		return pacingSignals(resp.Header)
 	}
 
-	body, _ := io.ReadAll(resp.Body)
-	store.UpdateStatus(job.ID, StatusCompleted)
-	resultKey := recordJobResult(job, resultRecorder, StatusCompleted, resp.StatusCode, resp.Header.Get("Content-Type"), string(body))
+	// Retryable failure from here on.
+	if pool != nil && member != nil {
+		pool.RecordFailure(member.ID)
+	}
+	msg.failed = true
+
+	var header http.Header
+	if resp != nil {
+		header = resp.Header
+	}
+	retryAt := time.Now().Add(retryDelay(job.Attempts, header))
+	if !job.hasRetriesLeft() || !retryAt.Before(job.retryDeadline()) {
+		if job.hasRetriesLeft() {
+			reason = "retry_window_exhausted: " + reason
+		}
+		failJob(job, upstream, reason, responseStatus, body, store, broker, metrics, enqueueWebhook, resultRecorder)
+		return msg
+	}
+
+	job.Attempts++
+	store.RecordRetry(job.ID, job.Attempts)
+	log.Printf("[AccountQueue] retry %d for job %s at %s: %s", job.Attempts, job.ID, retryAt.Format(time.RFC3339), reason)
 	broker.Publish(job.ID, SSEEvent{
-		Event: "completed",
+		Event: "retrying",
 		Data: map[string]any{
 			"job_id":          job.ID,
-			"response_status": resp.StatusCode,
-			"body":            string(body),
+			"attempt":         job.Attempts,
+			"max_retries":     job.MaxRetries,
+			"retry_at":        retryAt.UnixMilli(),
+			"reason":          reason,
+			"response_status": responseStatus,
 		},
 	})
-	metrics.JobCompleted(job.UserID, upstream, time.Since(startedAt).Milliseconds())
+	msg.retry = job
+	msg.retryAt = retryAt
+	return msg
+}
+
+func failJob(job *Job, upstream, reason string, responseStatus int, body []byte, store JobStore, broker *Broker, metrics MetricsAdapter, enqueueWebhook webhookEnqueuer, resultRecorder JobResultRecorder) {
+	store.UpdateStatus(job.ID, StatusFailed)
+	resultKey := recordJobResult(job, resultRecorder, StatusFailed, responseStatus, "", string(body))
+	broker.Publish(job.ID, SSEEvent{
+		Event: "failed",
+		Data:  map[string]any{"job_id": job.ID, "reason": reason, "response_status": responseStatus, "body": string(body), "attempts": job.Attempts + 1},
+	})
+	metrics.JobFailed(job.UserID, upstream, reason)
 	if !job.isWebhookDeliveryJob() {
 		payload := map[string]any{
 			"job_id":          job.ID,
-			"status":          "completed",
-			"response_status": resp.StatusCode,
+			"status":          "failed",
+			"reason":          reason,
+			"response_status": responseStatus,
 			"body":            string(body),
 		}
 		if resultKey != "" {
@@ -600,39 +670,70 @@ func execute(ctx context.Context, job *Job, dispatchURL, upstream string, store 
 		}
 		enqueueWebhook(job.ID, job.UserID, job.WebhookURL, payload)
 	}
+}
 
+// retryableStatus: the upstream is temporarily unable, not rejecting the
+// request itself. Other 4xx responses are final.
+func retryableStatus(code int) bool {
+	return code >= 500 || code == http.StatusTooManyRequests || code == http.StatusRequestTimeout
+}
+
+func pacingSignals(header http.Header) jobDoneMsg {
 	msg := jobDoneMsg{}
-	if val := pacingHeader(resp.Header, "Rps"); val != "" {
+	if val := pacingHeader(header, "Rps"); val != "" {
 		var rps float64
 		fmt.Sscanf(val, "%f", &rps)
 		msg.rps = &rps
-	} else if rps := orcaRps(resp.Header); rps != nil {
+	} else if rps := orcaRps(header); rps != nil {
 		// No explicit Aqueduct directive on this response -- fall back to an
 		// ORCA endpoint-load-metrics header if the backend (e.g. vLLM with
-		// --orca_formats) sent one. An explicit X-Aqueduct-Rps always wins;
-		// this only fires when the backend hasn't opted into speaking
-		// Aqueduct's own pacing headers directly.
+		// --orca_formats) sent one. An explicit X-Aqueduct-Rps always wins.
 		msg.rps = rps
 	}
-	if val := pacingHeader(resp.Header, "Max-Concurrent"); val != "" {
+	if val := pacingHeader(header, "Max-Concurrent"); val != "" {
 		var max int
 		fmt.Sscanf(val, "%d", &max)
 		msg.maxConcurrent = &max
 	}
-	if val := pacingHeader(resp.Header, "Account-Queue"); val != "" {
+	if val := pacingHeader(header, "Account-Queue"); val != "" {
 		msg.accountQueue = &val
 	}
-	if val := pacingHeader(resp.Header, "Slow-Start"); val == "true" || val == "false" {
+	if val := pacingHeader(header, "Slow-Start"); val == "true" || val == "false" {
 		enabled := val == "true"
 		msg.slowStart = &enabled
 	}
-	if val := pacingHeader(resp.Header, "Max-Backlog"); val != "" {
+	if val := pacingHeader(header, "Max-Backlog"); val != "" {
 		var max int64
 		if _, err := fmt.Sscanf(val, "%d", &max); err == nil && max >= 0 {
 			msg.maxBacklog = &max
 		}
 	}
 	return msg
+}
+
+const defaultRetryMaxBackoffSeconds = 300
+
+var retryBackoffFunc atomic.Value
+
+// retryDelay grows exponentially with the attempts already made (1s, 2s,
+// 4s, ...) up to AQUIFER_RETRY_MAX_BACKOFF_SECONDS, with jitter. A
+// Retry-After header from the upstream is honored instead when present.
+func retryDelay(attempts int, header http.Header) time.Duration {
+	if header != nil {
+		if secs, err := strconv.Atoi(header.Get("Retry-After")); err == nil && secs >= 0 {
+			return time.Duration(secs) * time.Second
+		}
+	}
+	return retryBackoffFunc.Load().(func(int) time.Duration)(attempts)
+}
+
+func defaultRetryBackoff(attempts int) time.Duration {
+	ceiling := time.Duration(envInt64("AQUIFER_RETRY_MAX_BACKOFF_SECONDS", defaultRetryMaxBackoffSeconds)) * time.Second
+	backoff := time.Second << min(attempts, 30)
+	if backoff > ceiling || backoff <= 0 {
+		backoff = ceiling
+	}
+	return withJitter(backoff)
 }
 
 func failExpiredJob(job *Job, upstream string, store JobStore, broker *Broker, metrics MetricsAdapter, enqueueWebhook webhookEnqueuer, resultRecorder JobResultRecorder) {

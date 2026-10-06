@@ -29,6 +29,31 @@ Idempotent — duplicate `idempotent_key` per `user_id` returns the existing job
 
 **422** the upstream's L8 `request_schemas` rejects the body (see [Request schemas](#request-schemas-l8-02)).
 
+### Retries
+
+Connection errors, `5xx`, `408` and `429` are retried; any other response (including other `4xx`) is final. Set the limit per job with `"max_retries"` in the body or the `X-Aqueduct-Max-Retries` request header (the header wins):
+
+| Value | Behavior |
+|---|---|
+| _(unset)_ | 4 retries (5 attempts) |
+| `0` | no retries |
+| `1`-`100` | that many retries |
+| `-1` | retry until the job succeeds, stopping at `execute_before` if set, otherwise 24 hours after submission |
+
+```bash
+curl -X POST localhost:8080/jobs -H "X-Aqueduct-Max-Retries: -1" -d '{ ... }'
+```
+
+`-1` is meant for deliveries that must eventually land, such as forwarding webhooks to a receiver that may be down for a while. It is never the default.
+
+How retries are paced:
+
+- **Per job:** the wait before each retry doubles (1 s, 2 s, 4 s, ...) up to `AQUIFER_RETRY_MAX_BACKOFF_SECONDS` (default `300`), with jitter. A `Retry-After` header on the failed response is honored instead.
+- **Per queue:** every retryable failure halves that account queue's dispatch rate (down to 0.5 rps); successes raise it again by 5% each. An explicit `X-Aqueduct-Rps` from the upstream still overrides both.
+- A job waiting out its backoff does not hold a concurrency slot, so other jobs in the same queue keep moving. The attempt count is persisted, so a restart doesn't reset it.
+
+Each retry emits a `retrying` SSE event (`attempt`, `max_retries`, `retry_at`, `reason`, `response_status`). The final `failed` event and webhook report the last failure; a job that still had retries left when its deadline arrived reports `retry_window_exhausted: <reason>`.
+
 ### Fair queue admission
 
 Each upstream has a soft shared backlog budget `B`, defaulting to `AQUIFER_MAX_PENDING_PER_UPSTREAM=10000`. The upstream may update it at runtime with `X-Aqueduct-Max-Backlog` (or `X-Aquifer-Max-Backlog`); `0` disables this count-based limit. Dynamic values are learned from direct proxy responses and queued dispatch responses.

@@ -22,6 +22,7 @@ type JobStore interface {
 	MarkInFlight(jobID string)
 	RecoverInFlight(queueKey string) []*Job
 	UpdateStatus(jobID string, status Status)
+	RecordRetry(jobID string, attempts int)
 	Counts() StoreCounts
 	GetJob(jobID string) *Job
 	GetQueuedJobs() []*Job
