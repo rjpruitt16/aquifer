@@ -443,7 +443,9 @@ func (s *Server) proxyJob(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		w.WriteHeader(outcome.Status)
-		w.Write(outcome.Body)
+		_, writeErr := w.Write(outcome.Body)
+		delivered := writeErr == nil && http.NewResponseController(w).Flush() == nil && r.Context().Err() == nil
+		s.aquifer.SettleDirectWebhook(outcome, delivered)
 		return
 	}
 

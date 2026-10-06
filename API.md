@@ -450,6 +450,7 @@ When the upstream changes its contract it returns a new `X-Aqueduct-Schema-Hash`
 By default every job's completion webhook is sent, even if the caller watched the job finish over `GET /jobs/:id/stream` or a `/proxy` fallback stream. With `AQUIFER_WEBHOOK_SKIP_WHEN_STREAMED=true`, the webhook becomes a fallback instead:
 
 - If a stream writes and flushes the final `completed`/`failed` event while its client is still connected, the webhook is skipped.
+- A `/proxy` direct success works the same way: if the relayed response is written and flushed to a caller who is still connected, the webhook is skipped.
 - If the client disconnects before the end (for example, gives up while waiting in line), or nobody was streaming, the webhook is sent as usual.
 - Aquifer waits up to `AQUIFER_STREAM_DELIVERY_WAIT_MS` (default 2000) for that confirmation, and only when someone is actually streaming the job.
 

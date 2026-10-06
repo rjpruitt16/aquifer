@@ -203,3 +203,61 @@ func TestStoresKeepResults(t *testing.T) {
 		})
 	}
 }
+
+func (h *streamDeliveryHarness) proxy(ctx context.Context) (*http.Response, error) {
+	body, _ := json.Marshal(JobRequest{UserID: "u", IdempotentKey: "proxy-" + generateID(), URL: h.upstream.URL, Method: "POST", WebhookURL: h.webhookURL})
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, h.server.URL+"/proxy", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	return http.DefaultClient.Do(req)
+}
+
+func TestProxyDirectSuccessSkipsWebhookWhenRelayed(t *testing.T) {
+	t.Setenv("AQUIFER_WEBHOOK_SKIP_WHEN_STREAMED", "true")
+	h := newStreamDeliveryHarness(t)
+	close(h.release)
+
+	resp, err := h.proxy(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out map[string]any
+	json.NewDecoder(resp.Body).Decode(&out)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || out["answer"] != float64(42) {
+		t.Fatalf("expected the upstream response relayed directly, got %d %v", resp.StatusCode, out)
+	}
+	h.expectNoWebhook(1500 * time.Millisecond)
+}
+
+func TestProxyCallerWhoDropsStillGetsWebhook(t *testing.T) {
+	t.Setenv("AQUIFER_WEBHOOK_SKIP_WHEN_STREAMED", "true")
+	h := newStreamDeliveryHarness(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if resp, err := h.proxy(ctx); err == nil {
+			resp.Body.Close()
+		}
+	}()
+	time.Sleep(300 * time.Millisecond)
+	cancel() // caller leaves before the upstream answers
+	<-done
+	time.Sleep(200 * time.Millisecond)
+	close(h.release)
+
+	if payload := h.expectWebhook(10 * time.Second); payload["status"] != "completed" {
+		t.Fatalf("expected the completion webhook for a caller who left, got %v", payload)
+	}
+}
+
+func TestProxyDirectSuccessSendsWebhookWhenFlagOff(t *testing.T) {
+	h := newStreamDeliveryHarness(t)
+	close(h.release)
+	resp, err := h.proxy(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	h.expectWebhook(5 * time.Second)
+}

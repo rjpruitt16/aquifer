@@ -660,12 +660,16 @@ const defaultStreamDeliveryWaitMS = 2000
 // result is also stored for GET /jobs/{id}. A client that drops before the
 // end, or never streams, still gets the webhook.
 func publishTerminal(broker *Broker, jobID string, event SSEEvent) bool {
-	if !envBool("AQUIFER_WEBHOOK_SKIP_WHEN_STREAMED", false) {
+	if !webhookSkipWhenStreamed() {
 		broker.Publish(jobID, event)
 		return false
 	}
 	wait := time.Duration(envInt64("AQUIFER_STREAM_DELIVERY_WAIT_MS", defaultStreamDeliveryWaitMS)) * time.Millisecond
 	return broker.PublishTerminal(jobID, event, wait)
+}
+
+func webhookSkipWhenStreamed() bool {
+	return envBool("AQUIFER_WEBHOOK_SKIP_WHEN_STREAMED", false)
 }
 
 func failJob(job *Job, upstream, reason string, responseStatus int, body []byte, store JobStore, broker *Broker, metrics MetricsAdapter, enqueueWebhook webhookEnqueuer, resultRecorder JobResultRecorder) {
