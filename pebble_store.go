@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cockroachdb/pebble"
@@ -57,6 +58,14 @@ type PebbleStore struct {
 	closeErr  error
 	stop      chan struct{}
 	done      chan struct{}
+
+	// queued and inFlight are running counts kept in step with every status
+	// change, so Counts() (called on every dispatch for the load headers) is
+	// O(1). Counting by scanning made each dispatch scan and decode every
+	// retained job, which collapsed throughput once a few thousand
+	// completed jobs had accumulated.
+	queued   atomic.Int64
+	inFlight atomic.Int64
 }
 
 // AQUIFER_PEBBLE_WAL_SYNC_INTERVAL_MS default. Confirmed empirically (a
@@ -103,8 +112,32 @@ func NewPebbleStore(path string) *PebbleStore {
 		done:     make(chan struct{}),
 	}
 
+	s.seedCounts()
 	go s.cleanupLoop()
 	return s
+}
+
+func (s *PebbleStore) seedCounts() {
+	s.queued.Store(0)
+	s.inFlight.Store(0)
+	s.forEachJob(func(rec *pebbleRecord) { s.countStatus(rec.Job.Status, 1) })
+}
+
+func (s *PebbleStore) countStatus(status Status, delta int64) {
+	switch status {
+	case StatusQueued:
+		s.queued.Add(delta)
+	case StatusInFlight:
+		s.inFlight.Add(delta)
+	}
+}
+
+func (s *PebbleStore) moveStatus(from, to Status) {
+	if from == to {
+		return
+	}
+	s.countStatus(from, -1)
+	s.countStatus(to, 1)
 }
 
 func (s *PebbleStore) Path() string {
@@ -172,6 +205,7 @@ func (s *PebbleStore) CheckOrInsert(job *Job) (string, bool) {
 		log.Printf("pebble: commit job %s: %v", job.ID, err)
 		return "", false
 	}
+	s.countStatus(StatusQueued, 1)
 
 	return "", false
 }
@@ -229,7 +263,9 @@ func (s *PebbleStore) DeleteJob(jobID string) {
 	batch.Delete(idemKey(hashed), nil)
 	if err := batch.Commit(s.syncOpts); err != nil {
 		log.Printf("pebble: delete job %s: %v", jobID, err)
+		return
 	}
+	s.countStatus(rec.Job.Status, -1)
 }
 
 func (s *PebbleStore) MarkInFlight(jobID string) {
@@ -237,6 +273,7 @@ func (s *PebbleStore) MarkInFlight(jobID string) {
 	if !ok {
 		return
 	}
+	s.moveStatus(rec.Job.Status, StatusInFlight)
 	rec.Job.Status = StatusInFlight
 	s.putRecord(jobID, rec)
 }
@@ -246,6 +283,7 @@ func (s *PebbleStore) UpdateStatus(jobID string, status Status) {
 	if !ok {
 		return
 	}
+	s.moveStatus(rec.Job.Status, status)
 	rec.Job.Status = status
 	rec.ExpiresAt = time.Now().Add(ttlForStatus(status)).UnixMilli()
 	s.putRecord(jobID, rec)
@@ -345,16 +383,8 @@ func (s *PebbleStore) RecoverInFlight(queueKey string) []*Job {
 }
 
 func (s *PebbleStore) Counts() StoreCounts {
-	var c StoreCounts
-	s.forEachJob(func(rec *pebbleRecord) {
-		if rec.Job.Status == StatusQueued || rec.Job.Status == StatusInFlight {
-			c.TotalJobs++
-		}
-		if rec.Job.Status == StatusQueued {
-			c.QueueDepth++
-		}
-	})
-	return c
+	queued, inFlight := max(s.queued.Load(), 0), max(s.inFlight.Load(), 0)
+	return StoreCounts{TotalJobs: queued + inFlight, QueueDepth: queued}
 }
 
 func (s *PebbleStore) GetJob(jobID string) *Job {
@@ -442,6 +472,8 @@ func (s *PebbleStore) ClearIdempotentKeys() {
 	deletePrefix([]byte("drain:seq:"), []byte("drain:seq;"))
 	deletePrefix([]byte("drain:job:"), []byte("drain:job;"))
 	s.db.Delete(drainSequenceMetaKey(), s.syncOpts)
+	s.queued.Store(0)
+	s.inFlight.Store(0)
 }
 
 func (s *PebbleStore) ListDrainEvents(limit int) []DrainEvent {
