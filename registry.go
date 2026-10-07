@@ -66,6 +66,7 @@ func NewRegistry(store JobStore, cfg *Config, broker *Broker, l8 *L8Registry, me
 		cancel:          cancel,
 		stop:            make(chan struct{}),
 	}
+	r.applyDrainEvents()
 	counts := store.Counts()
 	r.totalJobs.Store(counts.TotalJobs)
 	r.queueDepth.Store(counts.QueueDepth)
@@ -206,6 +207,7 @@ func (r *Registry) DrainSnapshot() map[string]any {
 // every other env-var-driven config in this codebase.
 func (r *Registry) ConfigureDrain(cfg DrainConfig) {
 	r.drainCfg = cfg
+	r.applyDrainEvents()
 	if cfg.Enabled {
 		r.startDrainLoops()
 	}
@@ -446,4 +448,12 @@ func (r *Registry) JobDispatched() {
 
 func (r *Registry) JobDone() {
 	r.totalJobs.Add(-1)
+}
+
+// applyDrainEvents tells the store whether to record drain events: only
+// drain mode reads them, so with it off they're skipped.
+func (r *Registry) applyDrainEvents() {
+	if s, ok := r.store.(interface{ SetDrainEventsEnabled(bool) }); ok {
+		s.SetDrainEventsEnabled(r.drainCfg.Enabled)
+	}
 }

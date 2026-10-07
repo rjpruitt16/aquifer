@@ -85,12 +85,17 @@ type AccountQueue struct {
 	onJobDone          func(string)
 	currentRPS         atomic.Int64 // stored as rps * 100
 	backlog            atomic.Int64 // accepted queued + in-flight work
-	stop               chan struct{}
-	stopped            chan struct{}
-	stopOnce           sync.Once
-	wg                 sync.WaitGroup
-	ctx                context.Context
-	cancel             context.CancelFunc
+	// nextDeadline is the earliest execute_before (Unix ms) among queued
+	// jobs, or 0 when none has one. Owned by the run goroutine. It lets
+	// dropExpiredJobs skip its scan of the whole queue, which otherwise ran
+	// on every loop pass and grew quadratically once a backlog built up.
+	nextDeadline int64
+	stop         chan struct{}
+	stopped      chan struct{}
+	stopOnce     sync.Once
+	wg           sync.WaitGroup
+	ctx          context.Context
+	cancel       context.CancelFunc
 }
 
 func (q *AccountQueue) RPS() float64 {
@@ -385,6 +390,9 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 		select {
 		case job := <-q.cmds:
 			queue = append(queue, job)
+			if job.ExecuteBefore > 0 && (q.nextDeadline == 0 || job.ExecuteBefore < q.nextDeadline) {
+				q.nextDeadline = job.ExecuteBefore
+			}
 			q.metrics.QueueDepth(q.upstream, len(queue))
 			idle.Reset(idleTimeout)
 
@@ -420,6 +428,9 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 		case <-positionTicker.C:
 			queue = q.dropExpiredJobs(queue)
 			for i, j := range queue {
+				if !q.broker.HasSubscribers(j.ID) {
+					continue
+				}
 				q.broker.Publish(j.ID, SSEEvent{
 					Event: "position",
 					Data:  map[string]any{"job_id": j.ID, "position": i + 1},
@@ -441,13 +452,21 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 
 func (q *AccountQueue) dropExpiredJobs(queue []*Job) []*Job {
 	if len(queue) == 0 {
+		q.nextDeadline = 0
 		return queue
 	}
 	now := time.Now()
+	if q.nextDeadline == 0 || now.UnixMilli() < q.nextDeadline {
+		return queue
+	}
+	q.nextDeadline = 0
 	kept := queue[:0]
 	for _, job := range queue {
 		if !job.ExecutionExpired(now) {
 			kept = append(kept, job)
+			if job.ExecuteBefore > 0 && (q.nextDeadline == 0 || job.ExecuteBefore < q.nextDeadline) {
+				q.nextDeadline = job.ExecuteBefore
+			}
 			continue
 		}
 		q.releaseBacklog()

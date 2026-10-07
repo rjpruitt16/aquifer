@@ -61,6 +61,11 @@ type PebbleStore struct {
 	flushInterval time.Duration
 	flushDone     chan struct{}
 
+	// skipDrainEvents: see Store.skipDrainEvents. Recording an event costs
+	// two reads and a write under drainMu, a global lock, so with drain
+	// mode off it also serialized every job completion.
+	skipDrainEvents atomic.Bool
+
 	// queued and inFlight are running counts kept in step with every status
 	// change, so Counts() (called on every dispatch for the load headers) is
 	// O(1). Counting by scanning made each dispatch scan and decode every
@@ -83,6 +88,8 @@ type PebbleStore struct {
 // window the way a naive periodic-flush timer would introduce.
 const defaultWALSyncIntervalMS = 5
 
+const defaultPebbleCacheMB = 64
+
 func NewPebbleStore(path string) *PebbleStore {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		log.Fatalf("pebble: mkdir %s: %v", filepath.Dir(path), err)
@@ -96,7 +103,20 @@ func NewPebbleStore(path string) *PebbleStore {
 	}
 	syncInterval := time.Duration(syncIntervalMS) * time.Millisecond
 
+	// Pebble's default block cache is 8MB, too small to hold the job
+	// records each status update reads back, so under load those reads went
+	// to sstables and snappy decoding (about a fifth of CPU at 700 jobs/s).
+	cacheMB := int64(defaultPebbleCacheMB)
+	if v := os.Getenv("AQUIFER_PEBBLE_CACHE_MB"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			cacheMB = n
+		}
+	}
+	cache := pebble.NewCache(cacheMB << 20)
+	defer cache.Unref()
+
 	db, err := pebble.Open(path, &pebble.Options{
+		Cache:              cache,
 		WALMinSyncInterval: func() time.Duration { return syncInterval },
 	})
 	if err != nil {
@@ -328,10 +348,13 @@ func (s *PebbleStore) UpdateStatus(jobID string, status Status) {
 	rec.Job.Status = status
 	rec.ExpiresAt = time.Now().Add(ttlForStatus(status)).UnixMilli()
 	s.putRecord(jobID, rec)
-	if status == StatusCompleted || status == StatusFailed {
+	if (status == StatusCompleted || status == StatusFailed) && !s.skipDrainEvents.Load() {
 		s.recordDrainEvent(rec, status)
 	}
 }
+
+// SetDrainEventsEnabled: see Store.SetDrainEventsEnabled.
+func (s *PebbleStore) SetDrainEventsEnabled(enabled bool) { s.skipDrainEvents.Store(!enabled) }
 
 func (s *PebbleStore) recordDrainEvent(rec *pebbleRecord, status Status) {
 	if rec == nil || rec.Job == nil || rec.Job.isWebhookDeliveryJob() {
