@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// With AQUIFER_PEBBLE_FLUSH_INTERVAL_MS set, writes are acknowledged before
+// With the flush interval (100ms by default), writes are acknowledged before
 // they are synced. A process killed after the flush interval must still
 // have them on restart: the timer's WAL sync covers every earlier NoSync
 // write. The child exits without Close, like a kill -9.
@@ -44,9 +44,9 @@ func TestPebbleFlushIntervalSurvivesCrash(t *testing.T) {
 }
 
 // Writes made just before a crash, inside the flush window, are the ones
-// the setting allows to be lost. This pins that the default still syncs
+// the default allows to be lost. AQUIFER_PEBBLE_FLUSH_INTERVAL_MS=0 syncs
 // every write: the same crash right after writing loses nothing.
-func TestPebbleDefaultSyncsEveryWrite(t *testing.T) {
+func TestPebbleFlushIntervalZeroSyncsEveryWrite(t *testing.T) {
 	if dir := os.Getenv("AQUIFER_PEBBLE_SYNC_CHILD_DIR"); dir != "" {
 		store := NewPebbleStore(dir)
 		for i := 0; i < 50; i++ {
@@ -58,8 +58,8 @@ func TestPebbleDefaultSyncsEveryWrite(t *testing.T) {
 	}
 
 	dir := filepath.Join(t.TempDir(), "pebble")
-	cmd := exec.Command(os.Args[0], "-test.run", "^TestPebbleDefaultSyncsEveryWrite$")
-	cmd.Env = append(os.Environ(), "AQUIFER_PEBBLE_SYNC_CHILD_DIR="+dir, "AQUIFER_PEBBLE_FLUSH_INTERVAL_MS=")
+	cmd := exec.Command(os.Args[0], "-test.run", "^TestPebbleFlushIntervalZeroSyncsEveryWrite$")
+	cmd.Env = append(os.Environ(), "AQUIFER_PEBBLE_SYNC_CHILD_DIR="+dir, "AQUIFER_PEBBLE_FLUSH_INTERVAL_MS=0")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("child: %v\n%s", err, out)
 	}

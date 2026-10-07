@@ -31,12 +31,13 @@ import (
 //     Counts, cleanup) iterate the job: prefix and filter in Go — no
 //     worse than what the current SQL schema does today, since it has no
 //     index on status or queue_key either.
-//   - The durability/throughput dial: by default every write waits for
-//     its own fsync (group-committed, see defaultWALSyncIntervalMS), so an
-//     acknowledged job is never lost. AQUIFER_PEBBLE_FLUSH_INTERVAL_MS > 0
-//     acknowledges writes before they are durable and syncs the WAL on a
-//     timer instead, the trade EZThrottle Local's Mnesia flush makes: a
-//     crash can lose up to that many milliseconds of accepted work.
+//   - The durability/throughput dial: by default writes are acknowledged
+//     before they are durable and the WAL is synced every 100ms
+//     (AQUIFER_PEBBLE_FLUSH_INTERVAL_MS), the trade EZThrottle Local's
+//     Mnesia flush makes: a crash can lose up to that much accepted work,
+//     for several times the throughput. Setting it to 0 makes every write
+//     wait for its own fsync (group-committed, see defaultWALSyncIntervalMS),
+//     so an acknowledged job is never lost.
 const shardCount = 256
 
 type pebbleRecord struct {
@@ -83,6 +84,10 @@ type PebbleStore struct {
 // window the way a naive periodic-flush timer would introduce.
 const defaultWALSyncIntervalMS = 5
 
+// defaultFlushIntervalMS is AQUIFER_PEBBLE_FLUSH_INTERVAL_MS's default.
+// 0 means sync every write.
+const defaultFlushIntervalMS = 100
+
 func NewPebbleStore(path string) *PebbleStore {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		log.Fatalf("pebble: mkdir %s: %v", filepath.Dir(path), err)
@@ -115,12 +120,15 @@ func NewPebbleStore(path string) *PebbleStore {
 		flushDone: make(chan struct{}),
 	}
 
+	flushMS := defaultFlushIntervalMS
 	if v := os.Getenv("AQUIFER_PEBBLE_FLUSH_INTERVAL_MS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			s.flushInterval = time.Duration(n) * time.Millisecond
-			s.syncOpts = pebble.NoSync
-			log.Printf("[pebble] writes acknowledged before sync; WAL synced every %v (a crash can lose up to that much accepted work)", s.flushInterval)
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			flushMS = n
 		}
+	}
+	if flushMS > 0 {
+		s.flushInterval = time.Duration(flushMS) * time.Millisecond
+		s.syncOpts = pebble.NoSync
 	}
 
 	s.seedCounts()
