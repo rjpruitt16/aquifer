@@ -126,3 +126,30 @@ func TestInboundRateCascadeKeepsTheFirstKnee(t *testing.T) {
 		t.Fatalf("cuts during one congestion episode must keep the first knee (450), got %v", c.threshold)
 	}
 }
+
+func TestInboundRateBacklogGrowthHoldsThenCuts(t *testing.T) {
+	c := newInboundRateController(400, 40)
+	var backlog int64
+	c.SetBacklogSource(func() int64 { return backlog })
+
+	feed(c, 160, time.Millisecond) // first reading sets the baseline backlog
+	start := c.Snapshot().AdvertisedRPS
+	for i, want := range []string{"hold: backlog growing", "hold: backlog growing", "cut: backlog growing"} {
+		backlog += 500 // dispatch falling behind while inserts stay fast
+		if snap := feed(c, 160, time.Millisecond); snap.LastAdjustment != want {
+			t.Fatalf("tick %d: expected %q, got %+v", i, want, snap)
+		}
+	}
+	if got := c.Snapshot().AdvertisedRPS; got >= start {
+		t.Fatalf("a backlog growing three ticks in a row must cut the rate, still %v (was %v)", got, start)
+	}
+}
+
+func TestInboundRateSteadyBacklogAllowsRaises(t *testing.T) {
+	c := newInboundRateController(400, 40)
+	c.SetBacklogSource(func() int64 { return 50 })
+	feed(c, 160, time.Millisecond)
+	if snap := feed(c, 240, time.Millisecond); snap.LastAdjustment != "raise" {
+		t.Fatalf("a steady backlog must not block raises, got %+v", snap)
+	}
+}

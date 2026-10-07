@@ -235,13 +235,24 @@ func (s *PebbleStore) putRecord(jobID string, rec *pebbleRecord) {
 	}
 }
 
+// SetQueueKey writes without its own fsync. The queue key is only used to
+// re-enqueue a queue's jobs after a panic (normal restart recovery ignores
+// it), and Pebble's log is ordered, so the next synced write makes it durable
+// anyway. A dedicated sync here cost one of the few durable writes per
+// second the WAL can do, twice per job (the job and its webhook).
 func (s *PebbleStore) SetQueueKey(jobID, queueKey string) {
 	rec, ok := s.getRecord(jobID)
 	if !ok {
 		return
 	}
 	rec.QueueKey = queueKey
-	s.putRecord(jobID, rec)
+	data, err := json.Marshal(rec)
+	if err != nil {
+		return
+	}
+	if err := s.db.Set(jobKey(jobID), data, pebble.NoSync); err != nil {
+		log.Printf("pebble: set queue key for job %s: %v", jobID, err)
+	}
 }
 
 // DeleteJob removes both the job row and its idempotency index entry —

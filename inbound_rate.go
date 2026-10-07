@@ -45,11 +45,18 @@ type InboundRateController struct {
 	// admitted work drains doesn't drag the learned knee down with it.
 	congested bool
 	episode   int
-	inserts   int
-	latencies []time.Duration
-	callers   map[string]time.Time
-	baseline  time.Duration
-	last      InboundRateSnapshot
+
+	// backlog reads Aquifer's own queued-and-dispatching work. Insert latency
+	// only sees the cost of accepting jobs; when dispatch falls behind,
+	// the backlog grows while inserts stay fast, so it is a second signal.
+	backlog      func() int64
+	prevBacklog  int64
+	backlogGrows int
+	inserts      int
+	latencies    []time.Duration
+	callers      map[string]time.Time
+	baseline     time.Duration
+	last         InboundRateSnapshot
 
 	stop chan struct{}
 	done chan struct{}
@@ -63,6 +70,7 @@ type InboundRateSnapshot struct {
 	P95InsertMs    float64 `json:"p95_insert_ms"`
 	BaselineMs     float64 `json:"baseline_insert_ms"`
 	BenchmarkRPS   float64 `json:"benchmark_rps"`
+	ServerBacklog  int64   `json:"server_backlog"`
 	ThresholdRPS   float64 `json:"threshold_rps"`
 	Cuts           int64   `json:"cuts"`
 	Raises         int64   `json:"raises"`
@@ -83,8 +91,11 @@ const (
 	// within one congestion episode cut once, then hold, cutting again only
 	// if the episode outlasts this many ticks.
 	inboundEpisodeRecutTicks = 10
-	inboundOvershootFactor   = 1.5
-	inboundUsedFraction      = 0.8
+	// Backlog growing on this many consecutive ticks means accepted work is
+	// arriving faster than it can be dispatched.
+	inboundBacklogGrowthTicks = 3
+	inboundOvershootFactor    = 1.5
+	inboundUsedFraction       = 0.8
 )
 
 // NewInboundRateController returns nil unless AQUIFER_INBOUND_RPS_ENABLED is
@@ -114,8 +125,19 @@ func newInboundRateController(benchmark, startPercent float64) *InboundRateContr
 	}
 	c.rate = math.Max(benchmark*startPercent/100, c.floor)
 	c.threshold = benchmark
+	c.prevBacklog = -1
 	c.last = c.snapshotLocked(time.Now(), 0, 0, "start")
 	return c
+}
+
+// SetBacklogSource wires in Aquifer's own backlog (queued + dispatching).
+func (c *InboundRateController) SetBacklogSource(backlog func() int64) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.backlog = backlog
+	c.mu.Unlock()
 }
 
 func (c *InboundRateController) Close() {
@@ -204,7 +226,27 @@ func (c *InboundRateController) tick(now time.Time) {
 		}
 	}
 
-	healthy := !enough || p95 <= time.Duration(float64(c.baseline)*1.5)+inboundLatencySlack
+	latencyHealthy := !enough || p95 <= time.Duration(float64(c.baseline)*1.5)+inboundLatencySlack
+
+	backlog := int64(-1)
+	if c.backlog != nil {
+		backlog = c.backlog()
+	}
+	backlogGrowing := c.prevBacklog >= 0 && backlog >= 0 &&
+		float64(backlog-c.prevBacklog) > math.Max(10, 0.1*float64(inserts))
+	if backlogGrowing {
+		c.backlogGrows++
+	} else {
+		c.backlogGrows = 0
+	}
+	c.prevBacklog = backlog
+	backlogOverloaded := c.backlogGrows >= inboundBacklogGrowthTicks
+
+	healthy := latencyHealthy && !backlogOverloaded
+	cutReason := "cut: insert latency"
+	if latencyHealthy {
+		cutReason = "cut: backlog growing"
+	}
 	overshoot := float64(inserts) > c.rate*inboundOvershootFactor
 	used := float64(inserts) >= c.rate*inboundUsedFraction
 
@@ -227,9 +269,11 @@ func (c *InboundRateController) tick(now time.Time) {
 		c.episode = 0
 		c.rate = math.Max(c.rate*inboundCut, c.floor)
 		c.cooldown = inboundCutCooldownTicks
-		adjustment = "cut: insert latency"
+		adjustment = cutReason
 	case !healthy:
 		adjustment = "hold: waiting for last cut"
+	case backlogGrowing:
+		adjustment = "hold: backlog growing"
 	case overshoot:
 		// Callers over their share are admission control's problem; cutting
 		// here spirals to the floor whenever callers lag a rate change.
@@ -245,6 +289,7 @@ func (c *InboundRateController) tick(now time.Time) {
 	}
 
 	c.last = c.snapshotLocked(now, inserts, p95, adjustment)
+	c.last.ServerBacklog = max(backlog, 0)
 }
 
 func (c *InboundRateController) snapshotLocked(now time.Time, inserts int, p95 time.Duration, adjustment string) InboundRateSnapshot {

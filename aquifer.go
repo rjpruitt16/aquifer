@@ -50,12 +50,16 @@ type Aquifer struct {
 }
 
 func NewAquifer(store JobStore, registry *Registry, broker *Broker, l8 *L8Registry, admission *AdmissionController, pools *PoolRegistry) *Aquifer {
-	return &Aquifer{
+	a := &Aquifer{
 		store: store, registry: registry, broker: broker, l8: l8, admission: admission, pools: pools,
 		redirectGate:      &redirectGate{},
 		redirectTargetURL: defaultRedirectTargetURL,
 		inbound:           NewInboundRateController(),
 	}
+	if registry != nil {
+		a.inbound.SetBacklogSource(func() int64 { return registry.QueueSnapshot().UpstreamBacklog })
+	}
+	return a
 }
 
 func (a *Aquifer) Close() {
