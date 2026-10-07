@@ -307,7 +307,7 @@ If literally no known-live region can help either — none live at all, or every
 ```json
 {
   "job_id":     "a3f9...",
-  "status":     "queued | in_flight | completed | failed",
+  "status":     "queued | completed | failed",
   "url":        "https://api.openai.com/v1/chat/completions",
   "method":     "POST",
   "created_at": 1715000000000

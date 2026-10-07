@@ -27,7 +27,7 @@ import (
 //     hash — enough to serialize only conflicting keys, not every request.
 //   - Secondary indexes: idempotent-key lookup gets a real index
 //     (idem:<hash> -> job id), since that is the hot path called on every
-//     request. Status/queue-key scans (GetQueuedJobs, RecoverInFlight,
+//     request. Status/queue-key scans (GetQueuedJobs, RecoverQueued,
 //     Counts, cleanup) iterate the job: prefix and filter in Go — no
 //     worse than what the current SQL schema does today, since it has no
 //     index on status or queue_key either.
@@ -268,16 +268,6 @@ func (s *PebbleStore) DeleteJob(jobID string) {
 	s.countStatus(rec.Job.Status, -1)
 }
 
-func (s *PebbleStore) MarkInFlight(jobID string) {
-	rec, ok := s.getRecord(jobID)
-	if !ok {
-		return
-	}
-	s.moveStatus(rec.Job.Status, StatusInFlight)
-	rec.Job.Status = StatusInFlight
-	s.putRecord(jobID, rec)
-}
-
 func (s *PebbleStore) UpdateStatus(jobID string, status Status) {
 	rec, ok := s.getRecord(jobID)
 	if !ok {
@@ -364,21 +354,14 @@ func (s *PebbleStore) forEachJob(fn func(rec *pebbleRecord)) {
 	}
 }
 
-func (s *PebbleStore) RecoverInFlight(queueKey string) []*Job {
+func (s *PebbleStore) RecoverQueued(queueKey string) []*Job {
 	var jobs []*Job
-	var ids []string
-
 	s.forEachJob(func(rec *pebbleRecord) {
-		if rec.QueueKey == queueKey && rec.Job.Status == StatusInFlight {
+		if rec.QueueKey == queueKey && (rec.Job.Status == StatusQueued || rec.Job.Status == StatusInFlight) {
+			rec.Job.Status = StatusQueued
 			jobs = append(jobs, rec.Job)
-			ids = append(ids, rec.Job.ID)
 		}
 	})
-
-	for _, id := range ids {
-		s.UpdateStatus(id, StatusQueued)
-	}
-
 	return jobs
 }
 
@@ -401,7 +384,9 @@ func (s *PebbleStore) GetJob(jobID string) *Job {
 func (s *PebbleStore) GetQueuedJobs() []*Job {
 	var jobs []*Job
 	s.forEachJob(func(rec *pebbleRecord) {
-		if rec.Job.Status == StatusQueued {
+		// StatusInFlight only appears on records written by older versions.
+		if rec.Job.Status == StatusQueued || rec.Job.Status == StatusInFlight {
+			rec.Job.Status = StatusQueued
 			jobs = append(jobs, rec.Job)
 		}
 	})
@@ -547,26 +532,15 @@ func (s *PebbleStore) cleanupLoop() {
 		select {
 		case <-ticker.C:
 			now := time.Now().UnixMilli()
-			staleBefore := time.Now().Add(-inFlightMax).UnixMilli()
 
 			var expiredIDs []string
-			var staleInFlight []string
-
 			s.forEachJobIncludingExpired(func(rec *pebbleRecord) {
 				if rec.ExpiresAt < now {
 					expiredIDs = append(expiredIDs, rec.Job.ID)
-					return
-				}
-				if rec.Job.Status == StatusInFlight && rec.Job.CreatedAt < staleBefore {
-					staleInFlight = append(staleInFlight, rec.Job.ID)
 				}
 			})
-
 			for _, id := range expiredIDs {
 				s.DeleteJob(id)
-			}
-			for _, id := range staleInFlight {
-				s.UpdateStatus(id, StatusQueued)
 			}
 		case <-s.stop:
 			return

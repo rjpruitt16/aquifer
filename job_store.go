@@ -19,8 +19,10 @@ type JobStore interface {
 	CheckOrInsert(job *Job) (string, bool)
 	SetQueueKey(jobID, queueKey string)
 	DeleteJob(jobID string)
-	MarkInFlight(jobID string)
-	RecoverInFlight(queueKey string) []*Job
+	// RecoverQueued returns a queue's unfinished jobs (re-enqueued after a
+	// queue panic). Jobs are never persisted as in flight: a crash redoes them
+	// either way, so that extra synced write per dispatch bought nothing.
+	RecoverQueued(queueKey string) []*Job
 	UpdateStatus(jobID string, status Status)
 	Counts() StoreCounts
 	GetJob(jobID string) *Job

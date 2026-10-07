@@ -36,15 +36,12 @@ func TestPebbleRunningCountsMatchAFullScan(t *testing.T) {
 	}
 	for i, id := range ids {
 		switch i % 5 {
-		case 0:
-			s.MarkInFlight(id)
 		case 1:
-			s.MarkInFlight(id)
 			s.UpdateStatus(id, StatusCompleted)
 		case 2:
 			s.UpdateStatus(id, StatusFailed)
 		case 3:
-			s.MarkInFlight(id)
+			s.UpdateStatus(id, StatusCompleted)
 			s.UpdateStatus(id, StatusQueued)
 		case 4:
 			s.DeleteJob(id)

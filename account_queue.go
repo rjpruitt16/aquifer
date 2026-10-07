@@ -235,9 +235,12 @@ func (q *AccountQueue) supervise(rps float64, maxConc int, onIdle func(string), 
 		}
 
 		if panicked {
-			recovered := q.store.RecoverInFlight(q.key)
+			// The panicked loop's in-memory queue is gone; re-enqueue every
+			// unfinished job of this queue from storage (some may still be
+			// dispatching, which at-least-once delivery already allows).
+			recovered := q.store.RecoverQueued(q.key)
 			for _, j := range recovered {
-				log.Printf("[AccountQueue] recovered in_flight job %s after panic", j.ID)
+				log.Printf("[AccountQueue] re-enqueued job %s after panic", j.ID)
 				select {
 				case q.cmds <- j:
 				case <-q.stop:
@@ -339,7 +342,6 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 			inFlight++
 			lastRequestAt = time.Now()
 
-			q.store.MarkInFlight(job.ID)
 			q.metrics.JobDispatched(job.UserID, q.upstream)
 
 			dispatchURL := job.URL
