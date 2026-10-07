@@ -10,6 +10,7 @@ import (
 
 type Registry struct {
 	mu                sync.Mutex
+	enqueuing         sync.WaitGroup // enqueues past the stopping check; Close waits for them
 	workers           map[string]*URLWorker
 	store             JobStore
 	cfg               *Config
@@ -143,6 +144,13 @@ func (r *Registry) Close() {
 	r.closeOnce.Do(func() {
 		r.cancel()
 		close(r.stop)
+
+		// enqueue registers under r.mu after checking r.stop, so once this
+		// lock is taken no new enqueue can start; wait for the ones already
+		// writing to the store or handing jobs to queues.
+		r.mu.Lock()
+		r.mu.Unlock()
+		r.enqueuing.Wait()
 
 		r.mu.Lock()
 		workers := make([]*URLWorker, 0, len(r.workers))
@@ -288,16 +296,39 @@ func (r *Registry) enqueue(job *Job, accountQueueHeader string, enforceAdmission
 		return QueueSnapshot{}, ErrAquiferDraining
 	}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if r.stopping() {
-		return QueueSnapshot{}, ErrAquiferDraining
-	}
-
 	for {
+		// The registry lock covers only finding the worker. Admission, the
+		// store write and the handoff to the queue happen outside it, so
+		// submissions and webhook enqueues no longer run one at a time.
+		r.mu.Lock()
+		if r.stopping() {
+			r.mu.Unlock()
+			return QueueSnapshot{}, ErrAquiferDraining
+		}
 		key, w := r.resolveWorkerLocked(job)
+		r.enqueuing.Add(1)
+		r.mu.Unlock()
+		snapshot, err, done := r.enqueueOnWorker(key, w, job, accountQueueHeader, enforceAdmission)
+		r.enqueuing.Done()
+		if done {
+			return snapshot, err
+		}
 
+		// The worker can self-stop after its last AccountQueue idles out.
+		// If Enqueue races that transition, drop the stale registry entry
+		// and resolve a fresh worker instead of silently losing the job.
+		r.mu.Lock()
+		if current := r.workers[key]; current == w {
+			delete(r.workers, key)
+		}
+		r.mu.Unlock()
+	}
+}
+
+// enqueueOnWorker runs one attempt against w. done is false when the worker
+// had stopped and the caller should resolve a fresh one.
+func (r *Registry) enqueueOnWorker(key string, w *URLWorker, job *Job, accountQueueHeader string, enforceAdmission bool) (QueueSnapshot, error, bool) {
+	{
 		if accountQueueHeader != "" {
 			w.handleAccountQueueHeader(accountQueueHeader)
 		}
@@ -320,25 +351,19 @@ func (r *Registry) enqueue(job *Job, accountQueueHeader string, enforceAdmission
 			if r.clusterRouter != nil {
 				r.clusterRouter.CompleteLocalJob(job.UserID)
 			}
-			return snapshot, admissionErr
+			return snapshot, admissionErr, true
 		}
 		if workerLive {
 			r.totalJobs.Add(1)
 			r.queueDepth.Add(1)
 			r.metrics.JobQueued(job.UserID, key)
 			r.metrics.QueueDepth(key, int(r.queueDepth.Load()))
-			return snapshot, nil
+			return snapshot, nil, true
 		}
 		if r.clusterRouter != nil {
 			r.clusterRouter.CompleteLocalJob(job.UserID)
 		}
-
-		// The worker can self-stop after its last AccountQueue idles out.
-		// If Enqueue races that transition, drop the stale registry entry
-		// and resolve a fresh worker instead of silently losing the job.
-		if current := r.workers[key]; current == w {
-			delete(r.workers, key)
-		}
+		return QueueSnapshot{}, nil, false
 	}
 }
 
