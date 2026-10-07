@@ -241,6 +241,24 @@ requiring it to be set by hand is filed as a follow-up: [rjpruitt16/aquifer#11](
 
 ---
 
+## 11. Per-job overhead (`make perf`)
+
+`make perf` runs two Go benchmarks in-process against both storage backends, with a local upstream and webhook receiver that answer instantly and pacing set high enough never to wait. They measure Aquifer's own cost, so a change that slows the hot path shows up here before it shows up in production. Run it before and after a change on the same machine and compare.
+
+- **`BenchmarkJobLatency`** sends one job at a time and splits its trip into `accept_ms` (validate and durably store, i.e. `POST /jobs` returns), `queue_ms` (accepted until the upstream receives the request) and `total_ms`.
+- **`BenchmarkPipelineThroughput`** has 8 concurrent callers submit jobs and reports `jobs/s` that make it all the way through: accepted, dispatched, completed and their webhook delivered.
+
+Baseline, 2026-10-06, Apple M3 Max laptop (macOS, 200 jobs per run):
+
+| Backend | accept | queue | total | pipeline |
+|---|---:|---:|---:|---:|
+| SQLite | 0.55 ms | 0.13 ms | 0.67 ms | 571 jobs/s |
+| Pebble | 9.90 ms | 0.23 ms | 10.13 ms | 100 jobs/s |
+
+Read these as relative numbers, not capacity, and don't compare the two rows as like for like. SQLite runs in WAL mode with `synchronous=NORMAL`: a commit survives a process crash but isn't flushed to disk per write, so a power loss can drop the last few accepted jobs. Pebble syncs every write (zero acknowledged-job loss) with a 5ms group-commit window, and macOS `fsync` is far slower than Linux, so on a Mac a lone job waits out that window plus a full flush. On a Fly performance-1x volume, `fsync` measured about 0.3ms p50 and Pebble outran SQLite (see [section 8](#8-an-alternative-storage-backend-pebble)). Dispatch itself (`queue_ms`) is a fraction of a millisecond on both; the cost of a job is its storage writes.
+
+---
+
 ## Reproducing these results
 
 ```bash

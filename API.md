@@ -46,6 +46,43 @@ A lone queue is never fairness-rejected and may use the whole budget. A queue at
 
 Accepted and fairness-rejected responses report `X-Aqueduct-Active-Queues`, `X-Aqueduct-Upstream-Backlog`, `X-Aqueduct-Queue-Backlog`, and `X-Aqueduct-Admission-Pressure` (with `X-Aquifer-*` aliases). Outbound dispatches report active queues and upstream backlog to the backend alongside the existing load headers. These values cover the relevant upstream on the serving node. `GET /health` reports node-wide local totals under `queues`; it is deliberately not presented as a fleet-wide count.
 
+### Inbound pacing (`X-Aqueduct-Rps`)
+
+Off by default. With `AQUIFER_INBOUND_RPS_ENABLED=true`, Aquifer tells its own callers how fast to submit: every `/jobs` and `/proxy` response carries `X-Aqueduct-Rps` (alias `X-Aquifer-Rps`), the same header an upstream uses to pace Aquifer. An Aquifer calling another Aquifer, or any client that honors the header, slows down before the server has to start returning `429`s.
+
+| Env var | Default | Description |
+|---|---:|---|
+| `AQUIFER_INBOUND_RPS_ENABLED` | `false` | Start the controller and send the header |
+| `AQUIFER_INBOUND_BENCHMARK_RPS` | `400` | Jobs per second you believe this machine can take end to end; the first guess at the knee |
+| `AQUIFER_INBOUND_START_PERCENT` | `40` | Where the advertised rate starts, as a percent of the benchmark |
+
+**How it moves.** Once a second the controller compares what callers sent against two signals:
+
+- **Insert latency.** The p95 time to durably store a job, against a healthy baseline (the lowest p95 seen, drifting up slowly). Above 1.5x the baseline plus 2ms means storage is saturated.
+- **Backlog growth.** Accepted work waiting to be dispatched. If it grows for 3 ticks in a row, Aquifer is accepting faster than it can dispatch, even when inserts still look fast. Intake and dispatch share the same storage writes, so this is usually the first signal to fire.
+
+When either signal trips, the rate is cut by 30%, and the rate just under where it failed becomes the learned knee. Within one congestion episode it cuts once, then holds for up to 10 ticks while admitted work drains, so one slow patch doesn't drive the rate to the floor. While healthy, it grows 1.5x per tick below the knee and 5% per tick above it, and only when callers actually use at least 80% of what was advertised (unused headroom is never inflated). If callers send more than 1.5x the advertised rate, it holds instead of cutting: that is a client ignoring the header, and admission control handles it.
+
+The total is split evenly across active callers (any `user_id` seen in the last 3 seconds), so `X-Aqueduct-Rps` is a per-caller number.
+
+**Tuning.**
+
+1. **Measure the benchmark on the real machine.** Run your normal workload (or `make perf`, see [benchmark.md](benchmark.md#11-per-job-overhead-make-perf)) on the same instance type and disk, and set `AQUIFER_INBOUND_BENCHMARK_RPS` to the sustained jobs/s where the backlog stays flat. Count whole jobs, not inserts: a job costs about 4 synced storage writes (accept, dispatch result, webhook), about 2 when the caller streams the result. On a Fly performance-1x with a volume, one client held about 170 jobs/s end to end, well under a 400 inserts/s micro-benchmark.
+2. **Pick the start percent by how bursty callers are.** The default 40% ramps to the benchmark in about 3 seconds. Lower it (15 to 20) when one instance serves many callers and a cold start shouldn't flood it; raise it toward 80 for a single trusted caller that should get full speed right away.
+3. **Watch `/health`.** With pacing on, `GET /health` reports `inbound`:
+
+   ```json
+   "inbound": {
+     "advertised_rps": 168.2, "per_caller_rps": 56.1, "active_callers": 3,
+     "inserts_per_sec": 171, "p95_insert_ms": 2.4, "baseline_insert_ms": 1.1,
+     "benchmark_rps": 400, "threshold_rps": 181.0, "server_backlog": 212,
+     "cuts": 4, "raises": 19, "last_adjustment": "raise"
+   }
+   ```
+
+   `threshold_rps` settling well below `benchmark_rps` means the benchmark is optimistic; lower it so the ramp stops overshooting. Repeated `cut: backlog growing` means dispatch, not intake, is the bottleneck: more upstream capacity or more Aquifer instances (partition by `user_id`) helps; a faster disk alone won't. `hold: callers over advertised rate` means a caller is ignoring the header.
+4. **Pacing is per instance.** Each node advertises its own capacity. To scale intake, add nodes and spread callers across them; one node's knee doesn't move because another node is idle.
+
 ## Regional cluster routing
 
 Cluster routing is optional HTTP-level partitioning for `POST /jobs` and `POST /proxy`. Callers may hit any Aquifer instance; the receiving node resolves an owner by `user_id`, forwards when necessary, and returns `X-Aquifer-Cluster-Owner` with the instance that handled the request. This changes where a user is processed, not how local account queues are grouped: `X-Aqueduct-Account-Queue` still controls whether a URL worker isolates `(user_id, api_key)` queues locally.
@@ -342,7 +379,7 @@ curl -N http://localhost:8080/jobs/<id>/stream
 ```
 
 `admission.enabled` is `false` (with only that key present) when none of the
-`AQUIFER_*` admission env vars are set.
+`AQUIFER_*` admission env vars are set. With inbound pacing on, an `inbound` object is also present (see [Inbound pacing](#inbound-pacing-x-aqueduct-rps)).
 
 `GET /health` is a liveness endpoint. It remains **200** during graceful shutdown, with `status: "draining"`, so an orchestrator does not kill the process before accepted work has a chance to finish.
 
