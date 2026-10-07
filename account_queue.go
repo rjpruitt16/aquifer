@@ -762,12 +762,27 @@ func makeRequest(ctx context.Context, job *Job, dispatchURL string, totalJobs, q
 		req.Header.Set(orcaRequestHeaderName, "text")
 	}
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := dispatchClient.Do(req)
 	if err == nil {
 		l8.ObserveSchemaHash(dispatchURL, pacingHeader(resp.Header, "Schema-Hash"))
 	}
 	return resp, err
+}
+
+// dispatchClient is shared by every upstream and webhook dispatch so
+// connections are reused. A fresh client per request fell back to Go's
+// default transport, which keeps only 2 idle connections per host: at a few
+// hundred requests a second to one upstream, nearly every request opened
+// (and then closed) a new TCP connection, costing Aquifer CPU and the
+// upstream a connection per call.
+var dispatchClient = &http.Client{
+	Timeout: 30 * time.Second,
+	Transport: func() *http.Transport {
+		t := http.DefaultTransport.(*http.Transport).Clone()
+		t.MaxIdleConns = 1024
+		t.MaxIdleConnsPerHost = 256
+		return t
+	}(),
 }
 
 func setLoadHeader(headers http.Header, name, value string) {
