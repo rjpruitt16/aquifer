@@ -31,15 +31,12 @@ import (
 //     Counts, cleanup) iterate the job: prefix and filter in Go — no
 //     worse than what the current SQL schema does today, since it has no
 //     index on status or queue_key either.
-//   - The durability/throughput dial: Pebble's WriteOptions.Sync controls
-//     whether a commit forces an fsync (true, matching SQLite's stricter
-//     end) or just reaches the OS via write() without waiting for
-//     confirmation (false — the same trade Mnesia's batched flush and
-//     SQLite's synchronous=NORMAL both make). Defaults to false;
-//     AQUIFER_PEBBLE_SYNC_WRITES=true forces the strict mode. Verify
-//     crash survival empirically before trusting either setting, the
-//     same way that was verified for Mnesia and SQLite this session —
-//     don't assume "it's on disk" means "it survives a kill -9."
+//   - The durability/throughput dial: by default every write waits for
+//     its own fsync (group-committed, see defaultWALSyncIntervalMS), so an
+//     acknowledged job is never lost. AQUIFER_PEBBLE_FLUSH_INTERVAL_MS > 0
+//     acknowledges writes before they are durable and syncs the WAL on a
+//     timer instead, the trade EZThrottle Local's Mnesia flush makes: a
+//     crash can lose up to that many milliseconds of accepted work.
 const shardCount = 256
 
 type pebbleRecord struct {
@@ -58,6 +55,11 @@ type PebbleStore struct {
 	closeErr  error
 	stop      chan struct{}
 	done      chan struct{}
+
+	// flushInterval > 0 means writes don't wait for their own sync; a
+	// background loop syncs the WAL this often (AQUIFER_PEBBLE_FLUSH_INTERVAL_MS).
+	flushInterval time.Duration
+	flushDone     chan struct{}
 
 	// queued and inFlight are running counts kept in step with every status
 	// change, so Counts() (called on every dispatch for the load headers) is
@@ -103,18 +105,55 @@ func NewPebbleStore(path string) *PebbleStore {
 
 	s := &PebbleStore{
 		db: db,
-		// Sync is always true — see the comment above this function.
-		// Throughput under load comes from WALMinSyncInterval's group
-		// commit, not from skipping durability per write.
-		path:     path,
-		syncOpts: &pebble.WriteOptions{Sync: true},
-		stop:     make(chan struct{}),
-		done:     make(chan struct{}),
+		// By default each write waits for its sync — see the comment above
+		// this function. Throughput under load comes from
+		// WALMinSyncInterval's group commit, not from skipping durability.
+		path:      path,
+		syncOpts:  &pebble.WriteOptions{Sync: true},
+		stop:      make(chan struct{}),
+		done:      make(chan struct{}),
+		flushDone: make(chan struct{}),
+	}
+
+	if v := os.Getenv("AQUIFER_PEBBLE_FLUSH_INTERVAL_MS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			s.flushInterval = time.Duration(n) * time.Millisecond
+			s.syncOpts = pebble.NoSync
+			log.Printf("[pebble] writes acknowledged before sync; WAL synced every %v (a crash can lose up to that much accepted work)", s.flushInterval)
+		}
 	}
 
 	s.seedCounts()
 	go s.cleanupLoop()
+	if s.flushInterval > 0 {
+		go s.flushLoop()
+	} else {
+		close(s.flushDone)
+	}
 	return s
+}
+
+// flushLoop syncs the WAL every flushInterval. Pebble's WAL is one ordered
+// log, so a synced empty record makes every earlier NoSync write durable.
+func (s *PebbleStore) flushLoop() {
+	defer close(s.flushDone)
+	ticker := time.NewTicker(s.flushInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			s.syncWAL()
+		case <-s.stop:
+			s.syncWAL()
+			return
+		}
+	}
+}
+
+func (s *PebbleStore) syncWAL() {
+	if err := s.db.LogData(nil, pebble.Sync); err != nil {
+		log.Printf("[pebble] WAL sync failed: %v", err)
+	}
 }
 
 func (s *PebbleStore) seedCounts() {
@@ -148,6 +187,7 @@ func (s *PebbleStore) Close() error {
 	s.closeOnce.Do(func() {
 		close(s.stop)
 		<-s.done
+		<-s.flushDone
 		s.closeErr = s.db.Close()
 	})
 	return s.closeErr

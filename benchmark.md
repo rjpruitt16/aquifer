@@ -254,6 +254,10 @@ Baseline, 2026-10-06, Apple M3 Max laptop (macOS, 200 jobs per run):
 |---|---:|---:|---:|---:|
 | SQLite | 0.55 ms | 0.13 ms | 0.67 ms | 571 jobs/s |
 | Pebble | 9.90 ms | 0.23 ms | 10.13 ms | 100 jobs/s |
+| Pebble, `AQUIFER_PEBBLE_FLUSH_INTERVAL_MS=100` | 0.04 ms | 0.07 ms | 0.11 ms | 11,107 jobs/s |
+| Pebble, `AQUIFER_PEBBLE_FLUSH_INTERVAL_MS=10` | 0.05 ms | 0.08 ms | 0.13 ms | 9,593 jobs/s |
+
+The flush-interval rows (2000 jobs each) acknowledge a write before it is on disk and sync the log on a timer, the same trade EZThrottle Local makes with its 100ms Mnesia flush: a crash can lose up to that window of accepted jobs. `pebble_flush_test.go` checks that a process killed after the window loses nothing. On a Mac most of the gain comes from skipping slow `fsync`s; expect a smaller gap on Linux, where a sync took about 0.3ms on a Fly volume.
 
 Read these as relative numbers, not capacity, and don't compare the two rows as like for like. SQLite runs in WAL mode with `synchronous=NORMAL`: a commit survives a process crash but isn't flushed to disk per write, so a power loss can drop the last few accepted jobs. Pebble syncs every write (zero acknowledged-job loss) with a 5ms group-commit window, and macOS `fsync` is far slower than Linux, so on a Mac a lone job waits out that window plus a full flush. On a Fly performance-1x volume, `fsync` measured about 0.3ms p50 and Pebble outran SQLite (see [section 8](#8-an-alternative-storage-backend-pebble)). Dispatch itself (`queue_ms`) is a fraction of a millisecond on both; the cost of a job is its storage writes.
 

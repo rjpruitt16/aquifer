@@ -149,6 +149,7 @@ upstreams:
 | `CONFIG_PATH` | _(none)_     | Path to rate limit config YAML |
 | `AQUIFER_STORE_BACKEND` | `pebble` | Storage engine: `pebble` (pure-Go LSM store, the faster backend; see [benchmark.md](benchmark.md)) or `sqlite`. If `DB_PATH` is an existing SQLite file, Aquifer stays on SQLite so an upgrade doesn't orphan queued jobs |
 | `AQUIFER_PEBBLE_WAL_SYNC_INTERVAL_MS` | `5` | Pebble only: batches concurrent durable writes into fewer real fsyncs under load (Pebble's own group-commit); each caller still blocks until its own write is actually durable |
+| `AQUIFER_PEBBLE_FLUSH_INTERVAL_MS` | unset | Pebble only: answer before a write reaches disk and sync the log on this timer instead, like EZThrottle Local's 100ms Mnesia flush. Much faster (about 100x jobs/s on a Mac, see [benchmark.md](benchmark.md#11-per-job-overhead-make-perf)), but a crash can lose up to this many milliseconds of accepted jobs. Unset keeps zero acknowledged-job loss |
 | `AQUIFER_MEMORY_LIMIT_MB` | _(none, disabled)_ | Reject new jobs with `429` once process memory exceeds this many MB |
 | `AQUIFER_MAX_BODY_BYTES` | `1048576` (1MB) | Reject oversized request bodies with `413` |
 | `AQUIFER_DB_MAX_BYTES` | `838860800` (800MB) | Reject new jobs with `429` once the SQLite file exceeds this size |
