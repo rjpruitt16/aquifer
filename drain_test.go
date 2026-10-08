@@ -167,6 +167,7 @@ func TestDrainSnapshotReflectsStateWhenEnabled(t *testing.T) {
 
 	r := drainTestRegistry(t, NoopMetricsAdapter{})
 	r.drainCfg = DrainConfig{Enabled: true, TimerSeconds: 1, WebhookURL: srv.URL}
+	r.applyDrainEvents()
 
 	if snap := r.DrainSnapshot(); snap == nil || snap["state"] != string(DrainStateActive) {
 		t.Fatalf("expected active in snapshot before anything happens, got %+v", snap)
@@ -198,6 +199,7 @@ func TestDrainStateStaysDrainingOnFailedFlush(t *testing.T) {
 
 	r := drainTestRegistry(t, NoopMetricsAdapter{})
 	r.drainCfg = DrainConfig{Enabled: true, TimerSeconds: 1, WebhookURL: srv.URL}
+	r.applyDrainEvents()
 	r.setDrainState(DrainStateDraining) // mirrors what the real watchdog loop would have set before attempting
 	seedLedgerEntry(t, r)
 
@@ -230,6 +232,7 @@ func TestAttemptDrainFlushSucceedsAndClears(t *testing.T) {
 	metrics := &recordingMetrics{}
 	r := drainTestRegistry(t, metrics)
 	r.drainCfg = DrainConfig{Enabled: true, TimerSeconds: 1, WebhookURL: srv.URL}
+	r.applyDrainEvents()
 	seedLedgerEntry(t, r)
 
 	if !r.attemptDrainFlush() {
@@ -261,6 +264,7 @@ func TestAttemptDrainFlushEmptyLedgerSkipsDelivery(t *testing.T) {
 
 	r := drainTestRegistry(t, NoopMetricsAdapter{})
 	r.drainCfg = DrainConfig{Enabled: true, TimerSeconds: 1, WebhookURL: srv.URL}
+	r.applyDrainEvents()
 
 	if !r.attemptDrainFlush() {
 		t.Fatalf("expected attemptDrainFlush to report handled for an empty ledger")
@@ -285,6 +289,7 @@ func TestAttemptDrainFlushFailureDoesNotClear(t *testing.T) {
 	metrics := &recordingMetrics{}
 	r := drainTestRegistry(t, metrics)
 	r.drainCfg = DrainConfig{Enabled: true, TimerSeconds: 1, WebhookURL: srv.URL}
+	r.applyDrainEvents()
 	seedLedgerEntry(t, r)
 
 	if r.attemptDrainFlush() {
@@ -332,6 +337,7 @@ func TestAttemptDrainFlushSucceedsWithinRetryBudget(t *testing.T) {
 	metrics := &recordingMetrics{}
 	r := drainTestRegistry(t, metrics)
 	r.drainCfg = DrainConfig{Enabled: true, TimerSeconds: 1, WebhookURL: srv.URL}
+	r.applyDrainEvents()
 	seedLedgerEntry(t, r)
 
 	if !r.attemptDrainFlush() {
@@ -365,6 +371,7 @@ func TestFlushDrainEventBatchDeliversAndAcknowledges(t *testing.T) {
 
 	r := drainTestRegistry(t, NoopMetricsAdapter{})
 	r.drainCfg = DrainConfig{Enabled: true, TimerSeconds: 1, WebhookURL: srv.URL, BatchMaxEvents: 10}
+	r.applyDrainEvents()
 	seedLedgerEntry(t, r)
 
 	events, ok := r.flushDrainEventBatch("ledger_batch")
@@ -408,6 +415,7 @@ func TestFlushDrainEventBatchSerializesConcurrentFlushes(t *testing.T) {
 
 	r := drainTestRegistry(t, NoopMetricsAdapter{})
 	r.drainCfg = DrainConfig{Enabled: true, TimerSeconds: 1, WebhookURL: srv.URL, BatchMaxEvents: 10}
+	r.applyDrainEvents()
 	seedLedgerEntry(t, r)
 
 	results := make(chan bool, 2)
