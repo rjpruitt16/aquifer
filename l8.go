@@ -79,6 +79,10 @@ type L8Registry struct {
 
 	trustDir string
 	trusts   sync.Map // domain -> *l8Peer (in-memory, loaded from disk on start)
+	// notL8 remembers receivers that don't speak L8 (domain -> time.Time of
+	// the failed probe) for l8NegativeTTL. Without it every webhook to such
+	// a receiver cost an extra GET /.well-known/l8.
+	notL8 sync.Map
 	nonces   sync.Map // nonce -> time.Time expiry
 	schemas  *l8SchemaCache
 
@@ -208,11 +212,16 @@ func (r *L8Registry) EnsureTrust(webhookURL string) {
 	if _, ok := r.trusts.Load(domain); ok {
 		return
 	}
+	if at, ok := r.notL8.Load(domain); ok && time.Since(at.(time.Time)) < l8NegativeTTL {
+		return
+	}
 
 	meta, err := fetchL8Meta(domain)
 	if err != nil {
+		r.notL8.Store(domain, time.Now())
 		return
 	}
+	r.notL8.Delete(domain)
 
 	challengeID := uuid.New().String()
 	nonce := uuid.New().String()
@@ -232,7 +241,7 @@ func (r *L8Registry) EnsureTrust(webhookURL string) {
 		Signature:       base64.StdEncoding.EncodeToString(sig),
 	})
 
-	resp, err := (&http.Client{Timeout: 5 * time.Second}).Post(challengeURL, "application/json", bytes.NewReader(reqBody))
+	resp, err := l8Client.Post(challengeURL, "application/json", bytes.NewReader(reqBody))
 	if err != nil {
 		log.Printf("[L8] challenge to %s failed: %v", domain, err)
 		return
@@ -330,12 +339,23 @@ func (r *L8Registry) loadTrustsFromDisk() {
 
 // ---- helpers ----
 
+// l8NegativeTTL is how long a receiver without L8 metadata is left alone
+// before Aquifer probes it again (it may have added L8 since).
+const l8NegativeTTL = 5 * time.Minute
+
+// l8Client shares dispatchClient's pooled transport with a shorter timeout.
+var l8Client = &http.Client{Timeout: 5 * time.Second, Transport: dispatchClient.Transport}
+
 func fetchL8Meta(baseURL string) (*L8Meta, error) {
-	resp, err := (&http.Client{Timeout: 5 * time.Second}).Get(baseURL + "/.well-known/l8")
+	resp, err := l8Client.Get(baseURL + "/.well-known/l8")
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	// Drain what's left so the connection goes back to the pool.
+	defer func() {
+		io.Copy(io.Discard, io.LimitReader(resp.Body, l8MetaMaxBytes))
+		resp.Body.Close()
+	}()
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("/.well-known/l8 returned %d", resp.StatusCode)
 	}

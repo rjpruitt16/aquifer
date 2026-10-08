@@ -375,7 +375,7 @@ See the [security warning](API.md#post-jobs) under `POST /jobs`; the same untrus
 
 </details>
 
-**Choosing a machine size:** see [benchmark.md](benchmark.md#7-capacity-and-drain-time) for current throughput, capacity by machine size, and the benchmark methodology.
+**Choosing a machine size:** with Pebble and the default 100ms flush, one Fly machine sustained about 1,000 jobs/s on performance-1x, 1,500 on 2x and 3,000 on 4x, end to end including webhooks. See [benchmark.md](benchmark.md#12-capacity-per-machine-pebble-flyio-2026-10-07) for the method and caveats, and [section 7](benchmark.md#7-capacity-and-drain-time) for earlier capacity work.
 
 ---
 

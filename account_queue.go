@@ -198,8 +198,15 @@ func NewAccountQueue(key, upstream string, rps float64, maxConc int, pool *Pool,
 }
 
 func (q *AccountQueue) Enqueue(job *Job) bool {
-	q.store.SetQueueKey(job.ID, q.key)
 	q.reserveBacklog()
+	return q.handoff(job)
+}
+
+// handoff gives an already-reserved job to the run loop. URLWorker calls it
+// after releasing its lock, so the store write and the channel send don't
+// serialize every submission and webhook on one lock.
+func (q *AccountQueue) handoff(job *Job) bool {
+	q.store.SetQueueKey(job.ID, q.key)
 	select {
 	case q.cmds <- job:
 		return true
@@ -256,7 +263,15 @@ func (q *AccountQueue) supervise(rps float64, maxConc int, onIdle func(string), 
 		}
 
 		if len(q.cmds) == 0 {
-			onIdle(q.key)
+			if onIdle != nil {
+				onIdle(q.key)
+			}
+			// onIdle refuses to retire a queue that has reserved backlog
+			// (an enqueuer reserved under the worker lock and is about to
+			// hand the job over) or buffered jobs; keep running for them.
+			if q.backlog.Load() > 0 || len(q.cmds) > 0 {
+				continue
+			}
 			return
 		}
 	}
