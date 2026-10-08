@@ -143,6 +143,9 @@ func TestPoolBackedJobWaitsForMembers(t *testing.T) {
 func TestPoolBackedJobFailsOverToHealthyMember(t *testing.T) {
 	oldSleep := retrySleepFunc.Load()
 	retrySleepFunc.Store(func(time.Duration) {})
+	oldBackoff := retryBackoffFunc.Load()
+	retryBackoffFunc.Store(func(int) time.Duration { return 0 })
+	t.Cleanup(func() { retryBackoffFunc.Store(oldBackoff) })
 	t.Cleanup(func() { retrySleepFunc.Store(oldSleep) })
 
 	var badHits atomic.Int64
@@ -213,6 +216,9 @@ func TestPoolBackedJobFailsOverToHealthyMember(t *testing.T) {
 func TestPoolBackedJobTreatsFinal500AsFailed(t *testing.T) {
 	oldSleep := retrySleepFunc.Load()
 	retrySleepFunc.Store(func(time.Duration) {})
+	oldBackoff := retryBackoffFunc.Load()
+	retryBackoffFunc.Store(func(int) time.Duration { return 0 })
+	t.Cleanup(func() { retryBackoffFunc.Store(oldBackoff) })
 	t.Cleanup(func() { retrySleepFunc.Store(oldSleep) })
 
 	always500 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -284,7 +290,7 @@ func waitForWebhook(t *testing.T, ch <-chan map[string]any) map[string]any {
 	select {
 	case payload := <-ch:
 		return payload
-	case <-time.After(3 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("timed out waiting for webhook")
 	}
 	return nil

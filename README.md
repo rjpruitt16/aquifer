@@ -77,7 +77,7 @@ Long-term protocol goal: if more services emit `X-Aqueduct-*`, agents can respon
 1. Client submits a job through an adapter (MCP tool or HTTP endpoint) and moves on
 2. Aquifer persists it to SQLite, surviving crashes and re-dispatching on restart
 3. A per-upstream worker dispatches at your configured RPS with jitter
-4. On completion Aquifer POSTs your webhook with the response body and status
+4. On completion Aquifer POSTs your webhook with the response body and status, or skips it if you [stayed on the line](#streaming--stay-on-the-line-or-hang-up) and got the result there
 5. The upstream can adjust the rate live via `X-Aqueduct-*` response headers
 
 **Delivery semantics:** Aquifer provides at-least-once dispatch and webhook delivery, not exactly-once execution. If Aquifer crashes after a dispatch succeeds but before it records that completion, the recovered job dispatches to the upstream again on restart, so it's not just the webhook that can repeat, the upstream call itself can. Make both your upstream endpoint and your webhook handler idempotent on `job_id` (or `idempotent_key`) anywhere duplicate execution isn't safe, the same contract Stripe and GitHub webhooks already ask of you.
@@ -240,6 +240,28 @@ POST /jobs
 **Do not expose Aquifer directly to untrusted callers.** `url` is dispatched as a real HTTP request. If an arbitrary or untrusted party can set it, Aquifer becomes an open relay/SSRF vector, using Aquifer's own network position and identity to reach anything the machine can reach. The intended caller is **your own trusted backend or gateway code** dispatching to a destination it already knows about, not an agent, end user, or any other party choosing the destination itself.
 
 **[API.md](API.md)** has the full reference: `GET /jobs/:id`, the SSE stream, `POST /proxy` (edge-gateway mode, see [Use cases](#use-cases)), health/readiness and graceful shutdown, webhook payload shapes, and the autoscaling headers.
+
+---
+
+## Streaming — stay on the line or hang up
+
+After submitting a job you choose how to get the result. Stay on the line with `GET /jobs/:id/stream` (or call `POST /proxy`, which streams automatically when it has to queue), and watch your job move through the line in real time. Or hang up whenever you like: the result still arrives at your `webhook_url`, and it's stored for `GET /jobs/:id` too.
+
+```
+event: queued
+data: {"job_id":"abc123","status":"queued"}
+
+event: position
+data: {"job_id":"abc123","position":3}
+
+event: dispatching
+data: {"job_id":"abc123","attempt":1}
+
+event: completed
+data: {"job_id":"abc123","response_status":200,"body":"..."}
+```
+
+The webhook is only a fallback. If you stayed on the line and received the final event (or a `/proxy` direct response), Aquifer doesn't send it, so you never pay for the same result twice. If you hung up first, or never streamed, the webhook goes out as usual. A client that disappears without closing its connection (a dropped network, a sleeping laptop) can't be told apart from one that's still listening, so it may miss both; that's what the stored result on `GET /jobs/:id` is for.
 
 ---
 

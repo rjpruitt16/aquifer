@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"time"
 )
 
 type SSEEvent struct {
@@ -17,10 +18,63 @@ type SSEEvent struct {
 type Broker struct {
 	mu          sync.RWMutex
 	subscribers map[string][]chan SSEEvent
+	// delivered holds, per job whose final event was just published to live
+	// streams, a channel a stream closes once it has written and flushed
+	// that event to a still-connected client.
+	delivered map[string]chan struct{}
 }
 
 func NewBroker() *Broker {
-	return &Broker{subscribers: make(map[string][]chan SSEEvent)}
+	return &Broker{subscribers: make(map[string][]chan SSEEvent), delivered: make(map[string]chan struct{})}
+}
+
+// PublishTerminal publishes a job's final event and reports whether a live
+// stream confirmed delivering it, waiting up to wait. It returns false at
+// once when nobody is streaming the job.
+func (b *Broker) PublishTerminal(jobID string, event SSEEvent, wait time.Duration) bool {
+	b.mu.Lock()
+	subs := append([]chan SSEEvent(nil), b.subscribers[jobID]...)
+	var done chan struct{}
+	if len(subs) > 0 {
+		done = make(chan struct{})
+		b.delivered[jobID] = done
+	}
+	b.mu.Unlock()
+
+	for _, ch := range subs {
+		select {
+		case ch <- event:
+		default:
+		}
+	}
+	if done == nil {
+		return false
+	}
+	defer func() {
+		b.mu.Lock()
+		if b.delivered[jobID] == done {
+			delete(b.delivered, jobID)
+		}
+		b.mu.Unlock()
+	}()
+
+	select {
+	case <-done:
+		return true
+	case <-time.After(wait):
+		return false
+	}
+}
+
+// ConfirmDelivered is called by a stream after flushing a job's final event
+// to a client that was still connected.
+func (b *Broker) ConfirmDelivered(jobID string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if done := b.delivered[jobID]; done != nil {
+		close(done)
+		delete(b.delivered, jobID)
+	}
 }
 
 func (b *Broker) Subscribe(jobID string) (<-chan SSEEvent, func()) {

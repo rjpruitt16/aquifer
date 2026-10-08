@@ -29,6 +29,31 @@ Idempotent — duplicate `idempotent_key` per `user_id` returns the existing job
 
 **422** the upstream's L8 `request_schemas` rejects the body (see [Request schemas](#request-schemas-l8-02)).
 
+### Retries
+
+Connection errors, `5xx`, `408` and `429` are retried; any other response (including other `4xx`) is final. Set the limit per job with `"max_retries"` in the body or the `X-Aqueduct-Max-Retries` request header (the header wins):
+
+| Value | Behavior |
+|---|---|
+| _(unset)_ | 4 retries (5 attempts) |
+| `0` | no retries |
+| `1`-`100` | that many retries |
+| `-1` | retry until the job succeeds, stopping at `execute_before` if set, otherwise 24 hours after submission |
+
+```bash
+curl -X POST localhost:8080/jobs -H "X-Aqueduct-Max-Retries: -1" -d '{ ... }'
+```
+
+`-1` is meant for deliveries that must eventually land, such as forwarding webhooks to a receiver that may be down for a while. It is never the default.
+
+How retries are paced:
+
+- **Per job:** the wait before each retry doubles (1 s, 2 s, 4 s, ...) up to `AQUIFER_RETRY_MAX_BACKOFF_SECONDS` (default `300`), with jitter. A `Retry-After` header on the failed response is honored instead.
+- **Per queue:** every retryable failure halves that account queue's dispatch rate (down to 0.5 rps); successes raise it again by 5% each. An explicit `X-Aqueduct-Rps` from the upstream still overrides both.
+- A job waiting out its backoff does not hold a concurrency slot, so other jobs in the same queue keep moving. The attempt count is persisted, so a restart doesn't reset it.
+
+Each retry emits a `retrying` SSE event (`attempt`, `max_retries`, `retry_at`, `reason`, `response_status`). The final `failed` event and webhook report the last failure; a job that still had retries left when its deadline arrived reports `retry_window_exhausted: <reason>`.
+
 ### Fair queue admission
 
 Each upstream has a soft shared backlog budget `B`, defaulting to `AQUIFER_MAX_PENDING_PER_UPSTREAM=10000`. The upstream may update it at runtime with `X-Aqueduct-Max-Backlog` (or `X-Aquifer-Max-Backlog`); `0` disables this count-based limit. Dynamic values are learned from direct proxy responses and queued dispatch responses.
@@ -45,6 +70,18 @@ P(429)   = pressure * excess
 A lone queue is never fairness-rejected and may use the whole budget. A queue at or below `F` is not fairness-rejected. Above 70% total pressure, disproportionately large queues receive progressively more `429` responses; when competitors drain, their capacity becomes borrowable again. If admitting a request would put `Q` above `B`, it is rejected deterministically. Without AccountQueue mode, traffic remains one shared queue (`N=1`), so only the shared backlog ceiling applies. Duplicates, recovered work, and internal webhook deliveries bypass this admission decision; accepted jobs are never discarded by it.
 
 Accepted and fairness-rejected responses report `X-Aqueduct-Active-Queues`, `X-Aqueduct-Upstream-Backlog`, `X-Aqueduct-Queue-Backlog`, and `X-Aqueduct-Admission-Pressure` (with `X-Aquifer-*` aliases). Outbound dispatches report active queues and upstream backlog to the backend alongside the existing load headers. These values cover the relevant upstream on the serving node. `GET /health` reports node-wide local totals under `queues`; it is deliberately not presented as a fleet-wide count.
+
+### Webhook backlog admission
+
+A user whose completion webhooks are piling up undelivered is consuming capacity faster than their receiver can absorb it. When other users are also active on the instance, new jobs from that user are rejected with **429** and `limit_reason: "webhook_backlog"` until they catch up:
+
+```text
+W      = AQUIFER_MAX_PENDING_WEBHOOKS_PER_USER (default 1000; 0 disables)
+w      = the user's queued + in-flight webhook deliveries on this instance
+P(429) = clamp((w - W) / W, 0, 1)    // 0 at or below W, certain at 2W
+```
+
+A user alone on the instance is never rejected for this, however large their backlog. The rule never drops accepted work or webhooks; it only slows new submissions. Counts are per instance, like `GET /health`.
 
 ### Inbound pacing (`X-Aqueduct-Rps`)
 
@@ -347,9 +384,17 @@ If literally no known-live region can help either — none live at all, or every
   "status":     "queued | completed | failed",
   "url":        "https://api.openai.com/v1/chat/completions",
   "method":     "POST",
-  "created_at": 1715000000000
+  "created_at": 1715000000000,
+  "result": {
+    "response_status": 200,
+    "content_type":    "application/json",
+    "body":            "{...}",
+    "body_truncated":  false
+  }
 }
 ```
+
+`result` appears once the job has finished and stays for the job's retention window (30 minutes after completion, 2 hours after failure). The body is capped at `AQUIFER_RESULT_MAX_BYTES` (default 65536).
 
 ## GET /jobs/:id/stream
 
@@ -436,6 +481,17 @@ With `AQUIFER_L8_SCHEMA_VALIDATION=true`, Aquifer fetches this once per upstream
 ```
 
 When the upstream changes its contract it returns a new `X-Aqueduct-Schema-Hash` on any response. Aquifer then drops the cached schemas and the L8 trust for that domain, so the next request refetches metadata and re-runs the handshake. Routes without a schema, upstreams without L8, and metadata that fails to fetch or compile are all let through unchecked. External `$ref`s are never fetched.
+
+### Webhooks are skipped for results you already received
+
+The completion webhook is a fallback, not a second copy. Aquifer never sends one for a result the caller already received:
+
+- If a stream (`GET /jobs/:id/stream` or a `/proxy` fallback stream) writes and flushes the final `completed`/`failed` event while its client is still connected, no webhook is sent.
+- A `/proxy` direct success works the same way: if the relayed response is written and flushed to a caller who is still connected, no webhook is sent.
+- If the client disconnects before the end (for example, gives up while waiting in line), or nobody was streaming, the webhook is sent as usual.
+- Aquifer waits up to `AQUIFER_STREAM_DELIVERY_WAIT_MS` (default 2000) for a stream's confirmation, and only when someone is actually streaming the job.
+
+A client that vanishes without closing its connection (a dropped network, a sleeping laptop) looks connected to the server, so it may miss both the final event and the webhook. That's why the result is stored: fetch it from `GET /jobs/:id`.
 
 ## Webhooks
 

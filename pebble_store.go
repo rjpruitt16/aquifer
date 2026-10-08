@@ -45,6 +45,7 @@ type pebbleRecord struct {
 	Job       *Job
 	QueueKey  string
 	ExpiresAt int64
+	Result    *JobResult `json:",omitempty"`
 }
 
 type PebbleStore struct {
@@ -383,6 +384,33 @@ func (s *PebbleStore) DeleteJob(jobID string) {
 		return
 	}
 	s.countStatus(rec.Job.Status, -1)
+}
+
+func (s *PebbleStore) PutResult(jobID string, result JobResult) {
+	rec, ok := s.getRecord(jobID)
+	if !ok {
+		return
+	}
+	rec.Result = &result
+	s.putRecord(jobID, rec)
+}
+
+func (s *PebbleStore) GetResult(jobID string) (JobResult, bool) {
+	rec, ok := s.getRecord(jobID)
+	if !ok || rec.Result == nil || rec.ExpiresAt <= time.Now().UnixMilli() {
+		return JobResult{}, false
+	}
+	return *rec.Result, true
+}
+
+func (s *PebbleStore) RecordRetry(jobID string, attempts int) {
+	rec, ok := s.getRecord(jobID)
+	if !ok {
+		return
+	}
+	rec.Job.Attempts = attempts
+	rec.Job.Status = StatusQueued
+	s.putRecord(jobID, rec)
 }
 
 func (s *PebbleStore) UpdateStatus(jobID string, status Status) {

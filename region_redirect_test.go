@@ -213,6 +213,9 @@ func TestRedirectSucceedsDirectlyOnTargetRegion(t *testing.T) {
 func TestRedirectFallsBackToTargetsQueueWhenNoRegionCanDispatchDirectly(t *testing.T) {
 	oldSleep := retrySleepFunc.Load()
 	retrySleepFunc.Store(func(time.Duration) {})
+	oldBackoff := retryBackoffFunc.Load()
+	retryBackoffFunc.Store(func(int) time.Duration { return 0 })
+	t.Cleanup(func() { retryBackoffFunc.Store(oldBackoff) })
 	t.Cleanup(func() { retrySleepFunc.Store(oldSleep) })
 
 	origin, originHTTP, target := buildRedirectTestPair(t)
@@ -273,6 +276,9 @@ func TestRedirectFallsBackToTargetsQueueWhenNoRegionCanDispatchDirectly(t *testi
 func TestRedirectDoesNotOriginateFromAnAlreadyRedirectedRequest(t *testing.T) {
 	oldSleep := retrySleepFunc.Load()
 	retrySleepFunc.Store(func(time.Duration) {})
+	oldBackoff := retryBackoffFunc.Load()
+	retryBackoffFunc.Store(func(int) time.Duration { return 0 })
+	t.Cleanup(func() { retryBackoffFunc.Store(oldBackoff) })
 	t.Cleanup(func() { retrySleepFunc.Store(oldSleep) })
 
 	origin, originHTTP, _ := buildRedirectTestPair(t)
@@ -322,6 +328,9 @@ func TestRedirectDoesNotOriginateFromAnAlreadyRedirectedRequest(t *testing.T) {
 func TestQueueKindBreakerDoesNotAttemptRedirect(t *testing.T) {
 	oldSleep := retrySleepFunc.Load()
 	retrySleepFunc.Store(func(time.Duration) {})
+	oldBackoff := retryBackoffFunc.Load()
+	retryBackoffFunc.Store(func(int) time.Duration { return 0 })
+	t.Cleanup(func() { retryBackoffFunc.Store(oldBackoff) })
 	t.Cleanup(func() { retrySleepFunc.Store(oldSleep) })
 
 	origin, originHTTP, target := buildRedirectTestPair(t)
@@ -373,6 +382,9 @@ func TestQueueKindBreakerDoesNotAttemptRedirect(t *testing.T) {
 func TestRedirectExhaustionReturnsHardErrorNotLocalQueue(t *testing.T) {
 	oldSleep := retrySleepFunc.Load()
 	retrySleepFunc.Store(func(time.Duration) {})
+	oldBackoff := retryBackoffFunc.Load()
+	retryBackoffFunc.Store(func(int) time.Duration { return 0 })
+	t.Cleanup(func() { retryBackoffFunc.Store(oldBackoff) })
 	t.Cleanup(func() { retrySleepFunc.Store(oldSleep) })
 	t.Setenv("AQUIFER_REDIRECT_EXHAUSTED_RETRY_AFTER_SECONDS", "123")
 

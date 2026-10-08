@@ -24,6 +24,11 @@ type JobStore interface {
 	// either way, so that extra synced write per dispatch bought nothing.
 	RecoverQueued(queueKey string) []*Job
 	UpdateStatus(jobID string, status Status)
+	RecordRetry(jobID string, attempts int)
+	// PutResult/GetResult keep a job's terminal response so a caller who
+	// streamed (and so may get no webhook) can still fetch it later.
+	PutResult(jobID string, result JobResult)
+	GetResult(jobID string) (JobResult, bool)
 	Counts() StoreCounts
 	GetJob(jobID string) *Job
 	GetQueuedJobs() []*Job

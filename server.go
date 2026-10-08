@@ -137,6 +137,10 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 	// mode unchanged rather than forcing it off for every request that
 	// doesn't happen to set this.
 	req.AccountQueueMode = pacingHeader(r.Header, "Account-Queue")
+	if err := applyMaxRetriesHeader(r.Header, &req); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	setInboundRPS(w, s.aquifer, req.UserID)
 
 	if s.forwardClusterRequest(w, r, "/jobs", req) {
@@ -192,14 +196,23 @@ func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
+	body := map[string]any{
 		"job_id":         job.ID,
 		"status":         job.Status,
 		"url":            job.URL,
 		"method":         job.Method,
 		"created_at":     job.CreatedAt,
 		"execute_before": job.ExecuteBefore,
-	})
+	}
+	if result, ok := s.aquifer.JobResult(job.ID); ok {
+		body["result"] = map[string]any{
+			"response_status": result.ResponseStatus,
+			"content_type":    result.ContentType,
+			"body":            result.Body,
+			"body_truncated":  result.BodyTruncated,
+		}
+	}
+	json.NewEncoder(w).Encode(body)
 }
 
 func (s *Server) getJobResult(w http.ResponseWriter, r *http.Request) {
@@ -331,11 +344,16 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request, job *Job, 
 			if !ok {
 				return
 			}
-			writeSSE(w, event.Event, event.Data)
-			flusher.Flush()
+			writeErr := writeSSE(w, event.Event, event.Data)
 			if event.Event == "completed" || event.Event == "failed" {
+				// Confirm only a final event written and flushed while the
+				// client was still connected; anything else gets a webhook.
+				if writeErr == nil && http.NewResponseController(w).Flush() == nil && ctx.Err() == nil {
+					s.aquifer.broker.ConfirmDelivered(job.ID)
+				}
 				return
 			}
+			flusher.Flush()
 
 		case <-keepalive.C:
 			fmt.Fprintf(w, ": keepalive\n\n")
@@ -368,6 +386,10 @@ func (s *Server) proxyJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.AccountQueueMode = pacingHeader(r.Header, "Account-Queue")
+	if err := applyMaxRetriesHeader(r.Header, &req); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	setInboundRPS(w, s.aquifer, req.UserID)
 
 	if s.forwardClusterRequest(w, r, "/proxy", req) {
@@ -423,7 +445,9 @@ func (s *Server) proxyJob(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		w.WriteHeader(outcome.Status)
-		w.Write(outcome.Body)
+		_, writeErr := w.Write(outcome.Body)
+		delivered := writeErr == nil && http.NewResponseController(w).Flush() == nil && r.Context().Err() == nil
+		s.aquifer.SettleDirectWebhook(outcome, delivered)
 		return
 	}
 
@@ -725,6 +749,21 @@ func writeSchemaMismatch(w http.ResponseWriter, err error) bool {
 		"schema_errors": schemaErr.Detail,
 	})
 	return true
+}
+
+// applyMaxRetriesHeader lets X-Aqueduct-Max-Retries (or X-Aquifer-Max-Retries)
+// override the body's max_retries; -1 means retry until complete.
+func applyMaxRetriesHeader(header http.Header, req *JobRequest) error {
+	raw := pacingHeader(header, "Max-Retries")
+	if raw == "" {
+		return nil
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		return errors.New("X-Aqueduct-Max-Retries must be an integer: -1 (retry until complete) or 0-100")
+	}
+	req.MaxRetries = &n
+	return nil
 }
 
 // setInboundRPS advertises this caller's share of Aquifer's own inbound

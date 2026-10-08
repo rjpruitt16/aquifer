@@ -45,6 +45,11 @@ type ProxyOutcome struct {
 	FallbackReason string
 	FallbackStatus int
 
+	// pendingWebhook is a direct success's completion webhook, held back
+	// until the handler knows whether the relayed response reached the
+	// caller. See SettleDirectWebhook.
+	pendingWebhook map[string]any
+
 	// RelayFrom is set when this request was redirected to another region
 	// (region_redirect.go) and that region accepted it into its own
 	// durable queue rather than completing directly — the caller
@@ -144,16 +149,28 @@ func (a *Aquifer) AttemptDirect(ctx context.Context, req JobRequest, timeout tim
 
 	body, _ := io.ReadAll(resp.Body)
 	a.store.UpdateStatus(job.ID, StatusCompleted)
+	saveLocalResult(a.store, job, StatusCompleted, resp.StatusCode, resp.Header.Get("Content-Type"), string(body))
 	a.broker.Publish(job.ID, SSEEvent{Event: "completed", Data: map[string]any{
 		"job_id": job.ID, "response_status": resp.StatusCode, "body": string(body),
 	}})
+	outcome := ProxyOutcome{Job: job, Direct: true, Status: resp.StatusCode, Header: resp.Header, Body: body}
 	if job.WebhookURL != "" {
-		a.registry.EnqueueWebhook(job.ID, job.UserID, job.WebhookURL, map[string]any{
+		payload := map[string]any{
 			"job_id": job.ID, "status": "completed", "response_status": resp.StatusCode, "body": string(body),
-		})
+		}
+		outcome.pendingWebhook = payload
 	}
+	return outcome
+}
 
-	return ProxyOutcome{Job: job, Direct: true, Status: resp.StatusCode, Header: resp.Header, Body: body}
+// SettleDirectWebhook sends a direct success's held-back webhook unless the
+// relayed response reached a still-connected caller.
+func (a *Aquifer) SettleDirectWebhook(outcome ProxyOutcome, delivered bool) {
+	if outcome.pendingWebhook == nil || delivered {
+		return
+	}
+	job := outcome.Job
+	a.registry.EnqueueWebhook(job.ID, job.UserID, job.WebhookURL, outcome.pendingWebhook)
 }
 
 // fallbackOutcome builds AttemptDirect's local-fallback result — but tries

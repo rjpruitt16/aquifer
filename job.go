@@ -33,6 +33,11 @@ type Job struct {
 	ExecuteBefore int64             `json:"execute_before,omitempty"`
 
 	IdempotencyScope string `json:"idempotency_scope,omitempty"`
+	// MaxRetries is resolved at creation: DefaultMaxRetries unless the caller
+	// set one, RetryUntilComplete (-1) for no attempt limit. Attempts counts
+	// failed attempts already retried.
+	MaxRetries int `json:"max_retries"`
+	Attempts   int `json:"attempts,omitempty"`
 	// DedupHash caches dedupHash's result. SQLite never stores the plaintext
 	// idempotent key, so a job reloaded from it can only recover the hash
 	// from the idempotent_key_hash column, not recompute it.
@@ -87,6 +92,12 @@ type JobRequest struct {
 	// the default per-user scope. Requires AQUIFER_SHARED_IDEMPOTENCY_ENABLED.
 	IdempotencyScope string `json:"idempotency_scope,omitempty"`
 
+	// MaxRetries caps retries of retryable failures (connection errors, 5xx,
+	// 408, 429). Nil means DefaultMaxRetries; -1 retries until the job
+	// succeeds, bounded by execute_before or the queued-job TTL. The
+	// X-Aqueduct-Max-Retries request header overrides this field.
+	MaxRetries *int `json:"max_retries,omitempty"`
+
 	// Cross-region /proxy redirect fields — see Job's own doc comment and
 	// proxy.go's AttemptDirect. Only ever set on an internal redirect hop
 	// (one Aquifer instance calling another's /proxy directly); a real
@@ -125,6 +136,8 @@ func (r *JobRequest) Validate() string {
 		return "user_id must not contain NUL characters"
 	case r.IdempotentKey == "":
 		return "idempotent_key is required"
+	case r.MaxRetries != nil && (*r.MaxRetries < RetryUntilComplete || *r.MaxRetries > MaxAllowedRetries):
+		return "max_retries must be -1 (retry until complete) or between 0 and 100"
 	case r.IdempotencyScope != "" && r.IdempotencyScope != IdempotencyScopeUser && r.IdempotencyScope != IdempotencyScopeShared:
 		return `idempotency_scope must be "user" or "shared"`
 	case r.IdempotencyScope == IdempotencyScopeShared && !sharedIdempotencyEnabled():
@@ -182,6 +195,12 @@ func domainAllowed(rawURL string) bool {
 }
 
 const (
+	DefaultMaxRetries  = 4
+	RetryUntilComplete = -1
+	MaxAllowedRetries  = 100
+)
+
+const (
 	IdempotencyScopeUser   = "user"
 	IdempotencyScopeShared = "shared"
 )
@@ -213,6 +232,7 @@ func NewJob(r *JobRequest) *Job {
 		UserID:           r.UserID,
 		IdempotentKey:    r.IdempotentKey,
 		IdempotencyScope: r.IdempotencyScope,
+		MaxRetries:       resolveMaxRetries(r.MaxRetries),
 		DedupHash:        dedupHash(r.UserID, r.IdempotentKey, r.IdempotencyScope),
 		URL:              r.URL,
 		PoolID:           r.PoolID,
@@ -228,6 +248,27 @@ func NewJob(r *JobRequest) *Job {
 		VisitedRegions:   r.VisitedRegions,
 		RerouteCount:     r.RerouteCount,
 	}
+}
+
+func resolveMaxRetries(requested *int) int {
+	if requested == nil {
+		return DefaultMaxRetries
+	}
+	return *requested
+}
+
+// retryDeadline is when a job stops being retried: its execute_before if
+// set, otherwise the end of the queued-job TTL. This is the bound that keeps
+// RetryUntilComplete from retrying forever.
+func (j *Job) retryDeadline() time.Time {
+	if j.ExecuteBefore > 0 {
+		return time.UnixMilli(j.ExecuteBefore)
+	}
+	return time.UnixMilli(j.CreatedAt).Add(ttlQueued)
+}
+
+func (j *Job) hasRetriesLeft() bool {
+	return j.MaxRetries == RetryUntilComplete || j.Attempts < j.MaxRetries
 }
 
 // ExecutionExpired reports whether this job's caller-supplied dispatch

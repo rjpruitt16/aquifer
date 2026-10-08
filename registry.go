@@ -21,6 +21,7 @@ type Registry struct {
 	clusterRouter     *ClusterRouter
 	drainRemote       RemoteIdempotency
 	resultRecorder    JobResultRecorder
+	users             *userLoadTracker
 	totalJobs         atomic.Int64
 	queueDepth        atomic.Int64
 	drainCfg          DrainConfig
@@ -54,6 +55,7 @@ func (r *Registry) SetClusterRouter(router *ClusterRouter) {
 func NewRegistry(store JobStore, cfg *Config, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, pools *PoolRegistry) *Registry {
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &Registry{
+		users:           newUserLoadTracker(),
 		workers:         make(map[string]*URLWorker),
 		store:           store,
 		cfg:             cfg,
@@ -296,6 +298,19 @@ func (r *Registry) enqueue(job *Job, accountQueueHeader string, enforceAdmission
 		return QueueSnapshot{}, ErrAquiferDraining
 	}
 
+	// userLoadTracker has its own lock, so this runs before the registry
+	// lock (which now covers only resolving the worker).
+	if enforceAdmission && !job.isWebhookDeliveryJob() {
+		if rejected, limit, backlog := r.users.webhookBacklogDecision(job.UserID, randomAdmissionDraw()); rejected {
+			return QueueSnapshot{}, &AdmissionRejectedError{Decision: AdmissionDecision{
+				Allowed: false,
+				Reason:  "webhook_backlog",
+				Limit:   limit,
+				Current: backlog,
+			}}
+		}
+	}
+
 	for {
 		// The registry lock covers only finding the worker. Admission, the
 		// store write and the handoff to the queue happen outside it, so
@@ -354,6 +369,7 @@ func (r *Registry) enqueueOnWorker(key string, w *URLWorker, job *Job, accountQu
 			return snapshot, admissionErr, true
 		}
 		if workerLive {
+			r.users.add(job)
 			r.totalJobs.Add(1)
 			r.queueDepth.Add(1)
 			r.metrics.JobQueued(job.UserID, key)
@@ -417,10 +433,11 @@ func (r *Registry) resolveWorkerLocked(job *Job) (string, *URLWorker) {
 
 	w, ok := r.workers[key]
 	if !ok {
-		w = NewURLWorker(key, rc.RPS, rc.MaxConcurrent, pool, r.store, r.broker, r.l8, r.metrics, r.EnqueueWebhook, r.resultRecorder, func(userID string) {
+		w = NewURLWorker(key, rc.RPS, rc.MaxConcurrent, pool, r.store, r.broker, r.l8, r.metrics, r.EnqueueWebhook, r.resultRecorder, func(job *Job) {
 			if r.clusterRouter != nil {
-				r.clusterRouter.CompleteLocalJob(userID)
+				r.clusterRouter.CompleteLocalJob(job.UserID)
 			}
+			r.users.done(job)
 		}, func(k string, idleWorker *URLWorker) {
 			r.mu.Lock()
 			if current := r.workers[k]; current == idleWorker {
