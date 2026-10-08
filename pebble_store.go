@@ -2,12 +2,14 @@ package aquifer
 
 import (
 	"encoding/json"
+	"fmt"
 	"hash/fnv"
 	"log"
 	"os"
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cockroachdb/pebble"
@@ -26,19 +28,17 @@ import (
 //     hash — enough to serialize only conflicting keys, not every request.
 //   - Secondary indexes: idempotent-key lookup gets a real index
 //     (idem:<hash> -> job id), since that is the hot path called on every
-//     request. Status/queue-key scans (GetQueuedJobs, RecoverInFlight,
+//     request. Status/queue-key scans (GetQueuedJobs, RecoverQueued,
 //     Counts, cleanup) iterate the job: prefix and filter in Go — no
 //     worse than what the current SQL schema does today, since it has no
 //     index on status or queue_key either.
-//   - The durability/throughput dial: Pebble's WriteOptions.Sync controls
-//     whether a commit forces an fsync (true, matching SQLite's stricter
-//     end) or just reaches the OS via write() without waiting for
-//     confirmation (false — the same trade Mnesia's batched flush and
-//     SQLite's synchronous=NORMAL both make). Defaults to false;
-//     AQUIFER_PEBBLE_SYNC_WRITES=true forces the strict mode. Verify
-//     crash survival empirically before trusting either setting, the
-//     same way that was verified for Mnesia and SQLite this session —
-//     don't assume "it's on disk" means "it survives a kill -9."
+//   - The durability/throughput dial: by default writes are acknowledged
+//     before they are durable and the WAL is synced every 100ms
+//     (AQUIFER_PEBBLE_FLUSH_INTERVAL_MS), the trade EZThrottle Local's
+//     Mnesia flush makes: a crash can lose up to that much accepted work,
+//     for several times the throughput. Setting it to 0 makes every write
+//     wait for its own fsync (group-committed, see defaultWALSyncIntervalMS),
+//     so an acknowledged job is never lost.
 const shardCount = 256
 
 type pebbleRecord struct {
@@ -58,6 +58,24 @@ type PebbleStore struct {
 	closeErr  error
 	stop      chan struct{}
 	done      chan struct{}
+
+	// flushInterval > 0 means writes don't wait for their own sync; a
+	// background loop syncs the WAL this often (AQUIFER_PEBBLE_FLUSH_INTERVAL_MS).
+	flushInterval time.Duration
+	flushDone     chan struct{}
+
+	// skipDrainEvents: see Store.skipDrainEvents. Recording an event costs
+	// two reads and a write under drainMu, a global lock, so with drain
+	// mode off it also serialized every job completion.
+	skipDrainEvents atomic.Bool
+
+	// queued and inFlight are running counts kept in step with every status
+	// change, so Counts() (called on every dispatch for the load headers) is
+	// O(1). Counting by scanning made each dispatch scan and decode every
+	// retained job, which collapsed throughput once a few thousand
+	// completed jobs had accumulated.
+	queued   atomic.Int64
+	inFlight atomic.Int64
 }
 
 // AQUIFER_PEBBLE_WAL_SYNC_INTERVAL_MS default. Confirmed empirically (a
@@ -73,6 +91,12 @@ type PebbleStore struct {
 // window the way a naive periodic-flush timer would introduce.
 const defaultWALSyncIntervalMS = 5
 
+const defaultPebbleCacheMB = 64
+
+// defaultFlushIntervalMS is AQUIFER_PEBBLE_FLUSH_INTERVAL_MS's default.
+// 0 means sync every write.
+const defaultFlushIntervalMS = 100
+
 func NewPebbleStore(path string) *PebbleStore {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		log.Fatalf("pebble: mkdir %s: %v", filepath.Dir(path), err)
@@ -86,7 +110,20 @@ func NewPebbleStore(path string) *PebbleStore {
 	}
 	syncInterval := time.Duration(syncIntervalMS) * time.Millisecond
 
+	// Pebble's default block cache is 8MB, too small to hold the job
+	// records each status update reads back, so under load those reads went
+	// to sstables and snappy decoding (about a fifth of CPU at 700 jobs/s).
+	cacheMB := int64(defaultPebbleCacheMB)
+	if v := os.Getenv("AQUIFER_PEBBLE_CACHE_MB"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			cacheMB = n
+		}
+	}
+	cache := pebble.NewCache(cacheMB << 20)
+	defer cache.Unref()
+
 	db, err := pebble.Open(path, &pebble.Options{
+		Cache:              cache,
 		WALMinSyncInterval: func() time.Duration { return syncInterval },
 	})
 	if err != nil {
@@ -95,17 +132,82 @@ func NewPebbleStore(path string) *PebbleStore {
 
 	s := &PebbleStore{
 		db: db,
-		// Sync is always true — see the comment above this function.
-		// Throughput under load comes from WALMinSyncInterval's group
-		// commit, not from skipping durability per write.
-		path:     path,
-		syncOpts: &pebble.WriteOptions{Sync: true},
-		stop:     make(chan struct{}),
-		done:     make(chan struct{}),
+		// By default each write waits for its sync — see the comment above
+		// this function. Throughput under load comes from
+		// WALMinSyncInterval's group commit, not from skipping durability.
+		path:      path,
+		syncOpts:  &pebble.WriteOptions{Sync: true},
+		stop:      make(chan struct{}),
+		done:      make(chan struct{}),
+		flushDone: make(chan struct{}),
 	}
 
+	flushMS := defaultFlushIntervalMS
+	if v := os.Getenv("AQUIFER_PEBBLE_FLUSH_INTERVAL_MS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			flushMS = n
+		}
+	}
+	if flushMS > 0 {
+		s.flushInterval = time.Duration(flushMS) * time.Millisecond
+		s.syncOpts = pebble.NoSync
+	}
+
+	s.backfillExpiryIndex()
+	s.seedCounts()
 	go s.cleanupLoop()
+	if s.flushInterval > 0 {
+		go s.flushLoop()
+	} else {
+		close(s.flushDone)
+	}
 	return s
+}
+
+// flushLoop syncs the WAL every flushInterval. Pebble's WAL is one ordered
+// log, so a synced empty record makes every earlier NoSync write durable.
+func (s *PebbleStore) flushLoop() {
+	defer close(s.flushDone)
+	ticker := time.NewTicker(s.flushInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			s.syncWAL()
+		case <-s.stop:
+			s.syncWAL()
+			return
+		}
+	}
+}
+
+func (s *PebbleStore) syncWAL() {
+	if err := s.db.LogData(nil, pebble.Sync); err != nil {
+		log.Printf("[pebble] WAL sync failed: %v", err)
+	}
+}
+
+func (s *PebbleStore) seedCounts() {
+	s.queued.Store(0)
+	s.inFlight.Store(0)
+	s.forEachJob(func(rec *pebbleRecord) { s.countStatus(rec.Job.Status, 1) })
+}
+
+func (s *PebbleStore) countStatus(status Status, delta int64) {
+	switch status {
+	case StatusQueued:
+		s.queued.Add(delta)
+	case StatusInFlight:
+		s.inFlight.Add(delta)
+	}
+}
+
+func (s *PebbleStore) moveStatus(from, to Status) {
+	if from == to {
+		return
+	}
+	s.countStatus(from, -1)
+	s.countStatus(to, 1)
 }
 
 func (s *PebbleStore) Path() string {
@@ -116,6 +218,7 @@ func (s *PebbleStore) Close() error {
 	s.closeOnce.Do(func() {
 		close(s.stop)
 		<-s.done
+		<-s.flushDone
 		s.closeErr = s.db.Close()
 	})
 	return s.closeErr
@@ -129,6 +232,22 @@ func (s *PebbleStore) shardLock(key string) *sync.Mutex {
 
 func jobKey(id string) []byte    { return []byte("job:" + id) }
 func idemKey(hash string) []byte { return []byte("idem:" + hash) }
+
+// expKey indexes a job by when it expires, so cleanup reads only the jobs
+// that are due instead of decoding every retained one. Fixed-width hex keeps
+// the keys in time order. A status change that extends a job's expiry adds
+// a new key and leaves the old one; cleanup drops stale keys when it finds
+// the record still alive (or already gone).
+func expKey(expiresAt int64, id string) []byte {
+	return []byte(fmt.Sprintf("exp:%016x:%s", expiresAt, id))
+}
+
+func expKeyBound(expiresAt int64) []byte { return []byte(fmt.Sprintf("exp:%016x", expiresAt)) }
+
+// expIndexMarker records that every job has an expKey. Stores written by
+// older versions are backfilled once on open.
+var expIndexMarker = []byte("meta:exp-index-v1")
+
 func drainSeqKey(sequence int64) []byte {
 	return []byte("drain:seq:" + strconv.FormatInt(sequence+1000000000000000000, 10))
 }
@@ -169,10 +288,15 @@ func (s *PebbleStore) CheckOrInsert(job *Job) (string, bool) {
 		log.Printf("pebble: batch set idem index for job %s: %v", job.ID, err)
 		return "", false
 	}
+	if err := batch.Set(expKey(rec.ExpiresAt, job.ID), nil, nil); err != nil {
+		log.Printf("pebble: batch set expiry index for job %s: %v", job.ID, err)
+		return "", false
+	}
 	if err := batch.Commit(s.syncOpts); err != nil {
 		log.Printf("pebble: commit job %s: %v", job.ID, err)
 		return "", false
 	}
+	s.countStatus(StatusQueued, 1)
 
 	return "", false
 }
@@ -202,13 +326,40 @@ func (s *PebbleStore) putRecord(jobID string, rec *pebbleRecord) {
 	}
 }
 
+// putRecordWithExpiry writes the record and its expiry index key together.
+func (s *PebbleStore) putRecordWithExpiry(jobID string, rec *pebbleRecord) {
+	data, err := json.Marshal(rec)
+	if err != nil {
+		log.Printf("pebble: marshal job %s: %v", jobID, err)
+		return
+	}
+	batch := s.db.NewBatch()
+	defer batch.Close()
+	batch.Set(jobKey(jobID), data, nil)
+	batch.Set(expKey(rec.ExpiresAt, jobID), nil, nil)
+	if err := batch.Commit(s.syncOpts); err != nil {
+		log.Printf("pebble: set job %s: %v", jobID, err)
+	}
+}
+
+// SetQueueKey writes without its own fsync. The queue key is only used to
+// re-enqueue a queue's jobs after a panic (normal restart recovery ignores
+// it), and Pebble's log is ordered, so the next synced write makes it durable
+// anyway. A dedicated sync here cost one of the few durable writes per
+// second the WAL can do, twice per job (the job and its webhook).
 func (s *PebbleStore) SetQueueKey(jobID, queueKey string) {
 	rec, ok := s.getRecord(jobID)
 	if !ok {
 		return
 	}
 	rec.QueueKey = queueKey
-	s.putRecord(jobID, rec)
+	data, err := json.Marshal(rec)
+	if err != nil {
+		return
+	}
+	if err := s.db.Set(jobKey(jobID), data, pebble.NoSync); err != nil {
+		log.Printf("pebble: set queue key for job %s: %v", jobID, err)
+	}
 }
 
 // DeleteJob removes both the job row and its idempotency index entry —
@@ -230,16 +381,9 @@ func (s *PebbleStore) DeleteJob(jobID string) {
 	batch.Delete(idemKey(hashed), nil)
 	if err := batch.Commit(s.syncOpts); err != nil {
 		log.Printf("pebble: delete job %s: %v", jobID, err)
-	}
-}
-
-func (s *PebbleStore) MarkInFlight(jobID string) {
-	rec, ok := s.getRecord(jobID)
-	if !ok {
 		return
 	}
-	rec.Job.Status = StatusInFlight
-	s.putRecord(jobID, rec)
+	s.countStatus(rec.Job.Status, -1)
 }
 
 func (s *PebbleStore) PutResult(jobID string, result JobResult) {
@@ -274,13 +418,17 @@ func (s *PebbleStore) UpdateStatus(jobID string, status Status) {
 	if !ok {
 		return
 	}
+	s.moveStatus(rec.Job.Status, status)
 	rec.Job.Status = status
 	rec.ExpiresAt = time.Now().Add(ttlForStatus(status)).UnixMilli()
-	s.putRecord(jobID, rec)
-	if status == StatusCompleted || status == StatusFailed {
+	s.putRecordWithExpiry(jobID, rec)
+	if (status == StatusCompleted || status == StatusFailed) && !s.skipDrainEvents.Load() {
 		s.recordDrainEvent(rec, status)
 	}
 }
+
+// SetDrainEventsEnabled: see Store.SetDrainEventsEnabled.
+func (s *PebbleStore) SetDrainEventsEnabled(enabled bool) { s.skipDrainEvents.Store(!enabled) }
 
 func (s *PebbleStore) recordDrainEvent(rec *pebbleRecord, status Status) {
 	if rec == nil || rec.Job == nil || rec.Job.isWebhookDeliveryJob() {
@@ -354,35 +502,20 @@ func (s *PebbleStore) forEachJob(fn func(rec *pebbleRecord)) {
 	}
 }
 
-func (s *PebbleStore) RecoverInFlight(queueKey string) []*Job {
+func (s *PebbleStore) RecoverQueued(queueKey string) []*Job {
 	var jobs []*Job
-	var ids []string
-
 	s.forEachJob(func(rec *pebbleRecord) {
-		if rec.QueueKey == queueKey && rec.Job.Status == StatusInFlight {
+		if rec.QueueKey == queueKey && (rec.Job.Status == StatusQueued || rec.Job.Status == StatusInFlight) {
+			rec.Job.Status = StatusQueued
 			jobs = append(jobs, rec.Job)
-			ids = append(ids, rec.Job.ID)
 		}
 	})
-
-	for _, id := range ids {
-		s.UpdateStatus(id, StatusQueued)
-	}
-
 	return jobs
 }
 
 func (s *PebbleStore) Counts() StoreCounts {
-	var c StoreCounts
-	s.forEachJob(func(rec *pebbleRecord) {
-		if rec.Job.Status == StatusQueued || rec.Job.Status == StatusInFlight {
-			c.TotalJobs++
-		}
-		if rec.Job.Status == StatusQueued {
-			c.QueueDepth++
-		}
-	})
-	return c
+	queued, inFlight := max(s.queued.Load(), 0), max(s.inFlight.Load(), 0)
+	return StoreCounts{TotalJobs: queued + inFlight, QueueDepth: queued}
 }
 
 func (s *PebbleStore) GetJob(jobID string) *Job {
@@ -399,7 +532,9 @@ func (s *PebbleStore) GetJob(jobID string) *Job {
 func (s *PebbleStore) GetQueuedJobs() []*Job {
 	var jobs []*Job
 	s.forEachJob(func(rec *pebbleRecord) {
-		if rec.Job.Status == StatusQueued {
+		// StatusInFlight only appears on records written by older versions.
+		if rec.Job.Status == StatusQueued || rec.Job.Status == StatusInFlight {
+			rec.Job.Status = StatusQueued
 			jobs = append(jobs, rec.Job)
 		}
 	})
@@ -467,9 +602,12 @@ func (s *PebbleStore) ClearIdempotentKeys() {
 
 	deletePrefix([]byte("job:"), []byte("job;"))
 	deletePrefix([]byte("idem:"), []byte("idem;"))
+	deletePrefix([]byte("exp:"), []byte("exp;"))
 	deletePrefix([]byte("drain:seq:"), []byte("drain:seq;"))
 	deletePrefix([]byte("drain:job:"), []byte("drain:job;"))
 	s.db.Delete(drainSequenceMetaKey(), s.syncOpts)
+	s.queued.Store(0)
+	s.inFlight.Store(0)
 }
 
 func (s *PebbleStore) ListDrainEvents(limit int) []DrainEvent {
@@ -542,31 +680,59 @@ func (s *PebbleStore) cleanupLoop() {
 	for {
 		select {
 		case <-ticker.C:
-			now := time.Now().UnixMilli()
-			staleBefore := time.Now().Add(-inFlightMax).UnixMilli()
-
-			var expiredIDs []string
-			var staleInFlight []string
-
-			s.forEachJobIncludingExpired(func(rec *pebbleRecord) {
-				if rec.ExpiresAt < now {
-					expiredIDs = append(expiredIDs, rec.Job.ID)
-					return
-				}
-				if rec.Job.Status == StatusInFlight && rec.Job.CreatedAt < staleBefore {
-					staleInFlight = append(staleInFlight, rec.Job.ID)
-				}
-			})
-
-			for _, id := range expiredIDs {
-				s.DeleteJob(id)
-			}
-			for _, id := range staleInFlight {
-				s.UpdateStatus(id, StatusQueued)
-			}
+			s.deleteExpired(time.Now().UnixMilli())
 		case <-s.stop:
 			return
 		}
+	}
+}
+
+// deleteExpired deletes jobs whose expiry is before now, reading only the
+// expiry index keys that are due.
+func (s *PebbleStore) deleteExpired(now int64) {
+	iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: []byte("exp:"), UpperBound: expKeyBound(now)})
+	if err != nil {
+		log.Printf("pebble: iterate expiry index: %v", err)
+		return
+	}
+	var dueKeys [][]byte
+	for iter.First(); iter.Valid(); iter.Next() {
+		dueKeys = append(dueKeys, append([]byte(nil), iter.Key()...))
+	}
+	iter.Close()
+
+	batch := s.db.NewBatch()
+	defer batch.Close()
+	for _, k := range dueKeys {
+		// "exp:" + 16 hex digits + ":" precede the job id.
+		if len(k) > 21 {
+			id := string(k[21:])
+			if rec, ok := s.getRecord(id); ok && rec.ExpiresAt < now {
+				s.DeleteJob(id)
+			}
+		}
+		batch.Delete(k, nil)
+	}
+	if err := batch.Commit(pebble.NoSync); err != nil {
+		log.Printf("pebble: delete expiry index keys: %v", err)
+	}
+}
+
+// backfillExpiryIndex gives every job written by an older version an
+// expiry index key, once.
+func (s *PebbleStore) backfillExpiryIndex() {
+	if _, closer, err := s.db.Get(expIndexMarker); err == nil {
+		closer.Close()
+		return
+	}
+	batch := s.db.NewBatch()
+	defer batch.Close()
+	s.forEachJobIncludingExpired(func(rec *pebbleRecord) {
+		batch.Set(expKey(rec.ExpiresAt, rec.Job.ID), nil, nil)
+	})
+	batch.Set(expIndexMarker, nil, nil)
+	if err := batch.Commit(pebble.Sync); err != nil {
+		log.Printf("pebble: backfill expiry index: %v", err)
 	}
 }
 

@@ -1,4 +1,4 @@
-.PHONY: build test integration-test load-test start stop clean release \
+.PHONY: build test perf integration-test load-test start stop clean release \
 	region-redirect-deploy region-redirect-test region-redirect-destroy region-redirect-e2e
 
 build:
@@ -9,6 +9,11 @@ test: build start-servers
 	@hurl --test tests/smoke.hurl || (make stop-servers; exit 1)
 	@make stop-servers
 	@echo "Tests passed!"
+
+# Aquifer's own overhead per job (accept, queue, dispatch) and end-to-end
+# throughput, on SQLite and Pebble. Compare runs on the same machine only.
+perf:
+	go test -run '^$$' -bench 'JobLatency|PipelineThroughput' -benchtime 200x -count 1 .
 
 integration-test: build start-servers
 	@echo "Running smoke + load tests..."

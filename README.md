@@ -26,7 +26,7 @@ What's usually behind that backend can't scale instantly either: a GPU, a databa
 
 Exposed through pluggable adapters (an MCP server for agent tool-calling, a plain HTTP API, or an A2A/Agent2Agent-protocol agent), with cryptographic agent identity via the L8 protocol for trustless webhook delivery.
 
-**Benchmarked:** 10x traffic spikes absorbed with zero failures, 30/30 jobs surviving a `kill -9` mid-drain, and clean `429` admission shedding under sustained overload, including a real GPU under load, where the ORCA fallback signal cut peak backend queue depth from 449 to 8 waiting requests. See [benchmark.md](benchmark.md) for throughput ceilings, crash recovery, memory behavior, capacity by machine size, and the [GPU/vLLM run](benchmark.md#9-gpu-inference-and-the-retry-tax-runpodvllm).
+**Benchmarked:** 10x traffic spikes absorbed with zero failures, 30/30 jobs surviving a `kill -9` mid-drain (with per-write sync, `AQUIFER_PEBBLE_FLUSH_INTERVAL_MS=0`), and clean `429` admission shedding under sustained overload, including a real GPU under load, where the ORCA fallback signal cut peak backend queue depth from 449 to 8 waiting requests. See [benchmark.md](benchmark.md) for throughput ceilings, crash recovery, memory behavior, capacity by machine size, and the [GPU/vLLM run](benchmark.md#9-gpu-inference-and-the-retry-tax-runpodvllm).
 
 ![Traditional load balancing collapsing under a spike, round-robin flickering faster as instances die, versus Aqueduct pacing that keeps the fleet stable while an autoscaler brings real capacity online](docs/images/fleet-degradation.gif)
 
@@ -145,10 +145,12 @@ upstreams:
 | `AQUIFER_ADAPTER` | `http` for binary, `mcp-stdio` in Docker image | Runtime adapter: `http`, `mcp-stdio`, or `a2a` |
 | `AQUIFER_A2A_PUBLIC_URL` | `http://localhost:$PORT` | A2A adapter only: externally-reachable base URL advertised in the Agent Card |
 | `PORT`        | `8080`       | HTTP listen port               |
-| `DB_PATH`     | `aquifer.db` | Storage path: a SQLite file, or a directory if `AQUIFER_STORE_BACKEND=pebble` |
+| `DB_PATH`     | `aquifer.db` | Storage path: a directory for Pebble (the default), or a file for SQLite |
 | `CONFIG_PATH` | _(none)_     | Path to rate limit config YAML |
-| `AQUIFER_STORE_BACKEND` | `sqlite` | Storage engine: `sqlite` or `pebble` (opt-in, pure-Go LSM store; see [benchmark.md](benchmark.md) for why you might want it) |
+| `AQUIFER_STORE_BACKEND` | `pebble` | Storage engine: `pebble` (pure-Go LSM store, the faster backend; see [benchmark.md](benchmark.md)) or `sqlite`. If `DB_PATH` is an existing SQLite file, Aquifer stays on SQLite so an upgrade doesn't orphan queued jobs |
 | `AQUIFER_PEBBLE_WAL_SYNC_INTERVAL_MS` | `5` | Pebble only: batches concurrent durable writes into fewer real fsyncs under load (Pebble's own group-commit); each caller still blocks until its own write is actually durable |
+| `AQUIFER_PEBBLE_FLUSH_INTERVAL_MS` | `100` | Pebble only: answer before a write reaches disk and sync the log on this timer, like EZThrottle Local's 100ms Mnesia flush. A crash can lose up to this many milliseconds of accepted jobs. On Fly it took one machine from about 150 to about 700 jobs/s end to end (see [benchmark.md](benchmark.md#11-per-job-overhead-make-perf)). Set `0` to make every write wait for its own fsync: zero acknowledged-job loss, much lower throughput |
+| `AQUIFER_PEBBLE_CACHE_MB` | `64` | Pebble only: block cache size. Pebble's own default (8MB) is too small to keep recently written jobs in memory, so status updates read them back from disk |
 | `AQUIFER_MEMORY_LIMIT_MB` | _(none, disabled)_ | Reject new jobs with `429` once process memory exceeds this many MB |
 | `AQUIFER_MAX_BODY_BYTES` | `1048576` (1MB) | Reject oversized request bodies with `413` |
 | `AQUIFER_DB_MAX_BYTES` | `838860800` (800MB) | Reject new jobs with `429` once the SQLite file exceeds this size |
@@ -346,7 +348,7 @@ Durable queue, automatic crash recovery, panic isolation per job. See [benchmark
 
 - **Durable queue**: jobs persist to the configured storage backend on every write
 - **Crash recovery**: queued jobs re-dispatched automatically on restart
-- **In-flight tracking**: jobs marked `in_flight` before dispatch; recovered immediately on panic without waiting for full restart
+- **Panic recovery**: if a queue's loop panics, its unfinished jobs are re-enqueued from storage immediately, without waiting for a restart
 - **Stale job safety net**: in-flight jobs older than 5 min automatically reset to `queued`
 - **Per-job panic isolation**: a panic in one job marks it failed and delivers the webhook; the worker keeps running
 
@@ -395,7 +397,7 @@ See the [security warning](API.md#post-jobs) under `POST /jobs`; the same untrus
 
 </details>
 
-**Choosing a machine size:** see [benchmark.md](benchmark.md#7-capacity-and-drain-time) for current throughput, capacity by machine size, and the benchmark methodology.
+**Choosing a machine size:** with Pebble and the default 100ms flush, one Fly machine sustained about 1,000 jobs/s on performance-1x, 1,500 on 2x and 3,000 on 4x, end to end including webhooks. See [benchmark.md](benchmark.md#12-capacity-per-machine-pebble-flyio-2026-10-07) for the method and caveats, and [section 7](benchmark.md#7-capacity-and-drain-time) for earlier capacity work.
 
 ---
 

@@ -49,4 +49,4 @@ jobs:
         if: always()
         run: |
           kill $AQUIFER_PID $TARGET_PID 2>/dev/null || true
-          rm -f aquifer.db
+          rm -rf aquifer.db

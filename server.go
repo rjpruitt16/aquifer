@@ -141,6 +141,7 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	setInboundRPS(w, s.aquifer, req.UserID)
 
 	if s.forwardClusterRequest(w, r, "/jobs", req) {
 		return
@@ -389,6 +390,7 @@ func (s *Server) proxyJob(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	setInboundRPS(w, s.aquifer, req.UserID)
 
 	if s.forwardClusterRequest(w, r, "/proxy", req) {
 		return
@@ -762,4 +764,14 @@ func applyMaxRetriesHeader(header http.Header, req *JobRequest) error {
 	}
 	req.MaxRetries = &n
 	return nil
+}
+
+// setInboundRPS advertises this caller's share of Aquifer's own inbound
+// capacity, so a calling Aquifer paces itself without any special code.
+func setInboundRPS(w http.ResponseWriter, a *Aquifer, userID string) {
+	if rps := a.InboundRPS(userID); rps > 0 {
+		value := strconv.FormatFloat(rps, 'f', 2, 64)
+		w.Header().Set("X-Aqueduct-Rps", value)
+		w.Header().Set("X-Aquifer-Rps", value)
+	}
 }

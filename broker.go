@@ -100,6 +100,14 @@ func (b *Broker) Subscribe(jobID string) (<-chan SSEEvent, func()) {
 	}
 }
 
+// HasSubscribers reports whether anyone is streaming jobID's events, so
+// callers can skip building events no one will receive.
+func (b *Broker) HasSubscribers(jobID string) bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return len(b.subscribers[jobID]) > 0
+}
+
 func (b *Broker) Publish(jobID string, event SSEEvent) {
 	b.mu.RLock()
 	subs := b.subscribers[jobID]

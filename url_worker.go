@@ -247,12 +247,27 @@ func (w *URLWorker) AdmitAndEnqueue(job *Job) (QueueSnapshot, *AdmissionRejected
 }
 
 func (w *URLWorker) enqueue(job *Job, enforceAdmission bool) (QueueSnapshot, *AdmissionRejectedError, bool) {
+	q, snapshot, rejected, ok := w.reserve(job, enforceAdmission)
+	if rejected != nil || !ok {
+		return snapshot, rejected, ok
+	}
+	if !q.handoff(job) {
+		return QueueSnapshot{}, nil, false
+	}
+	return snapshot, nil, true
+}
+
+// reserve makes the admission decision and reserves the job's backlog slot
+// under the worker lock, so concurrent submissions see each other in the
+// fair-admission math. The caller hands the job over after the lock is
+// released.
+func (w *URLWorker) reserve(job *Job, enforceAdmission bool) (*AccountQueue, QueueSnapshot, *AdmissionRejectedError, bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
 	select {
 	case <-w.stop:
-		return QueueSnapshot{}, nil, false
+		return nil, QueueSnapshot{}, nil, false
 	default:
 	}
 
@@ -288,7 +303,7 @@ func (w *URLWorker) enqueue(job *Job, enforceAdmission bool) (QueueSnapshot, *Ad
 		decision := decideFairAdmission(queuePending, totalPending, activeQueues, maxBacklog, randomAdmissionDraw())
 		if !decision.Allowed {
 			snapshot := decision.Snapshot
-			return snapshot, &AdmissionRejectedError{Decision: AdmissionDecision{
+			return nil, snapshot, &AdmissionRejectedError{Decision: AdmissionDecision{
 				Allowed: false,
 				Reason:  decision.Reason,
 				Limit:   maxBacklog,
@@ -301,6 +316,12 @@ func (w *URLWorker) enqueue(job *Job, enforceAdmission bool) (QueueSnapshot, *Ad
 	if !ok {
 		q = NewAccountQueue(key, w.domain, w.rps, w.maxConc, w.pool, w.store, w.broker, w.l8, w.metrics, w.enqueueWebhook, w.resultRecorder, &w.activeQueues, &w.backlog, w.onJobDone, func(k string) {
 			w.mu.Lock()
+			// Retire only this queue, and only if nothing was reserved on it
+			// or buffered for it since its run loop went idle.
+			if w.queues[k] != q || q.Backlog() > 0 || len(q.cmds) > 0 {
+				w.mu.Unlock()
+				return
+			}
 			delete(w.queues, k)
 			empty := len(w.queues) == 0
 			if empty {
@@ -324,10 +345,8 @@ func (w *URLWorker) enqueue(job *Job, enforceAdmission bool) (QueueSnapshot, *Ad
 		w.queues[key] = q
 	}
 
-	if !q.Enqueue(job) {
-		return QueueSnapshot{}, nil, false
-	}
-	return w.snapshotForQueueLocked(key), nil, true
+	q.reserveBacklog()
+	return q, w.snapshotForQueueLocked(key), nil, true
 }
 
 func (w *URLWorker) snapshotForQueueLocked(key string) QueueSnapshot {

@@ -91,12 +91,17 @@ type AccountQueue struct {
 	onJobDone          func(*Job)
 	currentRPS         atomic.Int64 // stored as rps * 100
 	backlog            atomic.Int64 // accepted queued + in-flight work
-	stop               chan struct{}
-	stopped            chan struct{}
-	stopOnce           sync.Once
-	wg                 sync.WaitGroup
-	ctx                context.Context
-	cancel             context.CancelFunc
+	// nextDeadline is the earliest execute_before (Unix ms) among queued
+	// jobs, or 0 when none has one. Owned by the run goroutine. It lets
+	// dropExpiredJobs skip its scan of the whole queue, which otherwise ran
+	// on every loop pass and grew quadratically once a backlog built up.
+	nextDeadline int64
+	stop         chan struct{}
+	stopped      chan struct{}
+	stopOnce     sync.Once
+	wg           sync.WaitGroup
+	ctx          context.Context
+	cancel       context.CancelFunc
 }
 
 func (q *AccountQueue) RPS() float64 {
@@ -199,8 +204,15 @@ func NewAccountQueue(key, upstream string, rps float64, maxConc int, pool *Pool,
 }
 
 func (q *AccountQueue) Enqueue(job *Job) bool {
-	q.store.SetQueueKey(job.ID, q.key)
 	q.reserveBacklog()
+	return q.handoff(job)
+}
+
+// handoff gives an already-reserved job to the run loop. URLWorker calls it
+// after releasing its lock, so the store write and the channel send don't
+// serialize every submission and webhook on one lock.
+func (q *AccountQueue) handoff(job *Job) bool {
+	q.store.SetQueueKey(job.ID, q.key)
 	select {
 	case q.cmds <- job:
 		return true
@@ -241,9 +253,12 @@ func (q *AccountQueue) supervise(rps float64, maxConc int, onIdle func(string), 
 		}
 
 		if panicked {
-			recovered := q.store.RecoverInFlight(q.key)
+			// The panicked loop's in-memory queue is gone; re-enqueue every
+			// unfinished job of this queue from storage (some may still be
+			// dispatching, which at-least-once delivery already allows).
+			recovered := q.store.RecoverQueued(q.key)
 			for _, j := range recovered {
-				log.Printf("[AccountQueue] recovered in_flight job %s after panic", j.ID)
+				log.Printf("[AccountQueue] re-enqueued job %s after panic", j.ID)
 				select {
 				case q.cmds <- j:
 				case <-q.stop:
@@ -254,7 +269,15 @@ func (q *AccountQueue) supervise(rps float64, maxConc int, onIdle func(string), 
 		}
 
 		if len(q.cmds) == 0 {
-			onIdle(q.key)
+			if onIdle != nil {
+				onIdle(q.key)
+			}
+			// onIdle refuses to retire a queue that has reserved backlog
+			// (an enqueuer reserved under the worker lock and is about to
+			// hand the job over) or buffered jobs; keep running for them.
+			if q.backlog.Load() > 0 || len(q.cmds) > 0 {
+				continue
+			}
 			return
 		}
 	}
@@ -352,7 +375,6 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 			inFlight++
 			lastRequestAt = time.Now()
 
-			q.store.MarkInFlight(job.ID)
 			q.metrics.JobDispatched(job.UserID, q.upstream)
 
 			dispatchURL := job.URL
@@ -397,6 +419,9 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 		select {
 		case job := <-q.cmds:
 			queue = append(queue, job)
+			if job.ExecuteBefore > 0 && (q.nextDeadline == 0 || job.ExecuteBefore < q.nextDeadline) {
+				q.nextDeadline = job.ExecuteBefore
+			}
 			q.metrics.QueueDepth(q.upstream, len(queue))
 			idle.Reset(idleTimeout)
 
@@ -443,6 +468,9 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 		case <-positionTicker.C:
 			queue = q.dropExpiredJobs(queue)
 			for i, j := range queue {
+				if !q.broker.HasSubscribers(j.ID) {
+					continue
+				}
 				q.broker.Publish(j.ID, SSEEvent{
 					Event: "position",
 					Data:  map[string]any{"job_id": j.ID, "position": i + 1},
@@ -458,6 +486,11 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 					continue
 				}
 				queue = append(queue, w.job)
+				// Retried jobs re-enter here, not through q.cmds, so their
+				// deadlines must be tracked here too.
+				if w.job.ExecuteBefore > 0 && (q.nextDeadline == 0 || w.job.ExecuteBefore < q.nextDeadline) {
+					q.nextDeadline = w.job.ExecuteBefore
+				}
 			}
 			waiting = kept
 			resetRetryTimer(retryTimer, waiting)
@@ -522,13 +555,21 @@ func (q *AccountQueue) dropExpiredWaiting(waiting []waitingJob) []waitingJob {
 
 func (q *AccountQueue) dropExpiredJobs(queue []*Job) []*Job {
 	if len(queue) == 0 {
+		q.nextDeadline = 0
 		return queue
 	}
 	now := time.Now()
+	if q.nextDeadline == 0 || now.UnixMilli() < q.nextDeadline {
+		return queue
+	}
+	q.nextDeadline = 0
 	kept := queue[:0]
 	for _, job := range queue {
 		if !job.ExecutionExpired(now) {
 			kept = append(kept, job)
+			if job.ExecuteBefore > 0 && (q.nextDeadline == 0 || job.ExecuteBefore < q.nextDeadline) {
+				q.nextDeadline = job.ExecuteBefore
+			}
 			continue
 		}
 		q.releaseBacklog()
@@ -879,12 +920,27 @@ func makeRequest(ctx context.Context, job *Job, dispatchURL string, totalJobs, q
 		req.Header.Set(orcaRequestHeaderName, "text")
 	}
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := dispatchClient.Do(req)
 	if err == nil {
 		l8.ObserveSchemaHash(dispatchURL, pacingHeader(resp.Header, "Schema-Hash"))
 	}
 	return resp, err
+}
+
+// dispatchClient is shared by every upstream and webhook dispatch so
+// connections are reused. A fresh client per request fell back to Go's
+// default transport, which keeps only 2 idle connections per host: at a few
+// hundred requests a second to one upstream, nearly every request opened
+// (and then closed) a new TCP connection, costing Aquifer CPU and the
+// upstream a connection per call.
+var dispatchClient = &http.Client{
+	Timeout: 30 * time.Second,
+	Transport: func() *http.Transport {
+		t := http.DefaultTransport.(*http.Transport).Clone()
+		t.MaxIdleConns = 1024
+		t.MaxIdleConnsPerHost = 256
+		return t
+	}(),
 }
 
 func setLoadHeader(headers http.Header, name, value string) {
