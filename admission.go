@@ -7,7 +7,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const maxRetryAfterSeconds = 60
@@ -104,6 +106,38 @@ type AdmissionController struct {
 	// instead of hammering the same 5s ceiling forever — that hammering is
 	// exactly what stops an overloaded instance from ever catching up.
 	rejectStreak atomic.Int64
+
+	// Memory and DB size are sampled at most once per admissionSampleTTL.
+	// Check runs on every submission, and both readings are expensive:
+	// ReadMemStats stops the world, and a Pebble store's size means
+	// stat-ing every file in its directory. Under load that was about 9%
+	// of CPU, for numbers that barely move in a few hundred milliseconds.
+	memSample sampledInt64
+	dbSample  sampledInt64
+}
+
+const admissionSampleTTL = 250 * time.Millisecond
+
+type sampledInt64 struct {
+	mu    sync.Mutex
+	value int64
+	at    time.Time
+}
+
+func (s *sampledInt64) get(read func() int64) int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.at.IsZero() || time.Since(s.at) >= admissionSampleTTL {
+		s.value = read()
+		s.at = time.Now()
+	}
+	return s.value
+}
+
+func processMemoryMB() int64 {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	return int64(m.Sys / (1024 * 1024))
 }
 
 func NewAdmissionController(limits AdmissionLimits, dbPath string) *AdmissionController {
@@ -112,9 +146,7 @@ func NewAdmissionController(limits AdmissionLimits, dbPath string) *AdmissionCon
 
 func (c *AdmissionController) Check() AdmissionDecision {
 	if c.limits.MemoryLimitMB > 0 {
-		var m runtime.MemStats
-		runtime.ReadMemStats(&m)
-		currentMB := int64(m.Sys / (1024 * 1024))
+		currentMB := c.memSample.get(processMemoryMB)
 		if currentMB > c.limits.MemoryLimitMB {
 			log.Printf("admission: rejecting job — memory %dMB exceeds limit %dMB", currentMB, c.limits.MemoryLimitMB)
 			c.rejectStreak.Add(1)
@@ -123,7 +155,7 @@ func (c *AdmissionController) Check() AdmissionDecision {
 	}
 
 	if c.limits.DBMaxBytes > 0 && c.dbPath != "" {
-		if size := dbSizeBytes(c.dbPath); size > c.limits.DBMaxBytes {
+		if size := c.dbSample.get(func() int64 { return dbSizeBytes(c.dbPath) }); size > c.limits.DBMaxBytes {
 			log.Printf("admission: rejecting job — db size %d bytes exceeds limit %d bytes", size, c.limits.DBMaxBytes)
 			c.rejectStreak.Add(1)
 			return AdmissionDecision{Allowed: false, Reason: "db_size", Limit: c.limits.DBMaxBytes, Current: size}

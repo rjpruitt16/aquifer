@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -25,7 +26,16 @@ type Store struct {
 	closeErr  error
 	stop      chan struct{}
 	done      chan struct{}
+
+	// skipDrainEvents is set when drain mode is off: nothing ever reads or
+	// acknowledges the events then, so recording them is a wasted write
+	// per job and a table that only grows. See SetDrainEventsEnabled.
+	skipDrainEvents atomic.Bool
 }
+
+// SetDrainEventsEnabled turns drain-event recording on or off. The Registry
+// calls it with whether drain mode is enabled; a bare store records them.
+func (s *Store) SetDrainEventsEnabled(enabled bool) { s.skipDrainEvents.Store(!enabled) }
 
 func NewStore(path string) *Store {
 	// Pragmas belong in the DSN, not a one-off db.Exec after Open. SQLite
@@ -186,7 +196,7 @@ func (s *Store) RecoverQueued(queueKey string) []*Job {
 func (s *Store) UpdateStatus(jobID string, status Status) {
 	expiresAt := time.Now().Add(ttlForStatus(status)).UnixMilli()
 	s.db.Exec(`UPDATE jobs SET status = ?, expires_at = ? WHERE id = ?`, string(status), expiresAt, jobID)
-	if status == StatusCompleted || status == StatusFailed {
+	if (status == StatusCompleted || status == StatusFailed) && !s.skipDrainEvents.Load() {
 		s.recordDrainEvent(jobID, status)
 	}
 }

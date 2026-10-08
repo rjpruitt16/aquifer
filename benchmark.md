@@ -253,9 +253,55 @@ Baseline, 2026-10-06, Apple M3 Max laptop (macOS, 200 jobs per run):
 | Backend | accept | queue | total | pipeline |
 |---|---:|---:|---:|---:|
 | SQLite | 0.55 ms | 0.13 ms | 0.67 ms | 571 jobs/s |
-| Pebble | 9.90 ms | 0.23 ms | 10.13 ms | 100 jobs/s |
+| Pebble, `AQUIFER_PEBBLE_FLUSH_INTERVAL_MS=0` (sync every write) | 9.90 ms | 0.23 ms | 10.13 ms | 100 jobs/s |
+| Pebble, 100ms flush (default) | 0.04 ms | 0.07 ms | 0.11 ms | 11,107 jobs/s |
+| Pebble, `AQUIFER_PEBBLE_FLUSH_INTERVAL_MS=10` | 0.05 ms | 0.08 ms | 0.13 ms | 9,593 jobs/s |
 
-Read these as relative numbers, not capacity, and don't compare the two rows as like for like. SQLite runs in WAL mode with `synchronous=NORMAL`: a commit survives a process crash but isn't flushed to disk per write, so a power loss can drop the last few accepted jobs. Pebble syncs every write (zero acknowledged-job loss) with a 5ms group-commit window, and macOS `fsync` is far slower than Linux, so on a Mac a lone job waits out that window plus a full flush. On a Fly performance-1x volume, `fsync` measured about 0.3ms p50 and Pebble outran SQLite (see [section 8](#8-an-alternative-storage-backend-pebble)). Dispatch itself (`queue_ms`) is a fraction of a millisecond on both; the cost of a job is its storage writes.
+The flush-interval rows (2000 jobs each; the default is 100ms) acknowledge a write before it is on disk and sync the log on a timer, the same trade EZThrottle Local makes with its 100ms Mnesia flush: a crash can lose up to that window of accepted jobs. `pebble_flush_test.go` checks that a process killed after the window loses nothing. On a Mac most of the gain comes from skipping slow `fsync`s; expect a smaller gap on Linux, where a sync took about 0.3ms on a Fly volume.
+
+Read these as relative numbers, not capacity, and don't compare the two rows as like for like. SQLite runs in WAL mode with `synchronous=NORMAL`: a commit survives a process crash but isn't flushed to disk per write, so a power loss can drop the last few accepted jobs. Pebble with `AQUIFER_PEBBLE_FLUSH_INTERVAL_MS=0` syncs every write (zero acknowledged-job loss) with a 5ms group-commit window, and macOS `fsync` is far slower than Linux, so on a Mac a lone job waits out that window plus a full flush. On a Fly performance-1x volume, `fsync` measured about 0.3ms p50 and Pebble outran SQLite (see [section 8](#8-an-alternative-storage-backend-pebble)). Dispatch itself (`queue_ms`) is a fraction of a millisecond on both; the cost of a job is its storage writes.
+
+On Fly (performance-1x with a volume, every job also delivering a webhook), syncing every write sustained about 150 jobs/s end to end and the 100ms flush about 700, which is why 100ms is the default.
+
+---
+
+## 12. Capacity per machine (Pebble, Fly.io, 2026-10-07)
+
+How many jobs per second one Aquifer machine sustains end to end, measured on Fly in `iad`:
+- **Target:** one Aquifer machine with a volume and Pebble.
+- **Load generator:** a separate machine running [`benchmark/loadgen`](benchmark/loadgen/main.go). It ramps `POST /jobs` open-loop across 50 users and also serves as the upstream and the webhook receiver, both answering instantly.
+- **Webhooks:** every job also delivers a webhook, so each job is one request in and two requests out.
+- **Config:** a high rate ceiling (`defaults: {rps: 100000, max_concurrent: 256}`) and the 100ms flush (`AQUIFER_PEBBLE_FLUSH_INTERVAL_MS`, the default).
+
+A step counts as sustained when Aquifer accepts what's offered and completes jobs as fast as it accepts them, with the backlog staying flat.
+
+| Machine | Sustained jobs/s | p99, submit to webhook | Notes |
+|---|---:|---:|---|
+| performance-1x, sync every write (`FLUSH_INTERVAL_MS=0`) | ~150 | 31 ms at 100/s | durable before acknowledging |
+| performance-1x | **~1,000** | ~0.6 s | one core is the limit |
+| performance-2x | **~1,500** | ~0.4 s | |
+| performance-4x | **~3,000**, sometimes 4,000 | 56 ms at 3,000 | 4,000 held on one run, shed on two |
+
+Past the ceiling Aquifer sheds with `429` rather than falling over.
+
+**What moved the ceiling.** Each stage was found by profiling Aquifer under load on Fly with `pprof`.
+
+| Stage | Changes | Result |
+|---|---|---|
+| 1 | 100ms batched WAL sync instead of syncing every write | 1x: ~150 → ~700 |
+| 2 | Cache admission readings (`ReadMemStats` and a walk of the Pebble directory ran on every submission); 64 MB Pebble block cache (`AQUIFER_PEBBLE_CACHE_MB`); no drain events unless drain mode is on; skip queue expiry scans until a deadline is due; one pooled HTTP client instead of a new one per request | 1x: ~700 → ~1,000, but 2x no faster (one core busy) |
+| 3 | Registry and worker locks cover only decisions, not store writes or queue handoffs; cleanup reads an expiry index instead of decoding every retained job | 2x: uses both cores |
+| 4 | Remember webhook receivers without L8 for 5 minutes instead of probing `/.well-known/l8` before every webhook over a fresh connection (`connect()` was 65% of CPU on 2x) | 2x: ~1,000 → ~1,500; 4x: ~3,000 |
+
+**Caveats.**
+- **These are best-case numbers.** With an instant upstream they measure Aquifer's own cost per job. A slow upstream doesn't change that cost, but it does mean more requests in flight at once.
+- **The 4x results vary.** Finished jobs are kept for 30 minutes, so back-to-back runs leave a larger store behind. A fresh store held 3,000/s cleanly; 4,000/s held on one run out of three.
+- **The load generator can be the limit.** On a performance-2x generator, 6,000/s produced client-side errors, so the 4x ceiling was probed with a performance-4x generator.
+
+**Reproduce:** build `benchmark/loadgen` for linux/amd64, run it on one machine, and point it at Aquifer over the private network:
+```bash
+loadgen -target http://<aquifer>.internal:8080 -self http://<loadgen>.internal:8080 -rates 700,1000,1500,2000,3000,4000 -step 20s
+```
 
 ---
 
