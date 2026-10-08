@@ -140,6 +140,7 @@ func TestDrainValkeySinkRecordsAndAcknowledges(t *testing.T) {
 	remote := &fakeRemoteIdempotency{recordOK: true}
 	r := drainTestRegistry(t, NoopMetricsAdapter{})
 	r.drainCfg = DrainConfig{Enabled: true, TimerSeconds: 1, Sink: "valkey", BatchMaxEvents: 10}
+	r.applyDrainEvents()
 	r.SetDrainRemote(remote)
 	seedLedgerEntry(t, r)
 
@@ -159,6 +160,7 @@ func TestDrainValkeySinkFailureDoesNotAcknowledge(t *testing.T) {
 	remote := &fakeRemoteIdempotency{recordOK: false}
 	r := drainTestRegistry(t, NoopMetricsAdapter{})
 	r.drainCfg = DrainConfig{Enabled: true, TimerSeconds: 1, Sink: "valkey", BatchMaxEvents: 10}
+	r.applyDrainEvents()
 	r.SetDrainRemote(remote)
 	seedLedgerEntry(t, r)
 

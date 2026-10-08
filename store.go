@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -16,7 +17,6 @@ const (
 	ttlQueued    = 24 * time.Hour
 	ttlCompleted = 30 * time.Minute
 	ttlFailed    = 2 * time.Hour
-	inFlightMax  = 5 * time.Minute // stale in_flight threshold
 )
 
 type Store struct {
@@ -26,7 +26,16 @@ type Store struct {
 	closeErr  error
 	stop      chan struct{}
 	done      chan struct{}
+
+	// skipDrainEvents is set when drain mode is off: nothing ever reads or
+	// acknowledges the events then, so recording them is a wasted write
+	// per job and a table that only grows. See SetDrainEventsEnabled.
+	skipDrainEvents atomic.Bool
 }
+
+// SetDrainEventsEnabled turns drain-event recording on or off. The Registry
+// calls it with whether drain mode is enabled; a bare store records them.
+func (s *Store) SetDrainEventsEnabled(enabled bool) { s.skipDrainEvents.Store(!enabled) }
 
 func NewStore(path string) *Store {
 	// Pragmas belong in the DSN, not a one-off db.Exec after Open. SQLite
@@ -98,6 +107,9 @@ func (s *Store) migrate() {
 	// safe to run on existing tables — ignored if column already exists
 	s.db.Exec(`ALTER TABLE jobs ADD COLUMN queue_key TEXT NOT NULL DEFAULT ''`)
 	s.db.Exec(`ALTER TABLE jobs ADD COLUMN execute_before INTEGER NOT NULL DEFAULT 0`)
+	// Jobs are no longer marked in_flight; rows left that way by older
+	// versions are just unfinished work.
+	s.db.Exec(`UPDATE jobs SET status = 'queued' WHERE status = 'in_flight'`)
 	s.db.Exec(`
 		CREATE TABLE IF NOT EXISTS drain_events (
 			sequence             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -160,15 +172,11 @@ func (s *Store) DeleteJob(jobID string) {
 	s.db.Exec(`DELETE FROM jobs WHERE id = ?`, jobID)
 }
 
-func (s *Store) MarkInFlight(jobID string) {
-	s.db.Exec(`UPDATE jobs SET status = 'in_flight' WHERE id = ?`, jobID)
-}
-
-func (s *Store) RecoverInFlight(queueKey string) []*Job {
+func (s *Store) RecoverQueued(queueKey string) []*Job {
 	rows, err := s.db.Query(`
 		SELECT id, user_id, url, method, body, headers, webhook_url, status, created_at, execute_before, idempotent_key_hash
 		FROM jobs
-		WHERE queue_key = ? AND status = 'in_flight' AND expires_at > ?
+		WHERE queue_key = ? AND status IN ('queued', 'in_flight') AND expires_at > ?
 	`, queueKey, time.Now().UnixMilli())
 	if err != nil {
 		return nil
@@ -178,14 +186,9 @@ func (s *Store) RecoverInFlight(queueKey string) []*Job {
 	var jobs []*Job
 	for rows.Next() {
 		if j := scanJob(rows); j != nil {
+			j.Status = StatusQueued
 			jobs = append(jobs, j)
 		}
-	}
-
-	if len(jobs) > 0 {
-		s.db.Exec(`
-			UPDATE jobs SET status = 'queued' WHERE queue_key = ? AND status = 'in_flight'
-		`, queueKey)
 	}
 	return jobs
 }
@@ -193,7 +196,7 @@ func (s *Store) RecoverInFlight(queueKey string) []*Job {
 func (s *Store) UpdateStatus(jobID string, status Status) {
 	expiresAt := time.Now().Add(ttlForStatus(status)).UnixMilli()
 	s.db.Exec(`UPDATE jobs SET status = ?, expires_at = ? WHERE id = ?`, string(status), expiresAt, jobID)
-	if status == StatusCompleted || status == StatusFailed {
+	if (status == StatusCompleted || status == StatusFailed) && !s.skipDrainEvents.Load() {
 		s.recordDrainEvent(jobID, status)
 	}
 }
@@ -237,7 +240,7 @@ func (s *Store) GetJob(jobID string) *Job {
 func (s *Store) GetQueuedJobs() []*Job {
 	rows, err := s.db.Query(`
 		SELECT id, user_id, url, method, body, headers, webhook_url, status, created_at, execute_before, idempotent_key_hash
-		FROM jobs WHERE status = 'queued' AND expires_at > ?
+		FROM jobs WHERE status IN ('queued', 'in_flight') AND expires_at > ?
 	`, time.Now().UnixMilli())
 	if err != nil {
 		log.Printf("GetQueuedJobs: %v", err)
@@ -341,11 +344,6 @@ func (s *Store) cleanupLoop() {
 			now := time.Now()
 			// expire old jobs
 			s.db.Exec(`DELETE FROM jobs WHERE expires_at < ?`, now.UnixMilli())
-			// reset stale in_flight jobs back to queued so they get re-dispatched
-			s.db.Exec(`
-				UPDATE jobs SET status = 'queued'
-				WHERE status = 'in_flight' AND created_at < ?
-			`, now.Add(-inFlightMax).UnixMilli())
 		case <-s.stop:
 			return
 		}
