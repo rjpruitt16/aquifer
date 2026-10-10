@@ -1,0 +1,21 @@
+# Aquifer for the week-long soak test. No public service: the driver reaches
+# Aquifer (8080) and the supervisor (9090) over Fly's private network.
+app = "aquifer-soak"
+primary_region = "iad"
+kill_signal = "SIGTERM"
+kill_timeout = 30
+
+[build]
+  dockerfile = "Dockerfile.target"
+
+[[mounts]]
+  source = "aquifer_soak_data"
+  destination = "/data"
+  initial_size = "10gb"
+
+[[restart]]
+  policy = "always"
+
+[[vm]]
+  size = "performance-1x"
+  memory = "2gb"

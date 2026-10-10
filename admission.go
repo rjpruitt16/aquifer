@@ -14,18 +14,28 @@ import (
 
 const maxRetryAfterSeconds = 60
 
-// Defaults for LoadAdmissionLimits. Body and DB-size ceilings default on,
-// sized off the infrastructure this project is actually benchmarked
-// against (a single 512MB Fly.io instance with a 1GB volume — see
-// benchmark.md): defaultDBMaxBytes leaves 20% headroom on that volume.
-// defaultMaxBodyBytes wasn't itself load-tested — it's a conservative,
-// standard API-payload ceiling, not a benchmark-derived number. Memory is
-// deliberately left disabled by default (see LoadAdmissionLimits) since a
-// safe ceiling depends on the deployment's own memory budget, not just
-// its disk.
+// Defaults for LoadAdmissionLimits. Body and DB-size ceilings default on.
+// The DB ceiling is derived from the disk the database lives on (see
+// autoDBMaxBytes); defaultDBMaxBytes is only the fallback when the disk
+// can't be measured, sized for the 1GB volume this project was first
+// benchmarked on. defaultMaxBodyBytes wasn't itself load-tested — it's a
+// conservative, standard API-payload ceiling, not a benchmark-derived
+// number. Memory is deliberately left disabled by default (see
+// LoadAdmissionLimits) since a safe ceiling depends on the deployment's own
+// memory budget, not just its disk.
 const (
 	defaultMaxBodyBytes = 1 * 1024 * 1024
 	defaultDBMaxBytes   = 800 * 1024 * 1024
+)
+
+// autoDBMaxBytes marks an unset AQUIFER_DB_MAX_BYTES: NewAdmissionController
+// replaces it with dbShareOfDisk of the space the database can use, so the
+// ceiling fits whatever volume Aquifer runs on without configuration. A
+// fixed default either wastes a large volume (the week-long soak shed 15-20%
+// of jobs at 800MB on a 10GB volume) or overfills a small one.
+const (
+	autoDBMaxBytes int64 = -1
+	dbShareOfDisk        = 0.8
 )
 
 // AdmissionLimits are operator-configured ceilings that protect Aquifer itself
@@ -52,7 +62,7 @@ func LoadAdmissionLimits() AdmissionLimits {
 	limits := AdmissionLimits{
 		MemoryLimitMB:     envInt64("AQUIFER_MEMORY_LIMIT_MB", 0),
 		MaxBodyBytes:      envInt64("AQUIFER_MAX_BODY_BYTES", defaultMaxBodyBytes),
-		DBMaxBytes:        envInt64("AQUIFER_DB_MAX_BYTES", defaultDBMaxBytes),
+		DBMaxBytes:        envInt64("AQUIFER_DB_MAX_BYTES", autoDBMaxBytes),
 		RetryAfterSeconds: int(envInt64("AQUIFER_RETRY_AFTER_SECONDS", 5)),
 	}
 	if limits.MemoryLimitMB == 0 {
@@ -141,7 +151,30 @@ func processMemoryMB() int64 {
 }
 
 func NewAdmissionController(limits AdmissionLimits, dbPath string) *AdmissionController {
+	if limits.DBMaxBytes < 0 {
+		limits.DBMaxBytes = deriveDBMaxBytes(dbPath)
+	}
 	return &AdmissionController{limits: limits, dbPath: dbPath}
+}
+
+// deriveDBMaxBytes sizes the DB ceiling from the disk: dbShareOfDisk of what
+// the database can grow into, which is the filesystem's free space plus what
+// the database already occupies. Measured from free space rather than the
+// disk's total so a database sharing a disk with other data (a laptop, a
+// shared host) gets a ceiling the disk can actually reach. Measured once at
+// startup, so other data growing on a shared disk later isn't accounted for.
+func deriveDBMaxBytes(dbPath string) int64 {
+	dir := filepath.Dir(dbPath)
+	free, ok := volumeAvailableBytes(dir)
+	if !ok {
+		log.Printf("admission: AQUIFER_DB_MAX_BYTES not set and the disk at %s can't be measured; using %d bytes", dir, defaultDBMaxBytes)
+		return defaultDBMaxBytes
+	}
+	usable := free + dbSizeBytes(dbPath)
+	limit := int64(float64(usable) * dbShareOfDisk)
+	log.Printf("admission: AQUIFER_DB_MAX_BYTES not set; capping the database at %d bytes (%.0f%% of the %d bytes it can use on %s)",
+		limit, dbShareOfDisk*100, usable, dir)
+	return limit
 }
 
 func (c *AdmissionController) Check() AdmissionDecision {

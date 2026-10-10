@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"syscall"
@@ -58,6 +60,18 @@ func main() {
 		log.Printf("Aquifer %s listening on :%s (db: %s)", version, port, dbPath)
 	} else {
 		log.Printf("Aquifer %s running %s (db: %s)", version, adapter.Name(), dbPath)
+	}
+
+	// Off unless set: serves net/http/pprof (goroutines, heap, CPU profiles)
+	// on its own listener, e.g. AQUIFER_DEBUG_ADDR=127.0.0.1:6060. Keep it on
+	// a loopback or private address; it is not meant to be public.
+	if addr := os.Getenv("AQUIFER_DEBUG_ADDR"); addr != "" {
+		go func() {
+			log.Printf("pprof debug listener on %s", addr)
+			if err := http.ListenAndServe(addr, nil); err != nil {
+				log.Printf("pprof debug listener stopped: %v", err)
+			}
+		}()
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

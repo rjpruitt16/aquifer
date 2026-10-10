@@ -129,6 +129,8 @@ Two providers are available:
 - `static` (default) builds a deterministic rendezvous ranking from `AQUIFER_CLUSTER_MEMBERS`. An unreachable peer is soft-pruned from that instance's local view and retried after the prune TTL. There is no shared assignment state.
 - `valkey` makes Aquifer instances heartbeat directly into a regional Valkey and atomically claims user assignments there. No separate control plane is required. Existing assignments stay sticky while their owner is active. For a new user, Aquifer walks the rendezvous ranking and chooses the first node below its active-user capacity. If every active node is full, it chooses the least-loaded node by `active_users / capacity` instead of rejecting work.
 
+When the owner can't be reached at all (connection refused, or the request never went out), the receiving node soft-prunes it and forwards to the next node in the ranking. When the owner received the whole request but didn't answer within 10 seconds, the receiving node does **not** fail over: the owner may already have accepted the job, and a second node would run it again. The caller gets `504` with `owner_id` and `Retry-After: 1`. Retrying with the same `idempotent_key` reaches the same owner, which returns the existing job if it accepted the first attempt. A slow owner costs its users some availability instead of running their jobs twice.
+
 `AQUIFER_CLUSTER_MAX_ACTIVE_USERS` is therefore a soft placement target, not an admission-control ceiling. An active user is a distinct `user_id` with outstanding local work or a recently used assignment. Once its work reaches zero and it remains idle for `AQUIFER_CLUSTER_ASSIGNMENT_IDLE_SECONDS`, the owner releases it so that capacity becomes available again.
 
 Configuration:
@@ -275,6 +277,8 @@ Each session transcript retains approximately the newest `AQUIFER_WS_STREAM_MAX_
 Two clients may temporarily attach to the same `session_id` during an application-managed handoff; both follow the same durable backend event stream, and the client decides when to close the old socket. On `SIGTERM`, Aquifer sends `server_draining`, leaves the old socket open for `AQUIFER_WS_DRAIN_GRACE_SECONDS`, then closes it with WebSocket code **1012 Service Restart**. The client should open its replacement through the gateway using its last processed stream cursor. New handshakes receive **503** while the node drains.
 
 ### Capacity
+
+Each live session uses three file descriptors on the Aquifer host: the client socket, the backend socket, and a Valkey connection for its blocking stream read. Size the process's open-file limit (`ulimit -n`) for about 3× `AQUIFER_WS_MAX_CLIENT_CONNECTIONS` plus headroom. Many container platforms default to 10,240, which tops out around 3,000 sessions. Valkey's own `maxclients` (10,000 by default) also needs room for one connection per live session across every Aquifer instance sharing it.
 
 Connection ceilings are local to one Aquifer process. `AQUIFER_WS_MAX_CLIENT_CONNECTIONS=1000` means that instance accepts at most 1,000 clients; it is not a fleet-wide semaphore. Ten identical instances can therefore admit up to 10,000 clients when the gateway distributes them.
 

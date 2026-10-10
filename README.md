@@ -151,9 +151,10 @@ upstreams:
 | `AQUIFER_PEBBLE_WAL_SYNC_INTERVAL_MS` | `5` | Pebble only: batches concurrent durable writes into fewer real fsyncs under load (Pebble's own group-commit); each caller still blocks until its own write is actually durable |
 | `AQUIFER_PEBBLE_FLUSH_INTERVAL_MS` | `100` | Pebble only: answer before a write reaches disk and sync the log on this timer, like EZThrottle Local's 100ms Mnesia flush. A crash can lose up to this many milliseconds of accepted jobs. On Fly it took one machine from about 150 to about 700 jobs/s end to end (see [benchmark.md](benchmark.md#11-per-job-overhead-make-perf)). Set `0` to make every write wait for its own fsync: zero acknowledged-job loss, much lower throughput |
 | `AQUIFER_PEBBLE_CACHE_MB` | `64` | Pebble only: block cache size. Pebble's own default (8MB) is too small to keep recently written jobs in memory, so status updates read them back from disk |
+| `AQUIFER_DEBUG_ADDR` | unset | Serves Go's `net/http/pprof` (goroutine counts, heap, CPU profiles) on its own listener, e.g. `127.0.0.1:6060`. Off when unset. Bind it to loopback or a private network; it is not meant to be public |
 | `AQUIFER_MEMORY_LIMIT_MB` | _(none, disabled)_ | Reject new jobs with `429` once process memory exceeds this many MB |
 | `AQUIFER_MAX_BODY_BYTES` | `1048576` (1MB) | Reject oversized request bodies with `413` |
-| `AQUIFER_DB_MAX_BYTES` | `838860800` (800MB) | Reject new jobs with `429` once the SQLite file exceeds this size |
+| `AQUIFER_DB_MAX_BYTES` | 80% of the disk | Reject new jobs with `429` once the database exceeds this size. Unset, Aquifer sizes it at startup to 80% of the space the database can use (free space on its filesystem plus its current size), so it fits the volume without configuration. The startup log shows the value. Set a number to override, or `0` to disable. Falls back to 800MB where disk space can't be read |
 | `AQUIFER_MAX_PENDING_PER_UPSTREAM` | `10000` | Shared per-upstream backlog budget used by fair admission; `0` disables it |
 | `AQUIFER_RETRY_AFTER_SECONDS` | `5` | Base `Retry-After` value sent on `429` admission rejections |
 | `AQUIFER_IDLE_TIMEOUT_SECONDS` | `300` (5min) | How long a per-tenant/per-domain queue can sit idle before self-tearing-down; see [drain mode](#partitioning-strategies) for why this gates a real drain flush |
