@@ -50,8 +50,39 @@ func TestLoadAdmissionLimitsDefaultsOnForSizeChecksOffForMemory(t *testing.T) {
 	if limits.MaxBodyBytes != defaultMaxBodyBytes {
 		t.Fatalf("expected default max body bytes %d, got %d", defaultMaxBodyBytes, limits.MaxBodyBytes)
 	}
-	if limits.DBMaxBytes != defaultDBMaxBytes {
-		t.Fatalf("expected default db max bytes %d, got %d", defaultDBMaxBytes, limits.DBMaxBytes)
+	if limits.DBMaxBytes != autoDBMaxBytes {
+		t.Fatalf("expected an unset AQUIFER_DB_MAX_BYTES to mean auto (%d), got %d", autoDBMaxBytes, limits.DBMaxBytes)
+	}
+}
+
+func TestAutoDBMaxBytesIsDerivedFromTheDisk(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "aquifer.db")
+	free, ok := volumeAvailableBytes(filepath.Dir(dbPath))
+	if !ok {
+		t.Skip("disk space can't be measured on this platform")
+	}
+
+	c := NewAdmissionController(AdmissionLimits{DBMaxBytes: autoDBMaxBytes}, dbPath)
+
+	got := c.limits.DBMaxBytes
+	if got <= 0 {
+		t.Fatalf("expected a positive derived ceiling, got %d", got)
+	}
+	// The disk's free space moves while tests run; allow a little slack
+	// around 80% of it.
+	want := int64(float64(free) * dbShareOfDisk)
+	if diff := got - want; diff > want/20 || diff < -want/20 {
+		t.Fatalf("expected about %d (80%% of %d free), got %d", want, free, got)
+	}
+}
+
+func TestExplicitDBMaxBytesIsNotDerived(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "aquifer.db")
+	if got := NewAdmissionController(AdmissionLimits{DBMaxBytes: 12345}, dbPath).limits.DBMaxBytes; got != 12345 {
+		t.Fatalf("expected explicit ceiling 12345 to be kept, got %d", got)
+	}
+	if got := NewAdmissionController(AdmissionLimits{DBMaxBytes: 0}, dbPath).limits.DBMaxBytes; got != 0 {
+		t.Fatalf("expected explicit 0 to keep the check disabled, got %d", got)
 	}
 }
 
