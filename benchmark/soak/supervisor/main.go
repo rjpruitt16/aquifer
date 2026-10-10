@@ -60,6 +60,7 @@ func main() {
 	s := &supervisor{cmdPath: *cmdPath, dataDir: *dataDir, debugURL: *debugURL,
 		logFile: filepath.Join(*dataDir, "aquifer.log"), lines: make([]string, ringSize), bootAt: time.Now()}
 	s.openLog()
+	raiseFileLimit()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /kill", s.handleKill)
@@ -139,6 +140,24 @@ func (s *supervisor) runOnce() {
 	exit := s.lastExit
 	s.mu.Unlock()
 	s.record("supervisor: aquifer exited: " + exit)
+}
+
+// raiseFileLimit lifts the open-file limit (inherited by Aquifer) to the
+// kernel maximum. Containers often default to 10,240, and every WebSocket
+// session needs three descriptors. Best effort: needs root, as on Fly.
+func raiseFileLimit() {
+	limit := uint64(1 << 20)
+	if raw, err := os.ReadFile("/proc/sys/fs/nr_open"); err == nil {
+		if n, err := strconv.ParseUint(strings.TrimSpace(string(raw)), 10, 64); err == nil {
+			limit = n
+		}
+	}
+	rl := syscall.Rlimit{Cur: limit, Max: limit}
+	if err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rl); err != nil {
+		log.Printf("supervisor: could not raise open-file limit: %v", err)
+		return
+	}
+	log.Printf("supervisor: open-file limit raised to %d", limit)
 }
 
 func exitText(err error) string {
