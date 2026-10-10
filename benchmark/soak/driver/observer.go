@@ -378,6 +378,7 @@ func (o *observer) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /status/daily", o.handleDaily)
 	mux.HandleFunc("GET /events", o.handleEvents)
 	mux.HandleFunc("GET /logs", o.handleLogs)
+	mux.HandleFunc("POST /control/{action}", o.handleControl)
 	mux.HandleFunc("GET /reports", o.d.reports.handleList)
 	mux.HandleFunc("POST /reports", o.d.reports.handlePost)
 	mux.HandleFunc("GET /{$}", o.handleIndex)
@@ -419,6 +420,7 @@ func (o *observer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"running_for_h": int(time.Since(v.RunStarted).Hours()),
 		"alerts":        o.alerts(v, last),
 		"phase":         o.d.phase.Load(),
+		"paused":        o.d.paused.Load(),
 		"offered_per_s": o.d.rate.Load(),
 		"upstream_mode": o.d.upstream.modeName(),
 		"webhook_mode":  o.d.webhook.modeName(),
@@ -438,6 +440,27 @@ func (o *observer) handleStatus(w http.ResponseWriter, r *http.Request) {
 			"reports": "/reports?n=20",
 		},
 	})
+}
+
+// handleControl pauses or resumes the load (token required), e.g. to let
+// in-flight jobs finish before redeploying the target, so a deploy's
+// restart doesn't look like lost jobs in the ledger.
+func (o *observer) handleControl(w http.ResponseWriter, r *http.Request) {
+	if !o.d.reports.authorized(w, r) {
+		return
+	}
+	switch r.PathValue("action") {
+	case "pause":
+		o.d.paused.Store(true)
+		o.d.events.add("load_paused", nil)
+	case "resume":
+		o.d.paused.Store(false)
+		o.d.events.add("load_resumed", nil)
+	default:
+		http.Error(w, "action must be pause or resume", http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]any{"paused": o.d.paused.Load(), "outstanding": o.d.ledger.view().Outstanding})
 }
 
 func (o *observer) handleHourly(w http.ResponseWriter, r *http.Request) {

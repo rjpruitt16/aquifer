@@ -68,9 +68,10 @@ type driver struct {
 	client   *http.Client
 	sem      chan struct{}
 
-	rate  atomic.Int64 // jobs/s currently offered
-	phase atomic.Value // "steady", "burst", "ramp"
-	busy  sync.Mutex   // held by burst and ramp so they never overlap
+	rate   atomic.Int64 // jobs/s currently offered
+	paused atomic.Bool  // set by POST /control/pause, e.g. around a target deploy
+	phase  atomic.Value // "steady", "burst", "ramp"
+	busy   sync.Mutex   // held by burst and ramp so they never overlap
 
 	obs *observer
 }
@@ -180,6 +181,10 @@ func (d *driver) load(stop <-chan struct{}) {
 		case <-stop:
 			return
 		case now := <-tick.C:
+			if d.paused.Load() {
+				last, owed = now, 0
+				continue
+			}
 			owed += now.Sub(last).Seconds() * float64(d.rate.Load())
 			last = now
 			for ; owed >= 1; owed-- {
@@ -237,8 +242,8 @@ func (d *driver) burstLoop(stop <-chan struct{}) {
 			return
 		case <-time.After(d.cfg.BurstEvery):
 		}
-		if !d.busy.TryLock() {
-			continue // ramp running
+		if d.paused.Load() || !d.busy.TryLock() {
+			continue // paused, or a ramp is running
 		}
 		d.events.add("burst_start", map[string]any{"rate": d.cfg.BurstRate, "for_s": int(d.cfg.BurstFor.Seconds())})
 		d.phase.Store("burst")
@@ -330,6 +335,10 @@ func (d *driver) killLoop(stop <-chan struct{}) {
 		case <-time.After(wait):
 		}
 		d.busy.Lock() // never during a burst or ramp, so their numbers stay clean
+		if d.paused.Load() {
+			d.busy.Unlock()
+			continue
+		}
 		action := "kill"
 		if d.cfg.RebootEvery > 0 && time.Since(lastReboot) >= d.cfg.RebootEvery {
 			action = "reboot"

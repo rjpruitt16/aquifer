@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -43,6 +44,7 @@ type supervisor struct {
 	logOut    *os.File
 	logBytes  int64
 	bootAt    time.Time
+	stopping  bool // shutting down: don't restart aquifer
 }
 
 const ringSize = 5000
@@ -65,11 +67,48 @@ func main() {
 	mux.HandleFunc("GET /stats", s.handleStats)
 	mux.HandleFunc("GET /logs", s.handleLogs)
 	go func() { log.Fatal(http.ListenAndServe(*listen, mux)) }()
+	go s.forwardShutdown()
 
 	for {
 		s.runOnce()
+		s.mu.Lock()
+		stopping := s.stopping
+		s.mu.Unlock()
+		if stopping {
+			select {} // forwardShutdown exits the process
+		}
 		time.Sleep(time.Second)
 	}
+}
+
+// forwardShutdown passes the platform's stop signal (a deploy, fly machine
+// stop) on to Aquifer as SIGTERM so it drains gracefully, then exits once
+// Aquifer has. Without it the supervisor died at once and Aquifer was
+// killed hard when the machine stopped.
+func (s *supervisor) forwardShutdown() {
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
+	got := <-sig
+	s.record(fmt.Sprintf("supervisor: %v received, sending SIGTERM to aquifer", got))
+	s.mu.Lock()
+	s.stopping = true
+	p := s.proc
+	s.mu.Unlock()
+	if p != nil {
+		p.Signal(syscall.SIGTERM)
+		deadline := time.Now().Add(25 * time.Second)
+		for time.Now().Before(deadline) {
+			s.mu.Lock()
+			running := s.proc != nil
+			s.mu.Unlock()
+			if !running {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+	s.record("supervisor: exiting")
+	os.Exit(0)
 }
 
 func (s *supervisor) runOnce() {

@@ -2,6 +2,8 @@
 # Aquifer (8080) and the supervisor (9090) over Fly's private network.
 app = "aquifer-soak"
 primary_region = "iad"
+kill_signal = "SIGTERM"
+kill_timeout = 30
 
 [build]
   dockerfile = "Dockerfile.target"

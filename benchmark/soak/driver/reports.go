@@ -41,10 +41,17 @@ func openReports(dir string) *reports {
 	return r
 }
 
-func (r *reports) handlePost(w http.ResponseWriter, req *http.Request) {
+func (r *reports) authorized(w http.ResponseWriter, req *http.Request) bool {
 	got := strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer ")
 	if r.token == "" || subtle.ConstantTimeCompare([]byte(got), []byte(r.token)) != 1 {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return false
+	}
+	return true
+}
+
+func (r *reports) handlePost(w http.ResponseWriter, req *http.Request) {
+	if !r.authorized(w, req) {
 		return
 	}
 	var rep report

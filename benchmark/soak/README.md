@@ -91,6 +91,12 @@ network.
 | `/events?n=200` | mode changes, bursts, ramps, kills |
 | `/logs?n=500&grep=` | Aquifer's recent log lines |
 
+`POST /control/pause` and `POST /control/resume` (same bearer token as
+`/reports`) stop and restart the load. Use them around a target deploy: pause,
+wait for `ledger.outstanding` on `/status` to reach 0, deploy, resume. The
+supervisor forwards the platform's stop signal to Aquifer as SIGTERM, so
+Aquifer drains gracefully either way.
+
 `/work` and `/hook` are served on a separate private port, so nobody outside
 Fly can forge webhooks into the ledger.
 
