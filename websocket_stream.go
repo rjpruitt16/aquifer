@@ -72,6 +72,15 @@ func NewRedisWebSocketStreamStore(rawURL, prefix string, maxEvents int64, ttl ti
 	}
 	readerOpts := *opts
 	readerOpts.PoolSize = max(liveReaders, 1) + 8
+	// Sized for many sessions, not throughput: a blocking XREAD is a tiny
+	// command and its replies are small batches (larger ones still stream
+	// through), so small buffers save ~50KB per session over go-redis's 32KB
+	// defaults. Connections a burst of sessions opened are closed once idle
+	// instead of being kept for go-redis's default 30 minutes.
+	readerOpts.ReadBufferSize = 8 * 1024
+	readerOpts.WriteBufferSize = 4 * 1024
+	readerOpts.MaxIdleConns = 64
+	readerOpts.ConnMaxIdleTime = time.Minute
 	return &RedisWebSocketStreamStore{
 		client:    redis.NewClient(opts),
 		readers:   redis.NewClient(&readerOpts),

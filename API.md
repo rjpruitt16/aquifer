@@ -276,6 +276,8 @@ Two clients may temporarily attach to the same `session_id` during an applicatio
 
 ### Capacity
 
+Each live session uses three file descriptors on the Aquifer host: the client socket, the backend socket, and a Valkey connection for its blocking stream read. Size the process's open-file limit (`ulimit -n`) for about 3× `AQUIFER_WS_MAX_CLIENT_CONNECTIONS` plus headroom. Many container platforms default to 10,240, which tops out around 3,000 sessions. Valkey's own `maxclients` (10,000 by default) also needs room for one connection per live session across every Aquifer instance sharing it.
+
 Connection ceilings are local to one Aquifer process. `AQUIFER_WS_MAX_CLIENT_CONNECTIONS=1000` means that instance accepts at most 1,000 clients; it is not a fleet-wide semaphore. Ten identical instances can therefore admit up to 10,000 clients when the gateway distributes them.
 
 The upstream can lower this instance's upstream-connection ceiling or opening rate during a successful handshake:
