@@ -1,0 +1,22 @@
+# EZThrottle Local target for the same benchmark. Deploy from the
+# ezthrottle-local checkout:
+#   fly deploy ../ezthrottle-local -c benchmark/websocket/fly.ezthrottle.toml
+app = "ws-lab-ez"
+primary_region = "iad"
+
+[env]
+  EZTHROTTLE_WS_ENABLED = "true"
+  EZTHROTTLE_WS_MAX_CLIENT_CONNECTIONS = "50000"
+  EZTHROTTLE_WS_MAX_UPSTREAM_CONNECTIONS = "50000"
+  EZTHROTTLE_WS_MAX_WAITING_CONNECTIONS = "50000"
+  EZTHROTTLE_WS_CONNECT_RPS = "2000"
+  EZTHROTTLE_WS_SLOW_START_RPS = "2000"
+  MNESIA_DIR = "/tmp/mnesia"
+  SECRET_KEY_BASE = "ws-lab-only-not-a-secret-ws-lab-only-not-a-secret-ws-lab-only-xx"
+
+[processes]
+  app = "sh -c 'ulimit -n 1048576 && exec bin/ezthrottle_local start'"
+
+[[vm]]
+  size = "performance-1x"
+  memory = "2gb"

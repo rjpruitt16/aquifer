@@ -1,0 +1,17 @@
+app = "ws-lab-aquifer"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile.aquifer"
+
+[env]
+  AQUIFER_VALKEY_URL = "redis://ws-lab-valkey.internal:6379"
+  AQUIFER_WS_MAX_CLIENT_CONNECTIONS = "50000"
+  AQUIFER_WS_MAX_UPSTREAM_CONNECTIONS = "50000"
+  AQUIFER_WS_MAX_WAITING_CONNECTIONS = "50000"
+  AQUIFER_WS_CONNECT_RPS = "2000"
+  AQUIFER_WS_SLOW_START_RPS = "2000"
+
+[[vm]]
+  size = "performance-1x"
+  memory = "2gb"
