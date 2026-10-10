@@ -1,7 +1,13 @@
 package aquifer
 
 import (
+	"context"
+	"fmt"
+	"os"
+	"runtime"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -70,4 +76,44 @@ func TestDecodeWebSocketStreamEvent(t *testing.T) {
 	if string(event.Envelope.Payload) != `{"ok":true}` {
 		t.Fatalf("unexpected payload: %s", event.Envelope.Payload)
 	}
+}
+
+// With more live sessions than the default pool holds (10 per CPU), every
+// append used to wait for some session's blocking read to time out. Live
+// reads now have their own pool, so an append stays fast however many
+// sessions are blocked reading.
+func TestAppendIsNotStarvedByBlockingReads(t *testing.T) {
+	rawURL := os.Getenv("AQUIFER_TEST_VALKEY_URL")
+	if rawURL == "" {
+		t.Skip("set AQUIFER_TEST_VALKEY_URL to run the real Valkey integration test")
+	}
+	sessions := 10*runtime.GOMAXPROCS(0) + 20 // more than the default pool
+	prefix := fmt.Sprintf("aqueduct:test:starve:%d:", time.Now().UnixNano())
+	store, err := NewRedisWebSocketStreamStore(rawURL, prefix, 100, time.Minute, sessions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var wg sync.WaitGroup
+	for i := 0; i < sessions; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			store.ReadAfter(ctx, fmt.Sprintf("idle-%d", i), "0-0", 10, 3*time.Second)
+		}(i)
+	}
+	time.Sleep(300 * time.Millisecond) // let every read block
+
+	started := time.Now()
+	if _, err := store.Append(ctx, "busy", "client", WebSocketEnvelope{Type: "command", MessageID: "m1"}); err != nil {
+		t.Fatal(err)
+	}
+	if took := time.Since(started); took > 500*time.Millisecond {
+		t.Fatalf("append took %s while %d sessions were blocked reading; it waited for a pooled connection", took, sessions)
+	}
+	cancel()
+	wg.Wait()
 }

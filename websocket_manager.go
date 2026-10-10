@@ -90,7 +90,7 @@ func NewWebSocketManagerFromConfig(cfg WebSocketConfig) (*WebSocketManager, erro
 	if !cfg.Enabled {
 		return nil, nil
 	}
-	store, err := NewRedisWebSocketStreamStore(cfg.RedisURL, cfg.StreamPrefix, cfg.StreamMaxEvents, cfg.StreamTTL)
+	store, err := NewRedisWebSocketStreamStore(cfg.RedisURL, cfg.StreamPrefix, cfg.StreamMaxEvents, cfg.StreamTTL, cfg.Scheduler.MaxClients)
 	if err != nil {
 		return nil, err
 	}
