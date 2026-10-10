@@ -3,10 +3,12 @@ package aquifer
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -419,5 +421,58 @@ func TestClusterRoutingKeyKeepsUserRoutingByDefault(t *testing.T) {
 	req.IdempotencyScope = IdempotencyScopeShared
 	if clusterRoutingKey(req) != "shared\x00k" {
 		t.Fatal("shared requests must route by the shared key")
+	}
+}
+
+// A forward that reached the owner but timed out waiting for its answer must
+// not fail over: the owner may already have accepted the job, and a second
+// owner would run it again. The caller gets 504 and retries with the same
+// key, which lands on the same owner and is deduplicated there.
+func TestClusterForwardTimeoutAfterDeliveryDoesNotFailOver(t *testing.T) {
+	var slowHits, fallbackHits atomic.Int64
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		slowHits.Add(1)
+		io.Copy(io.Discard, r.Body)
+		time.Sleep(500 * time.Millisecond)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	t.Cleanup(slow.Close)
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fallbackHits.Add(1)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	t.Cleanup(fallback.Close)
+
+	original := clusterForwardClient
+	clusterForwardClient = &http.Client{Transport: &http.Transport{ResponseHeaderTimeout: 100 * time.Millisecond}}
+	t.Cleanup(func() { clusterForwardClient = original })
+
+	peerApp, peerStore := testClusterAquifer(t)
+	owner := ClusterMember{ID: "slow", Address: slow.URL}
+	next := ClusterMember{ID: "fallback", Address: fallback.URL}
+	peer := ClusterMember{ID: "peer", Address: "http://peer.invalid"}
+	router := testClusterRouter(peer, owner, next, peer)
+	userID := keyRankedBy(t, router, owner.ID, next.ID)
+	peerApp.SetClusterRouter(router)
+
+	body, _ := json.Marshal(JobRequest{UserID: userID, IdempotentKey: "slow-owner-key",
+		URL: "http://upstream.invalid", Method: "POST", WebhookURL: "http://hook.invalid"})
+	rec := httptest.NewRecorder()
+	NewServer(peerApp).Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/jobs", bytes.NewReader(body)))
+
+	if rec.Code != http.StatusGatewayTimeout {
+		t.Fatalf("expected 504 when the owner times out after delivery, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"owner_id":"slow"`) {
+		t.Fatalf("expected the owner in the error body, got %s", rec.Body.String())
+	}
+	if slowHits.Load() != 1 || fallbackHits.Load() != 0 {
+		t.Fatalf("expected one delivery to the owner and none to the fallback, got owner=%d fallback=%d", slowHits.Load(), fallbackHits.Load())
+	}
+	if router.prunedCount() != 0 {
+		t.Fatalf("a slow owner must not be pruned, or the retry would go elsewhere; pruned %d", router.prunedCount())
+	}
+	if peerStore.Counts().TotalJobs != 0 {
+		t.Fatalf("expected no local job on the forwarding node, got %+v", peerStore.Counts())
 	}
 }
