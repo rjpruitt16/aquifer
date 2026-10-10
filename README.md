@@ -153,7 +153,7 @@ upstreams:
 | `AQUIFER_PEBBLE_CACHE_MB` | `64` | Pebble only: block cache size. Pebble's own default (8MB) is too small to keep recently written jobs in memory, so status updates read them back from disk |
 | `AQUIFER_MEMORY_LIMIT_MB` | _(none, disabled)_ | Reject new jobs with `429` once process memory exceeds this many MB |
 | `AQUIFER_MAX_BODY_BYTES` | `1048576` (1MB) | Reject oversized request bodies with `413` |
-| `AQUIFER_DB_MAX_BYTES` | `838860800` (800MB) | Reject new jobs with `429` once the SQLite file exceeds this size |
+| `AQUIFER_DB_MAX_BYTES` | 80% of the disk | Reject new jobs with `429` once the database exceeds this size. Unset, Aquifer sizes it at startup to 80% of the space the database can use (free space on its filesystem plus its current size), so it fits the volume without configuration. The startup log shows the value. Set a number to override, or `0` to disable. Falls back to 800MB where disk space can't be read |
 | `AQUIFER_MAX_PENDING_PER_UPSTREAM` | `10000` | Shared per-upstream backlog budget used by fair admission; `0` disables it |
 | `AQUIFER_RETRY_AFTER_SECONDS` | `5` | Base `Retry-After` value sent on `429` admission rejections |
 | `AQUIFER_IDLE_TIMEOUT_SECONDS` | `300` (5min) | How long a per-tenant/per-domain queue can sit idle before self-tearing-down; see [drain mode](#partitioning-strategies) for why this gates a real drain flush |
