@@ -9,8 +9,10 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -661,8 +663,23 @@ func (s *Server) forwardClusterRequest(w http.ResponseWriter, r *http.Request, p
 
 		// Bound connection and response-header setup, but not the response body:
 		// /proxy may legitimately relay a paced SSE stream for much longer.
+		var delivered atomic.Bool
+		outbound = outbound.WithContext(httptrace.WithClientTrace(outbound.Context(), &httptrace.ClientTrace{
+			WroteRequest: func(info httptrace.WroteRequestInfo) { delivered.Store(info.Err == nil) },
+		}))
 		resp, err := clusterForwardClient.Do(outbound)
 		if err != nil {
+			if delivered.Load() && r.Context().Err() == nil {
+				// The owner has the whole request and may already have accepted
+				// the job. Failing over would let a second node run it too, so
+				// hand the decision back to the caller: a retry with the same
+				// idempotent_key reaches the same owner and is deduplicated there.
+				w.Header().Set("Retry-After", "1")
+				jsonErrorFields(w, "cluster owner did not answer in time; the job may have been accepted there. Retry with the same idempotent_key", http.StatusGatewayTimeout, map[string]any{
+					"owner_id": owner.ID,
+				})
+				return true
+			}
 			s.aquifer.clusterRouter.MarkUnavailable(key, owner.ID)
 			continue
 		}
