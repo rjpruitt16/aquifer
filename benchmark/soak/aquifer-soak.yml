@@ -1,0 +1,6 @@
+# Used only by the soak test (benchmark/soak). Default pacing (2 rps / 1
+# concurrent) would cap dispatch far below the offered load, so the soak
+# would measure the rate limit instead of Aquifer.
+defaults:
+  rps: 5000
+  max_concurrent: 512

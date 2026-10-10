@@ -1,0 +1,26 @@
+# Soak driver: load generator, misbehaving upstream and webhook receiver,
+# job ledger and observer. Only the read-only status pages (8081) are public.
+app = "aquifer-soak-driver"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile.driver"
+
+[http_service]
+  internal_port = 8081
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = false
+  min_machines_running = 1
+
+[[mounts]]
+  source = "soak_driver_data"
+  destination = "/data"
+  initial_size = "3gb"
+
+[[restart]]
+  policy = "always"
+
+[[vm]]
+  size = "performance-2x"
+  memory = "4gb"
