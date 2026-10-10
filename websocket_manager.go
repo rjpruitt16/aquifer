@@ -90,7 +90,7 @@ func NewWebSocketManagerFromConfig(cfg WebSocketConfig) (*WebSocketManager, erro
 	if !cfg.Enabled {
 		return nil, nil
 	}
-	store, err := NewRedisWebSocketStreamStore(cfg.RedisURL, cfg.StreamPrefix, cfg.StreamMaxEvents, cfg.StreamTTL, cfg.Scheduler.MaxClients)
+	store, err := NewRedisWebSocketStreamStore(cfg.RedisURL, cfg.StreamPrefix, cfg.StreamMaxEvents, cfg.StreamTTL, cfg.ReaderShards)
 	if err != nil {
 		return nil, err
 	}
@@ -426,18 +426,31 @@ func (s *webSocketSession) deliverStream() error {
 		return err
 	}
 
+	// Follow before the catch-up read, so an entry recorded between that read
+	// and the wait below still signals the follow.
+	follow, err := s.manager.store.Follow(s.ctx, s.sessionID, s.cursor)
+	if err != nil {
+		return err
+	}
+	defer follow.Close()
 	for {
-		events, err := s.manager.store.ReadAfter(s.ctx, s.sessionID, s.cursor, s.manager.cfg.ReadBatch, s.manager.cfg.ReadBlock)
-		if err != nil {
-			return err
+		for {
+			events, err := s.manager.store.ReadAfter(s.ctx, s.sessionID, s.cursor, s.manager.cfg.ReadBatch, -1)
+			if err != nil {
+				return err
+			}
+			if err := s.deliverEvents(events); err != nil {
+				return err
+			}
+			if int64(len(events)) < s.manager.cfg.ReadBatch {
+				break
+			}
 		}
-		if err := s.deliverEvents(events); err != nil {
-			return err
-		}
+		follow.Advance(s.cursor)
 		select {
+		case <-follow.C():
 		case <-s.ctx.Done():
 			return s.ctx.Err()
-		default:
 		}
 	}
 }

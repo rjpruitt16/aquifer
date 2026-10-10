@@ -278,7 +278,9 @@ Two clients may temporarily attach to the same `session_id` during an applicatio
 
 ### Capacity
 
-Each live session uses three file descriptors on the Aquifer host: the client socket, the backend socket, and a Valkey connection for its blocking stream read. Size the process's open-file limit (`ulimit -n`) for about 3× `AQUIFER_WS_MAX_CLIENT_CONNECTIONS` plus headroom. Many container platforms default to 10,240, which tops out around 3,000 sessions. Valkey's own `maxclients` (10,000 by default) also needs room for one connection per live session across every Aquifer instance sharing it.
+Each live session uses two file descriptors on the Aquifer host: the client socket and the backend socket. Size the process's open-file limit (`ulimit -n`) for about 2× `AQUIFER_WS_MAX_CLIENT_CONNECTIONS` plus headroom. Many container platforms default to 10,240, which tops out around 5,000 sessions.
+
+Sessions don't hold Valkey connections of their own. Every recorded backend event is also published on the session's notify channel, and each Aquifer instance follows its live sessions through `AQUIFER_WS_READER_SHARDS` shared pub/sub connections (default 8). A session reads its stream only when notified, so an idle session costs Aquifer and Valkey nothing. Correctness doesn't depend on notifications arriving: whenever a subscription is confirmed (including after a reconnect), the session re-reads from its own cursor.
 
 Connection ceilings are local to one Aquifer process. `AQUIFER_WS_MAX_CLIENT_CONNECTIONS=1000` means that instance accepts at most 1,000 clients; it is not a fleet-wide semaphore. Ten identical instances can therefore admit up to 10,000 clients when the gateway distributes them.
 
@@ -301,7 +303,8 @@ Opening starts at `AQUIFER_WS_SLOW_START_RPS` for each Aquifer process. Every su
 | `AQUIFER_WS_STREAM_MAX_EVENTS` | `10000` | Approximate retained entries per session |
 | `AQUIFER_WS_STREAM_TTL_SECONDS` | `86400` | Sliding expiration after the last recorded session entry |
 | `AQUIFER_WS_READ_BATCH` | `100` | Maximum events fetched per stream read |
-| `AQUIFER_WS_READ_BLOCK_MS` | `1000` | Live stream blocking-read interval |
+| `AQUIFER_WS_READ_BLOCK_MS` | `1000` | Blocking-read interval for direct `ReadAfter` callers; live sessions are notified through pub/sub instead |
+| `AQUIFER_WS_READER_SHARDS` | `8` | Shared Valkey pub/sub connections per instance that tell live sessions when their stream has new events |
 | `AQUIFER_WS_MAX_MESSAGE_BYTES` | `1048576` | Maximum client or backend message size |
 | `AQUIFER_WS_HANDSHAKE_TIMEOUT_SECONDS` | `10` | Valkey check and upstream handshake timeout |
 | `AQUIFER_WS_RECONNECT_MAX_SECONDS` | `30` | Maximum reconnect backoff before jitter |

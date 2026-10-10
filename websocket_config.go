@@ -11,6 +11,7 @@ const (
 	defaultWebSocketMaxClients       = 1000
 	defaultWebSocketMaxUpstreams     = 1000
 	defaultWebSocketMaxWaiting       = 1000
+	defaultWebSocketReaderShards     = 8
 	defaultWebSocketConnectRPS       = 20.0
 	defaultWebSocketSlowStartRPS     = 1.0
 	defaultWebSocketMaxMessageBytes  = 1024 * 1024
@@ -28,6 +29,7 @@ type WebSocketConfig struct {
 	StreamTTL        time.Duration
 	ReadBatch        int64
 	ReadBlock        time.Duration
+	ReaderShards     int
 	MaxMessageBytes  int64
 	HandshakeTimeout time.Duration
 	ReconnectMax     time.Duration
@@ -43,6 +45,7 @@ func LoadWebSocketConfig() WebSocketConfig {
 		StreamTTL:        time.Duration(positiveEnvInt64("AQUIFER_WS_STREAM_TTL_SECONDS", int64(defaultWebSocketStreamTTL/time.Second))) * time.Second,
 		ReadBatch:        positiveEnvInt64("AQUIFER_WS_READ_BATCH", defaultWebSocketReadBatch),
 		ReadBlock:        time.Duration(positiveEnvInt64("AQUIFER_WS_READ_BLOCK_MS", defaultWebSocketReadBlockMS)) * time.Millisecond,
+		ReaderShards:     int(positiveEnvInt64("AQUIFER_WS_READER_SHARDS", defaultWebSocketReaderShards)),
 		MaxMessageBytes:  positiveEnvInt64("AQUIFER_WS_MAX_MESSAGE_BYTES", defaultWebSocketMaxMessageBytes),
 		HandshakeTimeout: time.Duration(positiveEnvInt64("AQUIFER_WS_HANDSHAKE_TIMEOUT_SECONDS", int64(defaultWebSocketHandshakeTimeout/time.Second))) * time.Second,
 		ReconnectMax:     time.Duration(positiveEnvInt64("AQUIFER_WS_RECONNECT_MAX_SECONDS", int64(defaultWebSocketReconnectMax/time.Second))) * time.Second,

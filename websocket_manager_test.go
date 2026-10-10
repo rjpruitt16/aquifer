@@ -104,6 +104,42 @@ func (s *memoryWebSocketStreamStore) ReadAfter(ctx context.Context, sessionID, a
 	}
 }
 
+// Follow signals on every append to the session's stream, with no cursor
+// tracking: the session re-reads from its own cursor, so extra signals are
+// harmless and the fake stays simple.
+func (s *memoryWebSocketStreamStore) Follow(ctx context.Context, sessionID, _ string) (WebSocketFollow, error) {
+	f := &memoryFollow{c: make(chan struct{}, 1), done: make(chan struct{})}
+	go func() {
+		for {
+			s.mu.Lock()
+			notify := s.notify
+			s.mu.Unlock()
+			select {
+			case <-notify:
+				select {
+				case f.c <- struct{}{}:
+				default:
+				}
+			case <-f.done:
+				return
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return f, nil
+}
+
+type memoryFollow struct {
+	c    chan struct{}
+	done chan struct{}
+	once sync.Once
+}
+
+func (f *memoryFollow) C() <-chan struct{} { return f.c }
+func (f *memoryFollow) Advance(string)     {}
+func (f *memoryFollow) Close()             { f.once.Do(func() { close(f.done) }) }
+
 func (s *memoryWebSocketStreamStore) CheckCursor(_ context.Context, sessionID, after string) error {
 	if after == "" || after == "0-0" {
 		return nil

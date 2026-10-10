@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"runtime"
-	"sync"
 	"testing"
 	"time"
 
@@ -78,42 +77,79 @@ func TestDecodeWebSocketStreamEvent(t *testing.T) {
 	}
 }
 
-// With more live sessions than the default pool holds (10 per CPU), every
-// append used to wait for some session's blocking read to time out. Live
-// reads now have their own pool, so an append stays fast however many
-// sessions are blocked reading.
-func TestAppendIsNotStarvedByBlockingReads(t *testing.T) {
+// Hundreds of live sessions share a few pub/sub connections: appends stay
+// fast, every follower of a stream that gets an entry is signaled, and
+// followers of other streams are not.
+func TestSharedFollowerSignalsManySessions(t *testing.T) {
 	rawURL := os.Getenv("AQUIFER_TEST_VALKEY_URL")
 	if rawURL == "" {
 		t.Skip("set AQUIFER_TEST_VALKEY_URL to run the real Valkey integration test")
 	}
-	sessions := 10*runtime.GOMAXPROCS(0) + 20 // more than the default pool
-	prefix := fmt.Sprintf("aqueduct:test:starve:%d:", time.Now().UnixNano())
-	store, err := NewRedisWebSocketStreamStore(rawURL, prefix, 100, time.Minute, sessions)
+	sessions := 10*runtime.GOMAXPROCS(0) + 500
+	prefix := fmt.Sprintf("aqueduct:test:follow:%d:", time.Now().UnixNano())
+	store, err := NewRedisWebSocketStreamStore(rawURL, prefix, 100, time.Minute, 4)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer store.Close()
+	ctx := context.Background()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	var wg sync.WaitGroup
-	for i := 0; i < sessions; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			store.ReadAfter(ctx, fmt.Sprintf("idle-%d", i), "0-0", 10, 3*time.Second)
-		}(i)
+	follows := make([]WebSocketFollow, sessions)
+	for i := range follows {
+		f, err := store.Follow(ctx, fmt.Sprintf("s-%d", i), "0-0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		follows[i] = f
 	}
-	time.Sleep(300 * time.Millisecond) // let every read block
+	// Each follower is signaled once when its subscription is confirmed (its
+	// session re-reads then, covering anything recorded before). Wait for
+	// those, then clear them so the checks below see only new signals.
+	for i, f := range follows {
+		select {
+		case <-f.C():
+		case <-time.After(2 * time.Second):
+			t.Fatalf("follower %d never saw its subscription confirmed", i)
+		}
+	}
 
 	started := time.Now()
-	if _, err := store.Append(ctx, "busy", "client", WebSocketEnvelope{Type: "command", MessageID: "m1"}); err != nil {
+	if _, err := store.Append(ctx, "s-7", "backend", WebSocketEnvelope{Type: "event", MessageID: "e1"}); err != nil {
 		t.Fatal(err)
 	}
-	if took := time.Since(started); took > 500*time.Millisecond {
-		t.Fatalf("append took %s while %d sessions were blocked reading; it waited for a pooled connection", took, sessions)
+	if took := time.Since(started); took > 200*time.Millisecond {
+		t.Fatalf("append took %s with %d sessions following", took, sessions)
 	}
-	cancel()
-	wg.Wait()
+	select {
+	case <-follows[7].C():
+	case <-time.After(2 * time.Second):
+		t.Fatal("follower of s-7 was not signaled")
+	}
+	select {
+	case <-follows[8].C():
+		t.Fatal("a follower of a different stream was signaled")
+	default:
+	}
+
+	// A follow created after the entry exists, with an older cursor, must be
+	// signaled too (a client reconnecting from its last cursor).
+	late, err := store.Follow(ctx, "s-7", "0-0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer late.Close()
+	select {
+	case <-late.C(): // joining an existing subscription signals at once
+	case <-time.After(2 * time.Second):
+		t.Fatal("a follower joining an existing subscription was not signaled")
+	}
+	if _, err := store.Append(ctx, "s-7", "backend", WebSocketEnvelope{Type: "event", MessageID: "e2"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-late.C():
+	case <-time.After(2 * time.Second):
+		t.Fatal("a newly added follower was not signaled")
+	}
 }
