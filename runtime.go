@@ -143,7 +143,7 @@ func NewRuntime(opts RuntimeOptions) *Runtime {
 		streamStore := opts.WebSocketStore
 		if streamStore == nil {
 			var err error
-			streamStore, err = NewRedisWebSocketStreamStore(webSocketCfg.RedisURL, webSocketCfg.StreamPrefix, webSocketCfg.StreamMaxEvents, webSocketCfg.StreamTTL)
+			streamStore, err = NewRedisWebSocketStreamStore(webSocketCfg.RedisURL, webSocketCfg.StreamPrefix, webSocketCfg.StreamMaxEvents, webSocketCfg.StreamTTL, webSocketCfg.Scheduler.MaxClients)
 			if err != nil {
 				log.Printf("websocket: disabled: %v", err)
 			}

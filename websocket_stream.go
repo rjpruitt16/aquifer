@@ -35,13 +35,21 @@ type WebSocketStreamStore interface {
 }
 
 type RedisWebSocketStreamStore struct {
-	client    *redis.Client
+	client    *redis.Client // appends, ranges and replay reads
+	readers   *redis.Client // live sessions' blocking reads
 	prefix    string
 	maxEvents int64
 	ttl       time.Duration
 }
 
-func NewRedisWebSocketStreamStore(rawURL, prefix string, maxEvents int64, ttl time.Duration) (*RedisWebSocketStreamStore, error) {
+// NewRedisWebSocketStreamStore connects the transcript store. liveReaders is
+// how many sessions can follow their streams at once (the client-connection
+// ceiling): each live session holds one connection in a blocking XREAD, so
+// those reads get their own pool of that size. Sharing one default-sized
+// pool (10 per CPU) with appends made every append wait for some session's
+// blocking read to time out once sessions outnumbered the pool: command
+// confirmations took the full read-block interval (1s) with 200 sessions.
+func NewRedisWebSocketStreamStore(rawURL, prefix string, maxEvents int64, ttl time.Duration, liveReaders int) (*RedisWebSocketStreamStore, error) {
 	if rawURL == "" {
 		return nil, errors.New("AQUIFER_VALKEY_URL is required when WebSockets are enabled")
 	}
@@ -62,8 +70,11 @@ func NewRedisWebSocketStreamStore(rawURL, prefix string, maxEvents int64, ttl ti
 	if ttl <= 0 {
 		ttl = defaultWebSocketStreamTTL
 	}
+	readerOpts := *opts
+	readerOpts.PoolSize = max(liveReaders, 1) + 8
 	return &RedisWebSocketStreamStore{
 		client:    redis.NewClient(opts),
+		readers:   redis.NewClient(&readerOpts),
 		prefix:    prefix,
 		maxEvents: maxEvents,
 		ttl:       ttl,
@@ -133,7 +144,11 @@ func (s *RedisWebSocketStreamStore) ReadAfter(ctx context.Context, sessionID, af
 	if after == "" {
 		after = "0-0"
 	}
-	streams, err := s.client.XRead(ctx, &redis.XReadArgs{
+	client := s.client
+	if block >= 0 {
+		client = s.readers // blocking reads must not hold connections appends need
+	}
+	streams, err := client.XRead(ctx, &redis.XReadArgs{
 		Streams: []string{s.streamKey(sessionID), after},
 		Count:   count,
 		Block:   block,
@@ -184,7 +199,7 @@ func (s *RedisWebSocketStreamStore) Ping(ctx context.Context) error {
 }
 
 func (s *RedisWebSocketStreamStore) Close() error {
-	return s.client.Close()
+	return errors.Join(s.client.Close(), s.readers.Close())
 }
 
 func (s *RedisWebSocketStreamStore) streamKey(sessionID string) string {
