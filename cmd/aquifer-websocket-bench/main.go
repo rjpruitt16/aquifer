@@ -19,8 +19,10 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -99,6 +101,7 @@ func main() {
 	flag.Float64Var(&cfg.rate, "rate", 0, "commands per second each connection sends while held (0: hold idle)")
 	flag.StringVar(&cfg.statsURL, "stats", "", "optional JSON stats URL for the target (e.g. the soak supervisor's /stats), sampled before, once connected, and after")
 	flag.Parse()
+	raiseFileLimit()
 
 	if *backend != "" {
 		serveBackend(*backend)
@@ -374,6 +377,25 @@ func serveBackend(addr string) {
 	})
 	log.Printf("benchmark backend listening on %s", addr)
 	log.Fatal(http.ListenAndServe(addr, mux))
+}
+
+// raiseFileLimit lifts the open-file limit as far as the process may: each
+// held session is one descriptor here, and containers often cap at 10,240.
+func raiseFileLimit() {
+	var rl syscall.Rlimit
+	if syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rl) != nil {
+		return
+	}
+	want := uint64(1 << 20)
+	if raw, err := os.ReadFile("/proc/sys/fs/nr_open"); err == nil {
+		if n, err := strconv.ParseUint(strings.TrimSpace(string(raw)), 10, 64); err == nil {
+			want = n
+		}
+	}
+	if syscall.Setrlimit(syscall.RLIMIT_NOFILE, &syscall.Rlimit{Cur: want, Max: want}) != nil {
+		rl.Cur = rl.Max
+		syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rl)
+	}
 }
 
 func fetchStats(statsURL string) map[string]any {
