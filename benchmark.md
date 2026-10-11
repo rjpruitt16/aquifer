@@ -305,6 +305,57 @@ loadgen -target http://<aquifer>.internal:8080 -self http://<loadgen>.internal:8
 
 ---
 
+## 13. WebSocket sessions per machine (Fly.io, 2026-10-10)
+
+How many `aqueduct.v1` WebSocket sessions one machine holds, and how many messages it moves through them. Measured on Fly in `iad`:
+- **Target:** one performance-1x machine (1 CPU, 2 GB).
+- **Valkey:** on its own performance-1x machine.
+- **Backend:** a no-limits backend that acks each command and sends one event (`aquifer-websocket-bench -backend`).
+- **Client:** a performance-2x machine running [`cmd/aquifer-websocket-bench`](cmd/aquifer-websocket-bench/main.go).
+
+Run with the Valkey reader-pool fix (#33). Lab configs are in [`benchmark/websocket`](benchmark/websocket/README.md). EZThrottle Local was measured on the same lab for comparison.
+
+**Sessions held (idle):**
+
+| Sessions | Aquifer connected | Aquifer memory | Aquifer connect p50 / p99 | EZThrottle Local connected | EZThrottle Local memory | EZThrottle Local connect p50 / p99 |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1,000 | 1,000 | 110 MB | 6 / 35 ms | 1,000 | 244 MB | 260 / 693 ms |
+| 5,000 | 5,000 | 493 MB | 7 / 351 ms | 5,000 | 498 MB | 750 ms / 6.2 s |
+| 10,000 | 10,000 | 991 MB | 13 ms / 1.0 s | 10,000 | 818 MB | 1.9 / 8.9 s |
+| 20,000 | ran out of memory near 15,000 | | | 20,000 | 1.16 GB | 5.2 / 44 s |
+
+- **Aquifer:** about 90 KB per session, mostly six goroutines and socket buffers. Once sessions close, live heap returns to baseline: after a forced GC it was 30 MB live with no sessions.
+- **EZThrottle Local:** about 50 KB per session, but every new session goes through one queue process, which makes opening slow at scale.
+
+**Messages:** each command is recorded durably, forwarded, acked, and answered with one event, which is also recorded before delivery.
+
+| Load | Aquifer events/s | Aquifer confirm p50 | EZThrottle Local events/s | EZThrottle Local confirm p50 |
+|---|---:|---:|---:|---:|
+| 100 sessions × 20/s | 2,000 (round trip p50 1.8 s) | 28 ms | 1,720 | 3.4 s |
+| 500 sessions × 10/s | ~1,300 | 9.9 s | 920–1,660 | 7.9–11.8 s |
+| 5,000 sessions × 1/s | ~1,000 | 11.4 s | 840 | 13.5 s |
+
+One 1-CPU Aquifer moves about **1,500–2,000 WebSocket round trips/s**. Past that, latency grows but the process stays up.
+
+**What limits it.**
+- **Aquifer is CPU-bound**, at 88% of its core:
+  - 51% of CPU goes to each session's own blocking-read loop on Valkey;
+  - Valkey sees about 17 operations per round trip, at about 50% of its core.
+
+  A shared multi-stream reader and batched writes are the next step. The issue is filed separately.
+- **EZThrottle Local has no backpressure.** Memory grows by about 5–10 MB/s under sustained overload, and in one run the process was killed out of memory.
+
+**Configuration that matters.**
+- **File descriptors:** each Aquifer session uses three (client, backend, Valkey reader). Container platforms often default to 10,240 open files, which caps an instance near 3,000 sessions; raise `ulimit -n`.
+- **Valkey `maxclients`:** needs one connection per live session, across every Aquifer sharing it.
+- **Session ceiling:** `AQUIFER_WS_MAX_CLIENT_CONNECTIONS` defaults to 1,000, which is safe. Raise it no higher than memory allows (about 90 KB per session). Nothing yet rejects sessions on memory pressure.
+
+**Bugs this benchmark found:**
+- **Aquifer #33:** sessions starved the Valkey connection pool past ~10 per CPU. Command confirmations took 3.1 s at p50 on one CPU with 200 sessions; 0.34 ms after the fix.
+- **EZThrottle Local #23:** WebSocket upstreams on IPv6-only hosts, including Fly `.internal`, never connected.
+
+---
+
 ## Reproducing these results
 
 ```bash

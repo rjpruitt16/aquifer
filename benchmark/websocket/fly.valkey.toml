@@ -1,0 +1,12 @@
+app = "ws-lab-valkey"
+primary_region = "iad"
+
+[build]
+  image = "valkey/valkey:8"
+
+[processes]
+  app = "sh -c 'ulimit -n 1048576 && exec docker-entrypoint.sh valkey-server --port 6379 --bind :: --protected-mode no --maxclients 60000'"
+
+[[vm]]
+  size = "performance-1x"
+  memory = "2gb"

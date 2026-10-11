@@ -1,0 +1,12 @@
+app = "ws-lab-backend"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile.bench"
+
+[processes]
+  app = "-backend :6060"
+
+[[vm]]
+  size = "performance-1x"
+  memory = "2gb"

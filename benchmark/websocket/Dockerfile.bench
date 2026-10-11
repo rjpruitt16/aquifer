@@ -1,0 +1,12 @@
+# The WebSocket bench binary, used both as the no-limits backend and as the
+# client. Build from the repository root.
+FROM golang:1.25-alpine AS builder
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN go build -o /bench ./cmd/aquifer-websocket-bench
+
+FROM alpine:3.22
+COPY --from=builder /bench /bench
+ENTRYPOINT ["/bench"]
