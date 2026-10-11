@@ -33,6 +33,7 @@ archives:
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
     files:
       - LICENSE
+      - NOTICE
       - README.md
 
 checksum:
