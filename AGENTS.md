@@ -30,6 +30,13 @@ Shared contracts that must stay identical across Aquifer and Spillway: `X-Aquedu
 - `l8.go`, `l8_encrypt.go`, `l8_schema.go`: L8 handshake, signing, payload encryption, request-schema validation.
 - `API.md` is the endpoint and env-var reference; `README.md` is the overview.
 
+## Cross-repo changes and CI
+
+- Contract-test CI picks branches by name. In aquifer and spillway it checks out aqueduct-runner at the branch with the same name as the PR's branch when one exists, otherwise `main`. aqueduct-runner's own CI does the same for each backend. Pushes to `main` always use `main`. The `Pick the ... branch` step's log says which branch was used.
+- For a change that spans repos (for example a behavior change in Aquifer and Spillway plus its contract in aqueduct-runner), use the same branch name in every repo involved. Each PR's CI then tests against the others' unmerged code.
+- Merge order: merge whatever the other side's CI calls first. A runner contract that needs new backend behavior merges after the backends; a backend workflow step that calls a new runner function merges after the runner. Branches are deleted on merge, so a PR that merges second falls back to the other repo's `main`, which by then has the change.
+- Before merging, confirm every CI job is green (`gh pr checks`), contract tests included. Local `go test` / `mix test` passing is not enough.
+
 ## Conventions
 
 - New behavior is opt-in: gate it behind an env flag that defaults off. Background loops and processes should not start at all when their flag is off.
