@@ -235,9 +235,8 @@ func idemKey(hash string) []byte { return []byte("idem:" + hash) }
 
 // expKey indexes a job by when it expires, so cleanup reads only the jobs
 // that are due instead of decoding every retained one. Fixed-width hex keeps
-// the keys in time order. A status change that extends a job's expiry adds
-// a new key and leaves the old one; cleanup drops stale keys when it finds
-// the record still alive (or already gone).
+// the keys in time order. A status change replaces the job's key; cleanup
+// still tolerates a key whose record is alive (a later expiry) or gone.
 func expKey(expiresAt int64, id string) []byte {
 	return []byte(fmt.Sprintf("exp:%016x:%s", expiresAt, id))
 }
@@ -326,8 +325,12 @@ func (s *PebbleStore) putRecord(jobID string, rec *pebbleRecord) {
 	}
 }
 
-// putRecordWithExpiry writes the record and its expiry index key together.
-func (s *PebbleStore) putRecordWithExpiry(jobID string, rec *pebbleRecord) {
+// putRecordWithExpiry writes the record and its expiry index key together,
+// and removes the key for its previous expiry. Leaving that key behind cost
+// one 24-hour index entry per job (every job's creation key outlived its
+// 30-minute completed retention), which on a busy instance was most of the
+// database.
+func (s *PebbleStore) putRecordWithExpiry(jobID string, rec *pebbleRecord, previousExpiresAt int64) {
 	data, err := json.Marshal(rec)
 	if err != nil {
 		log.Printf("pebble: marshal job %s: %v", jobID, err)
@@ -336,6 +339,9 @@ func (s *PebbleStore) putRecordWithExpiry(jobID string, rec *pebbleRecord) {
 	batch := s.db.NewBatch()
 	defer batch.Close()
 	batch.Set(jobKey(jobID), data, nil)
+	if previousExpiresAt != rec.ExpiresAt {
+		batch.Delete(expKey(previousExpiresAt, jobID), nil)
+	}
 	batch.Set(expKey(rec.ExpiresAt, jobID), nil, nil)
 	if err := batch.Commit(s.syncOpts); err != nil {
 		log.Printf("pebble: set job %s: %v", jobID, err)
@@ -420,8 +426,9 @@ func (s *PebbleStore) UpdateStatus(jobID string, status Status) {
 	}
 	s.moveStatus(rec.Job.Status, status)
 	rec.Job.Status = status
+	previousExpiresAt := rec.ExpiresAt
 	rec.ExpiresAt = time.Now().Add(ttlForStatus(status)).UnixMilli()
-	s.putRecordWithExpiry(jobID, rec)
+	s.putRecordWithExpiry(jobID, rec, previousExpiresAt)
 	if (status == StatusCompleted || status == StatusFailed) && !s.skipDrainEvents.Load() {
 		s.recordDrainEvent(rec, status)
 	}
@@ -701,8 +708,6 @@ func (s *PebbleStore) deleteExpired(now int64) {
 	}
 	iter.Close()
 
-	batch := s.db.NewBatch()
-	defer batch.Close()
 	for _, k := range dueKeys {
 		// "exp:" + 16 hex digits + ":" precede the job id.
 		if len(k) > 21 {
@@ -711,9 +716,17 @@ func (s *PebbleStore) deleteExpired(now int64) {
 				s.DeleteJob(id)
 			}
 		}
-		batch.Delete(k, nil)
 	}
-	if err := batch.Commit(pebble.NoSync); err != nil {
+	if len(dueKeys) == 0 {
+		return
+	}
+	// One range deletion instead of a tombstone per key. Index keys are in
+	// time order, so everything due is one contiguous range, and no writer
+	// can add a key inside it (new expiries are always in the future). Point
+	// tombstones on this append-only range piled up in L0 without being
+	// compacted away; a range tombstone lets Pebble drop whole files it
+	// covers without rewriting them.
+	if err := s.db.DeleteRange([]byte("exp:"), expKeyBound(now), pebble.NoSync); err != nil {
 		log.Printf("pebble: delete expiry index keys: %v", err)
 	}
 }

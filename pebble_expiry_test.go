@@ -84,3 +84,42 @@ func TestPebbleExpiryIndexBackfill(t *testing.T) {
 		}
 	}
 }
+
+func countExpiryKeys(t *testing.T, store *PebbleStore) int {
+	t.Helper()
+	iter, err := store.db.NewIter(&pebble.IterOptions{LowerBound: []byte("exp:"), UpperBound: []byte("exp;")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer iter.Close()
+	n := 0
+	for iter.First(); iter.Valid(); iter.Next() {
+		n++
+	}
+	return n
+}
+
+// Each job keeps one index key. The soak test found the key written at
+// creation (24h) outliving the completed job (30m): one leftover entry per
+// job, which grew the database by hundreds of MB an hour.
+func TestPebbleStatusChangeReplacesExpiryKey(t *testing.T) {
+	store := NewPebbleStore(filepath.Join(t.TempDir(), "pebble"))
+	defer store.Close()
+
+	const n = 50
+	for i := 0; i < n; i++ {
+		job := expiryTestJob(store, fmt.Sprintf("job-%d", i))
+		store.UpdateStatus(job.ID, StatusCompleted)
+	}
+	if got := countExpiryKeys(t, store); got != n {
+		t.Fatalf("expected one expiry key per job (%d), got %d", n, got)
+	}
+
+	store.deleteExpired(time.Now().Add(31 * time.Minute).UnixMilli())
+	if got := countExpiryKeys(t, store); got != 0 {
+		t.Fatalf("expected no expiry keys after completed retention passed, got %d", got)
+	}
+	if counts := store.Counts(); counts.QueueDepth != 0 {
+		t.Fatalf("expected empty store, got %+v", counts)
+	}
+}
