@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright 2026 Rahmi Pruitt
+# SPDX-License-Identifier: Apache-2.0
+
 """
 Upstream target + webhook receiver for Aquifer tests.
 Returns X-Aqueduct-* headers to drive faster pacing.

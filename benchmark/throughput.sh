@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Rahmi Pruitt
+# SPDX-License-Identifier: Apache-2.0
+
 # Sustained ingest throughput: how many POST /jobs/sec Aquifer accepts and
 # durably persists before latency degrades, with admission limits in effect
 # but not tripped (this is a baseline capacity number, not a stress test).

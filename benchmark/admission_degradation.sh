@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Rahmi Pruitt
+# SPDX-License-Identifier: Apache-2.0
+
 # The headline scenario: push sustained load past the configured memory
 # ceiling and confirm Aquifer sheds load with clean 429s instead of falling
 # over. Polls /health concurrently with the attack so the memory timeline

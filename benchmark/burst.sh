@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Rahmi Pruitt
+# SPDX-License-Identifier: Apache-2.0
+
 # Burst absorption: baseline traffic, then a 10x spike for 30s, then back to
 # baseline. This is "retry storm," simulated. Success looks like the burst
 # window absorbing into the queue (status codes stay healthy or shed

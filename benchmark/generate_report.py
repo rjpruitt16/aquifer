@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright 2026 Rahmi Pruitt
+# SPDX-License-Identifier: Apache-2.0
+
 """Render benchmark.md from raw output captured by the benchmark/*.sh scripts.
 
 Each --<scenario> flag points at a text file holding that scenario's stdout

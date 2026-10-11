@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Rahmi Pruitt
+# SPDX-License-Identifier: Apache-2.0
+
 # Tears down everything deploy.sh created. Always destroys, never leaves
 # apps merely scaled-to-zero -- these are ephemeral test apps in a
 # public-repo-adjacent org.

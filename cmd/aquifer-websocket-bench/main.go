@@ -1,3 +1,6 @@
+// Copyright 2026 Rahmi Pruitt
+// SPDX-License-Identifier: Apache-2.0
+
 // aquifer-websocket-bench measures how many aqueduct.v1 WebSocket sessions
 // one Aquifer (or Spillway) instance holds, and how fast it moves
 // messages through them. Two modes:

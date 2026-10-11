@@ -1,3 +1,6 @@
+# Copyright 2026 Rahmi Pruitt
+# SPDX-License-Identifier: Apache-2.0
+
 # Shared vars/functions for the region-redirect deploy/test/destroy scripts.
 # Sourced, not executed directly.
 

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright 2026 Rahmi Pruitt
+# SPDX-License-Identifier: Apache-2.0
+
 """Turn retry_tax_harness.py's raw JSONL logs into the actual report.
 
 Every number below is computed from the event log and the vLLM /metrics
