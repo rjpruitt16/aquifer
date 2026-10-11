@@ -50,7 +50,7 @@ func TestWebhookDeliveryJobsExcludedFromLedger(t *testing.T) {
 		t.Fatalf("unexpected duplicate on a freshly generated id")
 	}
 
-	registry.EnqueueWebhook("some-other-job", "user-1", webhook.URL, map[string]any{"status": "completed"})
+	registry.EnqueueWebhook("some-other-job", "user-1", webhook.URL, DefaultMaxRetries, map[string]any{"status": "completed"})
 
 	select {
 	case <-hits:
@@ -128,8 +128,8 @@ func TestWebhookDeliveryIsDeduped(t *testing.T) {
 
 	registry := testRegistry(t)
 
-	registry.EnqueueWebhook("job-1", "user-1", webhook.URL, map[string]any{"status": "completed"})
-	registry.EnqueueWebhook("job-1", "user-1", webhook.URL, map[string]any{"status": "completed"})
+	registry.EnqueueWebhook("job-1", "user-1", webhook.URL, DefaultMaxRetries, map[string]any{"status": "completed"})
+	registry.EnqueueWebhook("job-1", "user-1", webhook.URL, DefaultMaxRetries, map[string]any{"status": "completed"})
 
 	select {
 	case <-hits:
@@ -157,7 +157,7 @@ func TestWebhookDeliveryIsPacedByAccountQueue(t *testing.T) {
 	defer webhook.Close()
 
 	registry := testRegistry(t)
-	registry.EnqueueWebhook("job-1", "user-1", webhook.URL, map[string]any{"status": "completed"})
+	registry.EnqueueWebhook("job-1", "user-1", webhook.URL, DefaultMaxRetries, map[string]any{"status": "completed"})
 
 	key := domainKey(webhook.URL)
 	deadline := time.Now().Add(3 * time.Second)
@@ -235,7 +235,7 @@ func TestWebhookDeliveryIsL8Signed(t *testing.T) {
 	receiver, captured := testL8Receiver(t)
 	registry := testRegistry(t)
 
-	registry.EnqueueWebhook("job-1", "user-1", receiver.URL, map[string]any{"status": "completed"})
+	registry.EnqueueWebhook("job-1", "user-1", receiver.URL, DefaultMaxRetries, map[string]any{"status": "completed"})
 
 	var headers http.Header
 	select {

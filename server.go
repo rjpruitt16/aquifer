@@ -772,17 +772,23 @@ func writeSchemaMismatch(w http.ResponseWriter, err error) bool {
 }
 
 // applyMaxRetriesHeader lets X-Aqueduct-Max-Retries (or X-Aquifer-Max-Retries)
-// override the body's max_retries; -1 means retry until complete.
+// override the body's max_retries, and X-Aqueduct-Webhook-Max-Retries the
+// body's webhook_max_retries; -1 means retry until complete.
 func applyMaxRetriesHeader(header http.Header, req *JobRequest) error {
-	raw := pacingHeader(header, "Max-Retries")
-	if raw == "" {
-		return nil
+	if raw := pacingHeader(header, "Max-Retries"); raw != "" {
+		n, err := strconv.Atoi(strings.TrimSpace(raw))
+		if err != nil {
+			return errors.New("X-Aqueduct-Max-Retries must be an integer: -1 (retry until complete) or 0-100")
+		}
+		req.MaxRetries = &n
 	}
-	n, err := strconv.Atoi(strings.TrimSpace(raw))
-	if err != nil {
-		return errors.New("X-Aqueduct-Max-Retries must be an integer: -1 (retry until complete) or 0-100")
+	if raw := pacingHeader(header, "Webhook-Max-Retries"); raw != "" {
+		n, err := strconv.Atoi(strings.TrimSpace(raw))
+		if err != nil {
+			return errors.New("X-Aqueduct-Webhook-Max-Retries must be an integer: -1 (retry until delivered) or 0-100")
+		}
+		req.WebhookMaxRetries = &n
 	}
-	req.MaxRetries = &n
 	return nil
 }
 

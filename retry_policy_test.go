@@ -221,7 +221,7 @@ func TestRetryHalvesQueuePaceOnFailure(t *testing.T) {
 	t.Cleanup(l8.Close)
 
 	q := NewAccountQueue("pace", up.URL, 8, 1, nil, store, broker, l8, NoopMetricsAdapter{},
-		func(string, string, string, map[string]any) {}, nil, nil, nil, nil, func(string) {}, false, nil, nil)
+		func(string, string, string, int, map[string]any) {}, nil, nil, nil, nil, func(string) {}, false, nil, nil)
 	t.Cleanup(q.Stop)
 
 	req := retryJob("pace", up.URL, "https://example.com/hook", nil)

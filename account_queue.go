@@ -75,7 +75,7 @@ type jobDoneMsg struct {
 // closure (matching the existing onIdle pattern) rather than a *Registry
 // back-reference, so AccountQueue/execute only get the one capability they
 // actually need.
-type webhookEnqueuer func(originalJobID, userID, webhookURL string, payload map[string]any)
+type webhookEnqueuer func(originalJobID, userID, webhookURL string, maxRetries int, payload map[string]any)
 
 type AccountQueue struct {
 	key                string
@@ -396,7 +396,7 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 						q.store.UpdateStatus(j.ID, StatusFailed)
 						q.metrics.JobFailed(j.UserID, q.upstream, "internal panic")
 						if !j.isWebhookDeliveryJob() {
-							q.enqueueWebhook(j.ID, j.UserID, j.WebhookURL, map[string]any{
+							q.enqueueWebhook(j.ID, j.UserID, j.WebhookURL, j.webhookMaxRetries(), map[string]any{
 								"job_id": j.ID,
 								"status": "failed",
 								"reason": "internal panic",
@@ -443,13 +443,23 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 			}
 			prevRPS := rps
 			switch {
-			case msg.rps != nil:
-				rps = math.Max(math.Min(*msg.rps, configuredRPS), minRPS)
 			case msg.failed:
 				// Each retryable failure halves this queue's pace; successes
 				// creep it back up below, so a struggling upstream sees fewer
-				// attempts per second from everyone sharing this queue.
-				rps = math.Max(rps/2, minRPS)
+				// attempts per second from everyone sharing this queue. A rate
+				// advertised on the failed response can lower the pace further
+				// but never raise it: a proxy or framework that stamps a fixed
+				// X-Aqueduct-Rps on every response, 503s included, would
+				// otherwise keep the queue at full speed against a receiver
+				// that is down, and every job would use up its retries within
+				// seconds.
+				next := rps / 2
+				if msg.rps != nil {
+					next = math.Min(next, *msg.rps)
+				}
+				rps = math.Max(next, minRPS)
+			case msg.rps != nil:
+				rps = math.Max(math.Min(*msg.rps, configuredRPS), minRPS)
 			case rps < configuredRPS:
 				rps = math.Min(rps*1.05, configuredRPS)
 			}
@@ -653,7 +663,7 @@ func execute(ctx context.Context, job *Job, dispatchURL, upstream string, store 
 			if resultKey != "" {
 				payload["result_key"] = resultKey
 			}
-			enqueueWebhook(job.ID, job.UserID, job.WebhookURL, payload)
+			enqueueWebhook(job.ID, job.UserID, job.WebhookURL, job.webhookMaxRetries(), payload)
 		}
 		return pacingSignals(resp.Header)
 	}
@@ -727,7 +737,7 @@ func failJob(job *Job, upstream, reason string, responseStatus int, body []byte,
 		if resultKey != "" {
 			payload["result_key"] = resultKey
 		}
-		enqueueWebhook(job.ID, job.UserID, job.WebhookURL, payload)
+		enqueueWebhook(job.ID, job.UserID, job.WebhookURL, job.webhookMaxRetries(), payload)
 	}
 }
 
@@ -809,7 +819,7 @@ func failExpiredJob(job *Job, upstream string, store JobStore, broker *Broker, m
 		if resultKey != "" {
 			payload["result_key"] = resultKey
 		}
-		go enqueueWebhook(job.ID, job.UserID, job.WebhookURL, payload)
+		go enqueueWebhook(job.ID, job.UserID, job.WebhookURL, job.webhookMaxRetries(), payload)
 	}
 }
 

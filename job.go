@@ -41,6 +41,10 @@ type Job struct {
 	// failed attempts already retried.
 	MaxRetries int `json:"max_retries"`
 	Attempts   int `json:"attempts,omitempty"`
+	// WebhookMaxRetries is the caller's webhook_max_retries, handed to the
+	// webhook delivery job when this one finishes. Nil means the caller didn't
+	// set one; jobs stored before this field existed also read back nil.
+	WebhookMaxRetries *int `json:"webhook_max_retries,omitempty"`
 	// DedupHash caches dedupHash's result. SQLite never stores the plaintext
 	// idempotent key, so a job reloaded from it can only recover the hash
 	// from the idempotent_key_hash column, not recompute it.
@@ -101,6 +105,15 @@ type JobRequest struct {
 	// X-Aqueduct-Max-Retries request header overrides this field.
 	MaxRetries *int `json:"max_retries,omitempty"`
 
+	// WebhookMaxRetries is max_retries for this job's webhook delivery rather
+	// than its upstream call, with the same values: nil means
+	// DefaultMaxRetries, -1 retries until the receiver accepts it (bounded by
+	// the queued-job TTL). It is separate because the two calls go to
+	// different places: a caller may want a non-idempotent upstream tried
+	// once but the webhook retried through a long receiver outage. The
+	// X-Aqueduct-Webhook-Max-Retries request header overrides this field.
+	WebhookMaxRetries *int `json:"webhook_max_retries,omitempty"`
+
 	// Cross-region /proxy redirect fields — see Job's own doc comment and
 	// proxy.go's AttemptDirect. Only ever set on an internal redirect hop
 	// (one Aquifer instance calling another's /proxy directly); a real
@@ -139,8 +152,10 @@ func (r *JobRequest) Validate() string {
 		return "user_id must not contain NUL characters"
 	case r.IdempotentKey == "":
 		return "idempotent_key is required"
-	case r.MaxRetries != nil && (*r.MaxRetries < RetryUntilComplete || *r.MaxRetries > MaxAllowedRetries):
+	case !validRetryLimit(r.MaxRetries):
 		return "max_retries must be -1 (retry until complete) or between 0 and 100"
+	case !validRetryLimit(r.WebhookMaxRetries):
+		return "webhook_max_retries must be -1 (retry until delivered) or between 0 and 100"
 	case r.IdempotencyScope != "" && r.IdempotencyScope != IdempotencyScopeUser && r.IdempotencyScope != IdempotencyScopeShared:
 		return `idempotency_scope must be "user" or "shared"`
 	case r.IdempotencyScope == IdempotencyScopeShared && !sharedIdempotencyEnabled():
@@ -231,25 +246,26 @@ func (j *Job) dedupHash() string {
 
 func NewJob(r *JobRequest) *Job {
 	return &Job{
-		ID:               generateID(),
-		UserID:           r.UserID,
-		IdempotentKey:    r.IdempotentKey,
-		IdempotencyScope: r.IdempotencyScope,
-		MaxRetries:       resolveMaxRetries(r.MaxRetries),
-		DedupHash:        dedupHash(r.UserID, r.IdempotentKey, r.IdempotencyScope),
-		URL:              r.URL,
-		PoolID:           r.PoolID,
-		Method:           strings.ToUpper(r.Method),
-		Headers:          r.Headers,
-		Body:             r.Body,
-		WebhookURL:       r.WebhookURL,
-		Status:           StatusQueued,
-		CreatedAt:        time.Now().UnixMilli(),
-		ExecuteBefore:    r.ExecuteBefore,
-		OriginMachineID:  r.OriginMachineID,
-		OriginRegion:     r.OriginRegion,
-		VisitedRegions:   r.VisitedRegions,
-		RerouteCount:     r.RerouteCount,
+		ID:                generateID(),
+		UserID:            r.UserID,
+		IdempotentKey:     r.IdempotentKey,
+		IdempotencyScope:  r.IdempotencyScope,
+		MaxRetries:        resolveMaxRetries(r.MaxRetries),
+		WebhookMaxRetries: r.WebhookMaxRetries,
+		DedupHash:         dedupHash(r.UserID, r.IdempotentKey, r.IdempotencyScope),
+		URL:               r.URL,
+		PoolID:            r.PoolID,
+		Method:            strings.ToUpper(r.Method),
+		Headers:           r.Headers,
+		Body:              r.Body,
+		WebhookURL:        r.WebhookURL,
+		Status:            StatusQueued,
+		CreatedAt:         time.Now().UnixMilli(),
+		ExecuteBefore:     r.ExecuteBefore,
+		OriginMachineID:   r.OriginMachineID,
+		OriginRegion:      r.OriginRegion,
+		VisitedRegions:    r.VisitedRegions,
+		RerouteCount:      r.RerouteCount,
 	}
 }
 
@@ -258,6 +274,15 @@ func resolveMaxRetries(requested *int) int {
 		return DefaultMaxRetries
 	}
 	return *requested
+}
+
+func validRetryLimit(n *int) bool {
+	return n == nil || (*n >= RetryUntilComplete && *n <= MaxAllowedRetries)
+}
+
+// webhookMaxRetries is the retry limit for this job's webhook delivery.
+func (j *Job) webhookMaxRetries() int {
+	return resolveMaxRetries(j.WebhookMaxRetries)
 }
 
 // retryDeadline is when a job stops being retried: its execute_before if

@@ -464,8 +464,12 @@ func (r *Registry) resolveWorkerLocked(job *Job) (string, *URLWorker) {
 //
 // originalJobID scopes the idempotent key (see Job.isWebhookDeliveryJob) so
 // a given job's webhook is enqueued at most once even if this were somehow
-// called twice for it.
-func (r *Registry) EnqueueWebhook(originalJobID, userID, webhookURL string, payload map[string]any) {
+// called twice for it. maxRetries is the original job's webhook_max_retries.
+//
+// Delivery skips admission control: the job it reports on was already
+// admitted and its upstream call already made, so refusing the delivery
+// would throw away finished work rather than shed new load.
+func (r *Registry) EnqueueWebhook(originalJobID, userID, webhookURL string, maxRetries int, payload map[string]any) {
 	if webhookURL == "" || r.stopping() {
 		return
 	}
@@ -478,6 +482,7 @@ func (r *Registry) EnqueueWebhook(originalJobID, userID, webhookURL string, payl
 		Method:        "POST",
 		Headers:       map[string]string{"Content-Type": "application/json"},
 		Body:          string(body),
+		MaxRetries:    &maxRetries,
 	})
 
 	if _, duplicate := r.store.CheckOrInsert(job); duplicate || r.stopping() {

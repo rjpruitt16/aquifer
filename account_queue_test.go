@@ -154,7 +154,7 @@ func TestSlowStartBeginsAtMinRPS(t *testing.T) {
 	})
 
 	const configuredRPS = 100.0
-	q := NewAccountQueue("tenant-1", "https://example.com", configuredRPS, 5, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, map[string]any) {}, nil, nil, nil, nil, func(string) {}, true, func(bool) {}, nil)
+	q := NewAccountQueue("tenant-1", "https://example.com", configuredRPS, 5, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, int, map[string]any) {}, nil, nil, nil, nil, func(string) {}, true, func(bool) {}, nil)
 	t.Cleanup(q.Stop)
 
 	deadline := time.Now().Add(time.Second)
@@ -184,7 +184,7 @@ func TestSlowStartOffByDefaultStartsAtConfiguredRPS(t *testing.T) {
 	})
 
 	const configuredRPS = 12.0
-	q := NewAccountQueue("tenant-1", "https://example.com", configuredRPS, 5, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, map[string]any) {}, nil, nil, nil, nil, func(string) {}, false, func(bool) {}, nil)
+	q := NewAccountQueue("tenant-1", "https://example.com", configuredRPS, 5, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, int, map[string]any) {}, nil, nil, nil, nil, func(string) {}, false, func(bool) {}, nil)
 	t.Cleanup(q.Stop)
 
 	deadline := time.Now().Add(time.Second)
@@ -216,7 +216,7 @@ func TestExpiredQueuedJobFailsWithoutDispatch(t *testing.T) {
 		Status: StatusQueued, CreatedAt: time.Now().UnixMilli(), ExecuteBefore: time.Now().Add(-time.Second).UnixMilli(),
 	}
 	store.CheckOrInsert(job)
-	q := NewAccountQueue("deadline-user", "http://127.0.0.1:1", 100, 1, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, map[string]any) {}, nil, nil, nil, nil, func(string) {}, false, func(bool) {}, nil)
+	q := NewAccountQueue("deadline-user", "http://127.0.0.1:1", 100, 1, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, int, map[string]any) {}, nil, nil, nil, nil, func(string) {}, false, func(bool) {}, nil)
 	t.Cleanup(q.Stop)
 	q.Enqueue(job)
 
@@ -261,7 +261,7 @@ func TestJobExpiringDuringPacingDelayFailsWithoutDispatch(t *testing.T) {
 	store.CheckOrInsert(first)
 	store.CheckOrInsert(expiring)
 
-	q := NewAccountQueue("deadline-user", upstream.URL, 1, 2, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, map[string]any) {}, nil, nil, nil, nil, func(string) {}, false, func(bool) {}, nil)
+	q := NewAccountQueue("deadline-user", upstream.URL, 1, 2, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, int, map[string]any) {}, nil, nil, nil, nil, func(string) {}, false, func(bool) {}, nil)
 	t.Cleanup(q.Stop)
 	q.Enqueue(first)
 	q.Enqueue(expiring)

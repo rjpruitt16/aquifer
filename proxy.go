@@ -173,7 +173,7 @@ func (a *Aquifer) SettleDirectWebhook(outcome ProxyOutcome, delivered bool) {
 		return
 	}
 	job := outcome.Job
-	a.registry.EnqueueWebhook(job.ID, job.UserID, job.WebhookURL, outcome.pendingWebhook)
+	a.registry.EnqueueWebhook(job.ID, job.UserID, job.WebhookURL, job.webhookMaxRetries(), outcome.pendingWebhook)
 }
 
 // fallbackOutcome builds AttemptDirect's local-fallback result — but tries
