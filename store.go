@@ -112,6 +112,8 @@ func (s *Store) migrate() {
 	s.db.Exec(`ALTER TABLE jobs ADD COLUMN execute_before INTEGER NOT NULL DEFAULT 0`)
 	s.db.Exec(`ALTER TABLE jobs ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 4`)
 	s.db.Exec(`ALTER TABLE jobs ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0`)
+	// NULL means the caller didn't set webhook_max_retries.
+	s.db.Exec(`ALTER TABLE jobs ADD COLUMN webhook_max_retries INTEGER`)
 	s.db.Exec(`ALTER TABLE jobs ADD COLUMN result TEXT NOT NULL DEFAULT ''`)
 	// Jobs are no longer marked in_flight; rows left that way by older
 	// versions are just unfinished work.
@@ -144,9 +146,9 @@ func (s *Store) CheckOrInsert(job *Job) (string, bool) {
 
 	res, err := s.db.Exec(`
 		INSERT OR IGNORE INTO jobs
-			(id, user_id, idempotent_key_hash, url, method, body, headers, webhook_url, status, created_at, execute_before, expires_at, max_retries, attempts)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)
-	`, job.ID, job.UserID, hashed, job.URL, job.Method, job.Body, string(headers), job.WebhookURL, job.CreatedAt, job.ExecuteBefore, expiresAt, job.MaxRetries, job.Attempts)
+			(id, user_id, idempotent_key_hash, url, method, body, headers, webhook_url, status, created_at, execute_before, expires_at, max_retries, attempts, webhook_max_retries)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)
+	`, job.ID, job.UserID, hashed, job.URL, job.Method, job.Body, string(headers), job.WebhookURL, job.CreatedAt, job.ExecuteBefore, expiresAt, job.MaxRetries, job.Attempts, job.WebhookMaxRetries)
 
 	if err == nil {
 		if n, _ := res.RowsAffected(); n == 1 {
@@ -206,7 +208,7 @@ func (s *Store) GetResult(jobID string) (JobResult, bool) {
 
 func (s *Store) RecoverQueued(queueKey string) []*Job {
 	rows, err := s.db.Query(`
-		SELECT id, user_id, url, method, body, headers, webhook_url, status, created_at, execute_before, idempotent_key_hash, max_retries, attempts
+		SELECT id, user_id, url, method, body, headers, webhook_url, status, created_at, execute_before, idempotent_key_hash, max_retries, attempts, webhook_max_retries
 		FROM jobs
 		WHERE queue_key = ? AND status IN ('queued', 'in_flight') AND expires_at > ?
 	`, queueKey, time.Now().UnixMilli())
@@ -263,7 +265,7 @@ func (s *Store) Counts() StoreCounts {
 
 func (s *Store) GetJob(jobID string) *Job {
 	row := s.db.QueryRow(`
-		SELECT id, user_id, url, method, body, headers, webhook_url, status, created_at, execute_before, idempotent_key_hash, max_retries, attempts
+		SELECT id, user_id, url, method, body, headers, webhook_url, status, created_at, execute_before, idempotent_key_hash, max_retries, attempts, webhook_max_retries
 		FROM jobs WHERE id = ? AND expires_at > ?
 	`, jobID, time.Now().UnixMilli())
 	return scanJob(row)
@@ -271,7 +273,7 @@ func (s *Store) GetJob(jobID string) *Job {
 
 func (s *Store) GetQueuedJobs() []*Job {
 	rows, err := s.db.Query(`
-		SELECT id, user_id, url, method, body, headers, webhook_url, status, created_at, execute_before, idempotent_key_hash, max_retries, attempts
+		SELECT id, user_id, url, method, body, headers, webhook_url, status, created_at, execute_before, idempotent_key_hash, max_retries, attempts, webhook_max_retries
 		FROM jobs WHERE status IN ('queued', 'in_flight') AND expires_at > ?
 	`, time.Now().UnixMilli())
 	if err != nil {
@@ -389,9 +391,14 @@ type scanner interface {
 func scanJob(s scanner) *Job {
 	var j Job
 	var headersJSON string
-	err := s.Scan(&j.ID, &j.UserID, &j.URL, &j.Method, &j.Body, &headersJSON, &j.WebhookURL, &j.Status, &j.CreatedAt, &j.ExecuteBefore, &j.DedupHash, &j.MaxRetries, &j.Attempts)
+	var webhookMaxRetries sql.NullInt64
+	err := s.Scan(&j.ID, &j.UserID, &j.URL, &j.Method, &j.Body, &headersJSON, &j.WebhookURL, &j.Status, &j.CreatedAt, &j.ExecuteBefore, &j.DedupHash, &j.MaxRetries, &j.Attempts, &webhookMaxRetries)
 	if err != nil {
 		return nil
+	}
+	if webhookMaxRetries.Valid {
+		n := int(webhookMaxRetries.Int64)
+		j.WebhookMaxRetries = &n
 	}
 	json.Unmarshal([]byte(headersJSON), &j.Headers)
 	return &j
