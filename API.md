@@ -226,7 +226,7 @@ Authorization: Bearer gateway-authenticated-identity
 X-Aqueduct-Upstream-URL: wss://backend.internal/socket
 ```
 
-`session_id` identifies the durable transcript. `after` is the last Valkey stream ID the client has processed and defaults to `0-0`. Aquifer replays backend messages after that cursor before following live events. A cursor older than retained history is rejected with **409** instead of silently skipping data.
+`session_id` identifies the session's transcript. `after` is the last Valkey stream ID the client has processed and defaults to `0-0`. Aquifer replays backend messages after that cursor before following live events. A cursor older than retained history is rejected with **409** instead of silently skipping data.
 
 The trusted `X-Aqueduct-Upstream-URL` must be an absolute `ws://` or `wss://` URL and is subject to `AQUIFER_ALLOWED_URL_DOMAINS`. Aquifer forwards end-to-end gateway headers such as `Authorization`, strips hop-by-hop and internal `X-Aqueduct-*`/`X-Aquifer-*` headers, and injects `X-Aqueduct-Session-ID` upstream.
 
@@ -273,6 +273,16 @@ While a session waits, Aquifer emits another `waiting` status whenever its FIFO 
 On upstream loss, Aquifer keeps the client connection open and reconnects with jittered exponential backoff. Commands are durably recorded, but v1 does **not** automatically replay a command after an ambiguous upstream failure: Aquifer cannot know whether the backend acted before the connection disappeared. Clients may resend a command with the same `message_id`; backend actions must therefore be idempotent by `message_id`. Delivery of backend events is at least once when a client reconnects from its last acknowledged stream cursor.
 
 Each session transcript retains approximately the newest `AQUIFER_WS_STREAM_MAX_EVENTS` entries and expires `AQUIFER_WS_STREAM_TTL_SECONDS` after its last recorded entry. Every append refreshes that TTL. Expired history is treated as a replay gap when a client supplies a nonzero cursor, so deletion cannot silently skip events.
+
+#### What the transcript guarantees
+
+The transcript is a **replay window**, not a durable log. It is built for reconnects: a client that drops and comes back within the window gets everything it missed, in order.
+
+- **Guaranteed:** every message is recorded in Valkey before it is forwarded or delivered, and a client that reconnects with a cursor still inside the window receives every backend event after it, in order, at least once.
+- **Not guaranteed:** history older than the window. Once entries are trimmed (by count or TTL), a client whose cursor points before them gets **409** and must resynchronize from your application's own state. Aquifer never skips events silently, but it does not keep them forever.
+- **Valkey is the storage.** Durability is whatever your Valkey provides: persistence (AOF/RDB), replication, and its `maxmemory` policy. With an eviction policy, Valkey can drop whole transcripts under memory pressure, which also surfaces as **409**. Size `maxmemory` for sessions × `AQUIFER_WS_STREAM_MAX_EVENTS` × message size, or use `noeviction` and accept failed writes when it is full: new handshakes get **503**, a client whose command can't be recorded is disconnected (it can reconnect from its cursor), and a backend whose event can't be recorded is disconnected and reconnected.
+
+If you need every message kept beyond the window (audit, analytics, replay from the beginning), record it in your own durable store from the backend, or follow the durable-transcript extension in the issue tracker.
 
 Two clients may temporarily attach to the same `session_id` during an application-managed handoff; both follow the same durable backend event stream, and the client decides when to close the old socket. On `SIGTERM`, Aquifer sends `server_draining`, leaves the old socket open for `AQUIFER_WS_DRAIN_GRACE_SECONDS`, then closes it with WebSocket code **1012 Service Restart**. The client should open its replacement through the gateway using its last processed stream cursor. New handshakes receive **503** while the node drains.
 
