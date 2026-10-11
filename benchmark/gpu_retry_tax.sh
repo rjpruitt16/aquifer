@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Rahmi Pruitt
+# SPDX-License-Identifier: Apache-2.0
+
 # The GPU retry tax benchmark: does pacing through Aquifer (via the ORCA
 # fallback signal from vLLM's own kv_cache_usage_perc) keep a GPU serving
 # cleanly under a burst that would otherwise overload it directly?

@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Rahmi Pruitt
+# SPDX-License-Identifier: Apache-2.0
+
 # Capacity and drain-time by machine tier. Answers two questions an operator
 # actually needs before picking a box: (1) how much sustained ingest rate can
 # this tier take before it starts shedding, and (2) if it takes a burst

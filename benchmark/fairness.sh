@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Rahmi Pruitt
+# SPDX-License-Identifier: Apache-2.0
+
 # Multi-tenant fairness: one "noisy" tenant floods the same upstream while a
 # "quiet" tenant sends light steady traffic. Aquifer isolates dispatch pacing
 # per (user_id, upstream) pair via AccountQueue, so the quiet tenant's jobs

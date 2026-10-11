@@ -1,3 +1,6 @@
+// Copyright 2026 Rahmi Pruitt
+// SPDX-License-Identifier: Apache-2.0
+
 // Package a2aadapter exposes Aquifer as an A2A (Agent2Agent protocol, v1.0)
 // agent over JSON-RPC/HTTPS. It lives in its own subpackage — like every
 // other non-stdlib adapter would — so the a2a-go SDK dependency doesn't leak

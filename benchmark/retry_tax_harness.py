@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright 2026 Rahmi Pruitt
+# SPDX-License-Identifier: Apache-2.0
+
 """Open-loop ramp-to-saturation load harness for the GPU retry-tax experiment.
 
 What the existing gpu_retry_tax.sh benchmark (vegeta-driven) doesn't measure:

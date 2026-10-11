@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Rahmi Pruitt
+# SPDX-License-Identifier: Apache-2.0
+
 # Durability isn't a claim until it's demonstrated: enqueue N jobs, SIGKILL
 # the machine mid-drain, restart it, and confirm every job still dispatches.
 # Default per-upstream pacing is 2 RPS / concurrency 1 (no CONFIG_PATH set),

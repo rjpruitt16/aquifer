@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright 2026 Rahmi Pruitt
+# SPDX-License-Identifier: Apache-2.0
+
 """Generate vegeta JSON targets for the GPU retry tax benchmark.
 
 Two modes:

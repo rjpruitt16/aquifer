@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Rahmi Pruitt
+# SPDX-License-Identifier: Apache-2.0
+
 # Drives the real redirect scenario against the deployment from deploy.sh,
 # entirely via `fly proxy` tunnels (never a public URL), and asserts on
 # both the HTTP response and origin's own [region_redirect] log lines.

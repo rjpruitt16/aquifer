@@ -1,3 +1,6 @@
+# Copyright 2026 Rahmi Pruitt
+# SPDX-License-Identifier: Apache-2.0
+
 """Creates the soak monitor on Claude Managed Agents: a locked-down
 environment, a vault holding the two secrets, the agent, and a scheduled
 deployment (created paused, so a manual dry run comes first).

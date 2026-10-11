@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright 2026 Rahmi Pruitt
+# SPDX-License-Identifier: Apache-2.0
+
 """Generate a vegeta JSON targets file of unique POST /jobs requests.
 
 Each job needs a unique idempotent_key or Aquifer will correctly treat

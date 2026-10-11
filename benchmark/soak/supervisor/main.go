@@ -1,3 +1,6 @@
+// Copyright 2026 Rahmi Pruitt
+// SPDX-License-Identifier: Apache-2.0
+
 // supervisor: runs Aquifer for the soak test (see benchmark/soak/README.md).
 // It restarts Aquifer whenever it exits and, on a private port, lets the soak
 // driver kill it (SIGKILL, the same as `kill -9`), restart the whole machine,

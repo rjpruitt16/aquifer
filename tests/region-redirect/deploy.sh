@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Rahmi Pruitt
+# SPDX-License-Identifier: Apache-2.0
+
 # Deploys two PRIVATE-ONLY Fly apps for the cross-region /proxy redirect
 # test, fixed names (mirrors ezthrottle4.0's ezthrottle-staging /
 # ezthrottle-webhook-test convention): an Aquifer test instance with
