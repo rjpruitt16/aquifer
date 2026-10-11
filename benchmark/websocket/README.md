@@ -22,6 +22,6 @@ fly ssh console -a ws-lab-client -C "/bench ... -connections 500 -ramp 2s -hold 
 - **Valkey:** its start command raises the limit too.
 - **The bench binary:** raises its own limit.
 
-For EZThrottle Local, deploy `fly.ezthrottle.toml` from that repository's checkout. On Fly's private network it must listen on `::`, but its `config/runtime.exs` binds `0.0.0.0` on purpose for Fly's public proxy, so the lab used a copy with `ip: {0, 0, 0, 0, 0, 0, 0, 0}`.
+For Spillway, deploy `fly.spillway.toml` from that repository's checkout. On Fly's private network it must listen on `::`, but its `config/runtime.exs` binds `0.0.0.0` on purpose for Fly's public proxy, so the lab used a copy with `ip: {0, 0, 0, 0, 0, 0, 0, 0}`.
 
 Tear down with `fly apps destroy` for each app.

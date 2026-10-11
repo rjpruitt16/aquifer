@@ -10,7 +10,7 @@ import (
 )
 
 // TestWebhookDeliveryJobsExcludedFromLedger is the regression test for a
-// real bug caught while porting this to ezthrottle-local: webhook-delivery
+// real bug caught while porting this to Spillway: webhook-delivery
 // jobs are persisted via the same CheckOrInsert path as real jobs (for
 // durability/dedup), which also backs drain mode's idempotency ledger
 // export -- without an explicit exclusion, internal webhook bookkeeping

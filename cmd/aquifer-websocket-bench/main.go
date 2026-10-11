@@ -1,5 +1,5 @@
 // aquifer-websocket-bench measures how many aqueduct.v1 WebSocket sessions
-// one Aquifer (or EZThrottle Local) instance holds, and how fast it moves
+// one Aquifer (or Spillway) instance holds, and how fast it moves
 // messages through them. Two modes:
 //
 //	-backend :6060   run a no-limits backend: acks each command and emits one

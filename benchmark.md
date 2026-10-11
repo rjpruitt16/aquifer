@@ -137,7 +137,7 @@ That fix surfaced a third issue: `CheckOrInsert` checked for duplicates via `INS
 
 ## 8. An alternative storage backend: Pebble
 
-ezthrottle-local (Elixir/Mnesia) showed a materially higher throughput ceiling than SQLite here — Mnesia writes memory-first with disk catching up in the background, SQLite is disk-first and single-writer. That raised the question: would a memory-first store change Aquifer's ceiling too, without giving up Go?
+Spillway (Elixir/Mnesia) showed a materially higher throughput ceiling than SQLite here — Mnesia writes memory-first with disk catching up in the background, SQLite is disk-first and single-writer. That raised the question: would a memory-first store change Aquifer's ceiling too, without giving up Go?
 
 Added `PebbleStore` ([cockroachdb/pebble](https://github.com/cockroachdb/pebble), pure Go, no CGo) behind the `JobStore` interface, opt-in via `AQUIFER_STORE_BACKEND=pebble` — default stays SQLite, additive not a rewrite.
 
@@ -257,7 +257,7 @@ Baseline, 2026-10-06, Apple M3 Max laptop (macOS, 200 jobs per run):
 | Pebble, 100ms flush (default) | 0.04 ms | 0.07 ms | 0.11 ms | 11,107 jobs/s |
 | Pebble, `AQUIFER_PEBBLE_FLUSH_INTERVAL_MS=10` | 0.05 ms | 0.08 ms | 0.13 ms | 9,593 jobs/s |
 
-The flush-interval rows (2000 jobs each; the default is 100ms) acknowledge a write before it is on disk and sync the log on a timer, the same trade EZThrottle Local makes with its 100ms Mnesia flush: a crash can lose up to that window of accepted jobs. `pebble_flush_test.go` checks that a process killed after the window loses nothing. On a Mac most of the gain comes from skipping slow `fsync`s; expect a smaller gap on Linux, where a sync took about 0.3ms on a Fly volume.
+The flush-interval rows (2000 jobs each; the default is 100ms) acknowledge a write before it is on disk and sync the log on a timer, the same trade Spillway makes with its 100ms Mnesia flush: a crash can lose up to that window of accepted jobs. `pebble_flush_test.go` checks that a process killed after the window loses nothing. On a Mac most of the gain comes from skipping slow `fsync`s; expect a smaller gap on Linux, where a sync took about 0.3ms on a Fly volume.
 
 Read these as relative numbers, not capacity, and don't compare the two rows as like for like. SQLite runs in WAL mode with `synchronous=NORMAL`: a commit survives a process crash but isn't flushed to disk per write, so a power loss can drop the last few accepted jobs. Pebble with `AQUIFER_PEBBLE_FLUSH_INTERVAL_MS=0` syncs every write (zero acknowledged-job loss) with a 5ms group-commit window, and macOS `fsync` is far slower than Linux, so on a Mac a lone job waits out that window plus a full flush. On a Fly performance-1x volume, `fsync` measured about 0.3ms p50 and Pebble outran SQLite (see [section 8](#8-an-alternative-storage-backend-pebble)). Dispatch itself (`queue_ms`) is a fraction of a millisecond on both; the cost of a job is its storage writes.
 
@@ -313,11 +313,11 @@ How many `aqueduct.v1` WebSocket sessions one machine holds, and how many messag
 - **Backend:** a no-limits backend that acks each command and sends one event (`aquifer-websocket-bench -backend`).
 - **Client:** a performance-2x machine running [`cmd/aquifer-websocket-bench`](cmd/aquifer-websocket-bench/main.go).
 
-Run with the Valkey reader-pool fix (#33). Lab configs are in [`benchmark/websocket`](benchmark/websocket/README.md). EZThrottle Local was measured on the same lab for comparison.
+Run with the Valkey reader-pool fix (#33). Lab configs are in [`benchmark/websocket`](benchmark/websocket/README.md). Spillway was measured on the same lab for comparison.
 
 **Sessions held (idle):**
 
-| Sessions | Aquifer connected | Aquifer memory | Aquifer connect p50 / p99 | EZThrottle Local connected | EZThrottle Local memory | EZThrottle Local connect p50 / p99 |
+| Sessions | Aquifer connected | Aquifer memory | Aquifer connect p50 / p99 | Spillway connected | Spillway memory | Spillway connect p50 / p99 |
 |---:|---:|---:|---:|---:|---:|---:|
 | 1,000 | 1,000 | 110 MB | 6 / 35 ms | 1,000 | 244 MB | 260 / 693 ms |
 | 5,000 | 5,000 | 493 MB | 7 / 351 ms | 5,000 | 498 MB | 750 ms / 6.2 s |
@@ -325,11 +325,11 @@ Run with the Valkey reader-pool fix (#33). Lab configs are in [`benchmark/websoc
 | 20,000 | ran out of memory near 15,000 | | | 20,000 | 1.16 GB | 5.2 / 44 s |
 
 - **Aquifer:** about 90 KB per session, mostly six goroutines and socket buffers. Once sessions close, live heap returns to baseline: after a forced GC it was 30 MB live with no sessions.
-- **EZThrottle Local:** about 50 KB per session, but every new session goes through one queue process, which makes opening slow at scale.
+- **Spillway:** about 50 KB per session, but every new session goes through one queue process, which makes opening slow at scale.
 
 **Messages:** each command is recorded durably, forwarded, acked, and answered with one event, which is also recorded before delivery.
 
-| Load | Aquifer events/s | Aquifer confirm p50 | EZThrottle Local events/s | EZThrottle Local confirm p50 |
+| Load | Aquifer events/s | Aquifer confirm p50 | Spillway events/s | Spillway confirm p50 |
 |---|---:|---:|---:|---:|
 | 100 sessions × 20/s | 2,000 (round trip p50 1.8 s) | 28 ms | 1,720 | 3.4 s |
 | 500 sessions × 10/s | ~1,300 | 9.9 s | 920–1,660 | 7.9–11.8 s |
@@ -343,7 +343,7 @@ One 1-CPU Aquifer moves about **1,500–2,000 WebSocket round trips/s**. Past th
   - Valkey sees about 17 operations per round trip, at about 50% of its core.
 
   A shared multi-stream reader and batched writes are the next step. The issue is filed separately.
-- **EZThrottle Local has no backpressure.** Memory grows by about 5–10 MB/s under sustained overload, and in one run the process was killed out of memory.
+- **Spillway had no backpressure at the time.** Memory grew by about 5–10 MB/s under sustained overload, and in one run the process was killed out of memory. Fixed since in Spillway #27 and #28.
 
 **Configuration that matters.**
 - **File descriptors:** each Aquifer session uses three (client, backend, Valkey reader). Container platforms often default to 10,240 open files, which caps an instance near 3,000 sessions; raise `ulimit -n`.
@@ -352,7 +352,7 @@ One 1-CPU Aquifer moves about **1,500–2,000 WebSocket round trips/s**. Past th
 
 **Bugs this benchmark found:**
 - **Aquifer #33:** sessions starved the Valkey connection pool past ~10 per CPU. Command confirmations took 3.1 s at p50 on one CPU with 200 sessions; 0.34 ms after the fix.
-- **EZThrottle Local #23:** WebSocket upstreams on IPv6-only hosts, including Fly `.internal`, never connected.
+- **Spillway #23:** WebSocket upstreams on IPv6-only hosts, including Fly `.internal`, never connected.
 
 ---
 

@@ -2,7 +2,7 @@ name: Contract tests (Aqueduct Runner)
 
 # Cross-repo contract tests against the real, unmodified aquifer image --
 # proves at the wire level that the shared X-Aqueduct-*/X-EZTHROTTLE-*
-# contract with ezthrottle-local still holds, not just that aquifer's own
+# contract with Spillway still holds, not just that aquifer's own
 # unit/integration tests pass. See github.com/rjpruitt16/aqueduct-runner.
 
 on:
