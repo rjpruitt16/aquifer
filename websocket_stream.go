@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"github.com/redis/go-redis/v9/maintnotifications"
 )
 
 const (
@@ -29,27 +30,26 @@ type WebSocketStreamEvent struct {
 type WebSocketStreamStore interface {
 	Append(ctx context.Context, sessionID, direction string, message WebSocketEnvelope) (string, error)
 	ReadAfter(ctx context.Context, sessionID, after string, count int64, block time.Duration) ([]WebSocketStreamEvent, error)
+	// Follow signals when sessionID's transcript may have entries after
+	// cursor, so a live session reads only when there is something to read.
+	Follow(ctx context.Context, sessionID, cursor string) (WebSocketFollow, error)
 	CheckCursor(ctx context.Context, sessionID, after string) error
 	Ping(ctx context.Context) error
 	Close() error
 }
 
 type RedisWebSocketStreamStore struct {
-	client    *redis.Client // appends, ranges and replay reads
-	readers   *redis.Client // live sessions' blocking reads
+	client    *redis.Client
+	follower  *streamFollower
 	prefix    string
 	maxEvents int64
 	ttl       time.Duration
 }
 
-// NewRedisWebSocketStreamStore connects the transcript store. liveReaders is
-// how many sessions can follow their streams at once (the client-connection
-// ceiling): each live session holds one connection in a blocking XREAD, so
-// those reads get their own pool of that size. Sharing one default-sized
-// pool (10 per CPU) with appends made every append wait for some session's
-// blocking read to time out once sessions outnumbered the pool: command
-// confirmations took the full read-block interval (1s) with 200 sessions.
-func NewRedisWebSocketStreamStore(rawURL, prefix string, maxEvents int64, ttl time.Duration, liveReaders int) (*RedisWebSocketStreamStore, error) {
+// NewRedisWebSocketStreamStore connects the transcript store. Live sessions
+// learn about new entries through readerShards shared pub/sub connections
+// (see streamFollower), so Valkey connections don't grow with sessions.
+func NewRedisWebSocketStreamStore(rawURL, prefix string, maxEvents int64, ttl time.Duration, readerShards int) (*RedisWebSocketStreamStore, error) {
 	if rawURL == "" {
 		return nil, errors.New("AQUIFER_VALKEY_URL is required when WebSockets are enabled")
 	}
@@ -70,20 +70,14 @@ func NewRedisWebSocketStreamStore(rawURL, prefix string, maxEvents int64, ttl ti
 	if ttl <= 0 {
 		ttl = defaultWebSocketStreamTTL
 	}
-	readerOpts := *opts
-	readerOpts.PoolSize = max(liveReaders, 1) + 8
-	// Sized for many sessions, not throughput: a blocking XREAD is a tiny
-	// command and its replies are small batches (larger ones still stream
-	// through), so small buffers save ~50KB per session over go-redis's 32KB
-	// defaults. Connections a burst of sessions opened are closed once idle
-	// instead of being kept for go-redis's default 30 minutes.
-	readerOpts.ReadBufferSize = 8 * 1024
-	readerOpts.WriteBufferSize = 4 * 1024
-	readerOpts.MaxIdleConns = 64
-	readerOpts.ConnMaxIdleTime = time.Minute
+	// Valkey doesn't support go-redis's maintenance-notification handshake,
+	// and in auto mode go-redis rewrites shared options when it fails, which
+	// races when the follower opens its dedicated connections concurrently.
+	opts.MaintNotificationsConfig = &maintnotifications.Config{Mode: maintnotifications.ModeDisabled}
+	client := redis.NewClient(opts)
 	return &RedisWebSocketStreamStore{
-		client:    redis.NewClient(opts),
-		readers:   redis.NewClient(&readerOpts),
+		client:    client,
+		follower:  newStreamFollower(client, readerShards),
 		prefix:    prefix,
 		maxEvents: maxEvents,
 		ttl:       ttl,
@@ -135,6 +129,11 @@ func (s *RedisWebSocketStreamStore) Append(ctx context.Context, sessionID, direc
 		Values: values,
 	})
 	pipe.Expire(ctx, s.streamKey(sessionID), s.ttl)
+	if direction == "backend" {
+		// Sessions deliver only backend entries; client entries are read
+		// past on the next wake, so they don't need one of their own.
+		pipe.Publish(ctx, s.notifyChannel(sessionID), "")
+	}
 	_, err := pipe.Exec(ctx)
 	if err != nil {
 		return "", fmt.Errorf("append websocket event: %w", err)
@@ -153,11 +152,7 @@ func (s *RedisWebSocketStreamStore) ReadAfter(ctx context.Context, sessionID, af
 	if after == "" {
 		after = "0-0"
 	}
-	client := s.client
-	if block >= 0 {
-		client = s.readers // blocking reads must not hold connections appends need
-	}
-	streams, err := client.XRead(ctx, &redis.XReadArgs{
+	streams, err := s.client.XRead(ctx, &redis.XReadArgs{
 		Streams: []string{s.streamKey(sessionID), after},
 		Count:   count,
 		Block:   block,
@@ -207,8 +202,20 @@ func (s *RedisWebSocketStreamStore) Ping(ctx context.Context) error {
 	return s.client.Ping(ctx).Err()
 }
 
+func (s *RedisWebSocketStreamStore) Follow(ctx context.Context, sessionID, _ string) (WebSocketFollow, error) {
+	if sessionID == "" {
+		return nil, errors.New("websocket session_id is required")
+	}
+	return s.follower.follow(ctx, s.notifyChannel(sessionID))
+}
+
+func (s *RedisWebSocketStreamStore) notifyChannel(sessionID string) string {
+	return s.streamKey(sessionID) + ":notify"
+}
+
 func (s *RedisWebSocketStreamStore) Close() error {
-	return errors.Join(s.client.Close(), s.readers.Close())
+	s.follower.close()
+	return s.client.Close()
 }
 
 func (s *RedisWebSocketStreamStore) streamKey(sessionID string) string {
