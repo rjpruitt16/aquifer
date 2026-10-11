@@ -139,7 +139,7 @@ and a `body_truncated` flag. The idempotency entry's `result_key` points at that
 hash Aquifer already computes internally, never the plaintext key. A downstream consumer re-checking a
 key for a duplicate must hash it the same way.
 
-If you're also running [ezthrottle-local](https://github.com/rjpruitt16/ezthrottle-local), its drain
+If you're also running [Spillway](https://github.com/rjpruitt16/spillway), its drain
 mode hashes the identical way — both systems share one hash-key namespace for the same
 `(user_id, idempotent_key)` pair, so a downstream consumer can hash lookups the same way regardless of
 which system a given ledger entry came from.

@@ -34,7 +34,7 @@ import (
 //     index on status or queue_key either.
 //   - The durability/throughput dial: by default writes are acknowledged
 //     before they are durable and the WAL is synced every 100ms
-//     (AQUIFER_PEBBLE_FLUSH_INTERVAL_MS), the trade EZThrottle Local's
+//     (AQUIFER_PEBBLE_FLUSH_INTERVAL_MS), the trade Spillway's
 //     Mnesia flush makes: a crash can lose up to that much accepted work,
 //     for several times the throughput. Setting it to 0 makes every write
 //     wait for its own fsync (group-committed, see defaultWALSyncIntervalMS),

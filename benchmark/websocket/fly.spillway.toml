@@ -1,0 +1,22 @@
+# Spillway target for the same benchmark. Deploy from the
+# spillway checkout:
+#   fly deploy ../spillway -c benchmark/websocket/fly.spillway.toml
+app = "ws-lab-spillway"
+primary_region = "iad"
+
+[env]
+  SPILLWAY_WS_ENABLED = "true"
+  SPILLWAY_WS_MAX_CLIENT_CONNECTIONS = "50000"
+  SPILLWAY_WS_MAX_UPSTREAM_CONNECTIONS = "50000"
+  SPILLWAY_WS_MAX_WAITING_CONNECTIONS = "50000"
+  SPILLWAY_WS_CONNECT_RPS = "2000"
+  SPILLWAY_WS_SLOW_START_RPS = "2000"
+  MNESIA_DIR = "/tmp/mnesia"
+  SECRET_KEY_BASE = "ws-lab-only-not-a-secret-ws-lab-only-not-a-secret-ws-lab-only-xx"
+
+[processes]
+  app = "sh -c 'ulimit -n 1048576 && exec bin/spillway start'"
+
+[[vm]]
+  size = "performance-1x"
+  memory = "2gb"
