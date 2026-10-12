@@ -7,7 +7,7 @@ primary_region = "iad"
   dockerfile = "Dockerfile.driver"
 
 [env]
-  SOAK_DATA = "/data/run-3b"
+  SOAK_DATA = "/data/run-3c"
 
 [http_service]
   internal_port = 8081
