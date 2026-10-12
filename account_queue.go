@@ -323,6 +323,14 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 	retryTimer := time.NewTimer(time.Hour)
 	retryTimer.Stop()
 	defer retryTimer.Stop()
+	// dispatchTimer fires when the pace allows the next dispatch. The loop
+	// waits for it in the select below instead of sleeping, so it keeps
+	// reading completions and new jobs while it waits: at minRPS a sleep
+	// lasted 2s per dispatch, and the successes that would raise the pace
+	// again went unread until maxConcurrent jobs were in flight.
+	dispatchTimer := time.NewTimer(time.Hour)
+	dispatchTimer.Stop()
+	defer dispatchTimer.Stop()
 	q.currentRPS.Store(int64(rps * 100))
 
 	for {
@@ -347,6 +355,17 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 				continue
 			}
 
+			interval := time.Duration(float64(time.Second) / rps)
+			if elapsed := time.Since(lastRequestAt); elapsed < interval {
+				dispatchTimer.Stop()
+				select {
+				case <-dispatchTimer.C:
+				default:
+				}
+				dispatchTimer.Reset(withJitter(interval - elapsed))
+				break
+			}
+
 			var member *PoolMember
 			if q.pool != nil {
 				member = q.pool.Pick()
@@ -359,17 +378,6 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 					sleepWhilePoolEmpty(noPoolMembersRetryInterval)
 					continue
 				}
-			}
-
-			interval := time.Duration(float64(time.Second) / rps)
-			elapsed := time.Since(lastRequestAt)
-
-			if elapsed < interval {
-				time.Sleep(withJitter(interval - elapsed))
-			}
-			if queue[0].ExecutionExpired(time.Now()) {
-				queue = q.dropExpiredJobs(queue)
-				continue
 			}
 
 			job := queue[0]
@@ -477,6 +485,9 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 				onMaxBacklogSignal(*msg.maxBacklog)
 			}
 			idle.Reset(idleTimeout)
+
+		case <-dispatchTimer.C:
+			// The pace allows the next dispatch; the loop above sends it.
 
 		case <-positionTicker.C:
 			queue = q.dropExpiredJobs(queue)
