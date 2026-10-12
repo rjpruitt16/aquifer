@@ -1,0 +1,557 @@
+{
+  "alerts": [
+    "878 accepted jobs lost (not explained by the 100ms flush window); see recent_lost"
+  ],
+  "config": {
+    "target": "http://aquifer-soak.internal:8080",
+    "supervisor": "http://aquifer-soak.internal:9090",
+    "self": "http://aquifer-soak-driver.internal:8080",
+    "steady_rate": 500,
+    "burst_rate": 2000,
+    "ramp_hour_utc": 4,
+    "ramp_steps": [
+      500,
+      750,
+      1000,
+      1250,
+      1500,
+      2000,
+      2500,
+      3000
+    ],
+    "users": 50,
+    "chaos": true
+  },
+  "daily": [
+    {
+      "date": "2026-10-10",
+      "hours": 7,
+      "rss_mb_first": 227.41796875,
+      "rss_mb_last": 225.67578125,
+      "rss_mb_max": 395.2109375,
+      "goroutines_last": 367,
+      "goroutines_max": 4857,
+      "pebble_mb_first": 756.4366607666016,
+      "pebble_mb_last": 2364.2777910232544,
+      "e2e_p99_ms_median_of_hours": 36692.71,
+      "accept_p99_ms_median_of_hours": 279.03,
+      "accepted": 11053375,
+      "lost": 0,
+      "lost_within_flush_window": 2,
+      "duplicates": 9,
+      "finished_without_webhook": 29021
+    },
+    {
+      "date": "2026-10-11",
+      "hours": 24,
+      "rss_mb_first": 216.6640625,
+      "rss_mb_last": 231.97265625,
+      "rss_mb_max": 493.52734375,
+      "goroutines_last": 379,
+      "goroutines_max": 6046,
+      "pebble_mb_first": 1647.5739612579346,
+      "pebble_mb_last": 1013.7427549362183,
+      "e2e_p99_ms_median_of_hours": 38527.34,
+      "accept_p99_ms_median_of_hours": 356.12,
+      "accepted": 40425247,
+      "lost": 0,
+      "lost_within_flush_window": 29,
+      "duplicates": 66,
+      "finished_without_webhook": 87348,
+      "ramp_ceiling_per_s": 750,
+      "ramp_steps": [
+        {
+          "offered": 500,
+          "accepted_per_s": 497.1166666666667,
+          "shed_per_s": 2.9,
+          "completed_per_s": 663.6166666666667,
+          "sustained": true
+        },
+        {
+          "offered": 750,
+          "accepted_per_s": 749.65,
+          "shed_per_s": 0,
+          "completed_per_s": 746.3833333333333,
+          "sustained": true
+        },
+        {
+          "offered": 1000,
+          "accepted_per_s": 873.3333333333334,
+          "shed_per_s": 121.93333333333334,
+          "completed_per_s": 712.45,
+          "sustained": false
+        }
+      ]
+    }
+  ],
+  "last_hour": {
+    "at": "2026-10-12T13:00:00Z",
+    "minutes": 60,
+    "accepted_per_s": 494.70805554657113,
+    "shed_per_s": 30.283610806019315,
+    "client_errors_per_s": 0,
+    "completed_per_s": 494.6580557768705,
+    "failed_per_s": 0.13166666645328715,
+    "accept_p50_ms": 10.62,
+    "accept_p99_ms": 373.93,
+    "e2e_p50_ms": 31.05,
+    "e2e_p99_ms": 23652.45,
+    "max_outstanding": 9995,
+    "max_queue_backlog": 10008,
+    "rss_mb_end": 303.79296875,
+    "rss_mb_max": 420.92578125,
+    "heap_inuse_mb_end": 216.359375,
+    "goroutines_end": 1863,
+    "goroutines_max": 4791,
+    "open_fds_end": 1645,
+    "pebble_mb_end": 1017.4507522583008,
+    "pebble_files_end": 153,
+    "volume_free_pct_end": 83.71020588513198,
+    "target_restarts_total": 0,
+    "minutes_target_unreachable": 0,
+    "ledger_totals": {
+      "submitted": 84942757,
+      "accepted": 75225335,
+      "shed_429_503": 9508272,
+      "client_errors": 209142,
+      "completed_webhooks": 74359947,
+      "failed_webhooks": 703208,
+      "duplicate_webhooks": 611,
+      "duplicate_webhooks_within_10m_of_restart": 611,
+      "finished_without_webhook": 161249,
+      "late_webhooks_after_ledger_closed": 0,
+      "webhooks_for_requests_that_errored_client_side": 0,
+      "webhooks_for_unknown_jobs": 0,
+      "webhooks_in_driver_restart_gaps": 0,
+      "lost": 878,
+      "lost_within_flush_window_of_kill": 46,
+      "stuck_over_24h": 0
+    },
+    "upstream_down_s_total": 2686,
+    "webhook_down_s_total": 803
+  },
+  "last_minute": {
+    "at": "2026-10-12T14:24:59Z",
+    "phase": "steady",
+    "offered_per_s": 500,
+    "accepted_per_s": 500.0166663333222,
+    "shed_per_s": 0,
+    "client_errors_per_s": 0,
+    "completed_per_s": 499.01666633398884,
+    "failed_per_s": 1.3999999990666665,
+    "duplicates_per_s": 0,
+    "accept_p50_ms": 14.94,
+    "accept_p99_ms": 127.83,
+    "e2e_p50_ms": 78.47,
+    "e2e_p99_ms": 9828.08,
+    "outstanding": 623,
+    "upstream_mode": "rate_limited_429",
+    "webhook_mode": "healthy",
+    "target": {
+      "aquifer_pid": 710,
+      "aquifer_running": true,
+      "aquifer_up_s": 850,
+      "data_bytes": 961931470,
+      "data_files": 107,
+      "go_heapalloc": 131460936,
+      "go_heapinuse": 149463040,
+      "go_heapobjects": 484898,
+      "go_heapsys": 292487168,
+      "go_numgc": 706,
+      "go_sys": 310114632,
+      "goroutines": 616,
+      "kills": 1,
+      "last_exit": "signal: killed at 2026-10-12T14:10:47Z",
+      "open_fds": 448,
+      "pebble_bytes": 893232259,
+      "pebble_files": 104,
+      "restarts": 1,
+      "rss_bytes": 232079360,
+      "supervisor_up_s": 15184,
+      "threads": 9,
+      "volume_free_bytes": 8930041856,
+      "volume_total_bytes": 10447245312
+    },
+    "queue_backlog": 638,
+    "active_queues": 1
+  },
+  "latest_report": {
+    "at": "2026-10-12T12:21:34.876771913Z",
+    "severity": "problem",
+    "summary": "Lost jobs rose 868 -\u003e 878: 10 accepted at a 10:11 full machine reboot, plus the unexplained 868 from 05:17; Pebble and RSS flat",
+    "body": "Uptime and restarts: run started 17:00:29 UTC Oct 10, now about 43h20m. Kill -9s in /events: 23:18 Oct 10, then 02:24, 06:54, 10:45, 14:25, 18:31, 21:53 (Oct 11), 01:15, 05:20:46 (Oct 12). That is 9 kills. No kill since 05:20:46, so the gap is now about 7h, outside the 3h to 4.5h cadence. Nothing in /events explains it. A full machine reboot (\"reboot\" event at 10:11:48.198, not a kill): pid 805 became 654, uptime reset, target restarts counter went to 0 in the 10:00 hour. It is not clear whether this is the 36h restart (due about 05:00 from run start). Earlier unexplained pid replacements at 19:17 Oct 10 and 00:34 Oct 11 are still open.\n\nLEDGER since my 09:20 report: lost 868 -\u003e 878 (+10). This is NEW. The 10 jobs were accepted 10:11:48.411 to .414, about 200 ms after the 10:11:48.198 reboot. They are not in the kill flush window, and the lost_within_flush_window counter stayed at 46, so the classifier does not cover reboots. The 10:11 minute shows client_errors 89/s and the 10:12 minute 270/s, which fits a refused-request window. Earlier 868 (accepted 05:17:00 to 05:17:53, 20 listed in recent_lost) are unchanged. Their outage was the 05:16:58 webhook-down window (140 s) with upstream switching 429 -\u003e healthy at the same second, and the kill came 3.5 min later at 05:20:46. The 05:00 hour max_outstanding was 35,654 against a usual cap of about 10,000, the largest backlog in the run. Ledger reconciles to within the usual offset of about 3 against the 46 flush-window jobs. Other counters: duplicates 130 -\u003e 611 (the jump is in the 10:00 hour, after the reboot, so the reboot is the likely cause; within_10m_of_restart matches); finished_without_webhook 161,057 -\u003e 161,249 (+192); failed 698,996 -\u003e 701,808; stuck_over_24h 0; outstanding 5 at 12:19.\n\nTrends (43 hourly rows, contiguous):\n- Pebble: plateau since 22:00 Oct 11. Hour ends 819 to 942 MB in the last 14 h (884 MB at 11:00). The 1.6 to 1.9 GB peak of Oct 11 afternoon is not coming back. Not a leak.\n- RSS hour ends 219 to 237 MB, flat since 00:00 Oct 12. Heap in use about 125 to 190 MB.\n- Open fds at hour ends: 270 to 470 (Oct 12). Earlier 438 to 626. Peaks come from the 4,335-goroutine and 1,380-fd chaos windows and fall back. No climb.\n- Accept p99 healthy steady about 70 to 155 ms. E2E p99 is dominated by outage windows, so it is not usable as a trend.\n- Daily ramp: ceiling 750/s on Oct 11 and again on Oct 12 (04:00). 1000/s not sustained on either day. Not falling.\n\nHarness: 43 hourly rows contiguous. The last complete hour is 11:00. minutes_target_unreachable 0. No generator_saturated in the last 3h. One driver restart gap, 19:16:57 Oct 10 (seq 4,270,644 to 4,350,000). No new alerts other than the lost-jobs one. The status-page alert text is \"878 accepted jobs lost\".\n\nUnexplained: (1) why 868 jobs accepted at 05:17 were never terminal, and whether the 05:20 kill caused it or it was the webhook/upstream transition alone; (2) why the 10:11 reboot dropped 10 accepted jobs about 200 ms after the signal; (3) why no kill for 7h; (4) the 19:17 and 00:34 pid replacements and the kill-counter off-by-one. The /logs grep returns nothing for known lost job IDs, so the logs cannot be checked.\n\nNext: (1) get persistent logs or a job-level trace for 05:16 to 05:21 Oct 12 and 10:11:40 to 10:12:10 Oct 12; (2) add reboot to the flush-window classifier, or count reboot losses separately; (3) confirm whether 10:11 was the 36h restart and whether the kill schedule has stopped; (4) reproduce a webhook-down window that ends with an upstream recovery, followed by a kill, in a controlled run."
+  },
+  "ledger": {
+    "counters": {
+      "submitted": 85669727,
+      "accepted": 75881143,
+      "shed_429_503": 9554127,
+      "client_errors": 234430,
+      "completed_webhooks": 74955646,
+      "failed_webhooks": 762563,
+      "duplicate_webhooks": 657,
+      "duplicate_webhooks_within_10m_of_restart": 657,
+      "finished_without_webhook": 161249,
+      "late_webhooks_after_ledger_closed": 0,
+      "webhooks_for_requests_that_errored_client_side": 0,
+      "webhooks_for_unknown_jobs": 0,
+      "webhooks_in_driver_restart_gaps": 0,
+      "lost": 878,
+      "lost_within_flush_window_of_kill": 46,
+      "stuck_over_24h": 0
+    },
+    "outstanding": 764,
+    "oldest_outstanding_age_s": 12,
+    "driver_restart_gaps": [
+      [
+        4270644,
+        4350000
+      ]
+    ],
+    "target_restarts_caused": 11,
+    "recent_lost": [
+      {
+        "seq": 68498569,
+        "job_id": "4288bc94d4b22c8f7ef15ac41b29692a",
+        "accepted_at": "2026-10-12T05:17:12.408Z",
+        "kind": "lost"
+      },
+      {
+        "seq": 68518165,
+        "job_id": "530a2f77e6b215808673dcd3a17b2662",
+        "accepted_at": "2026-10-12T05:17:51.409Z",
+        "kind": "lost"
+      },
+      {
+        "seq": 68519403,
+        "job_id": "78c446f5cd4938b2a87c81cb6d148186",
+        "accepted_at": "2026-10-12T05:17:53.869Z",
+        "kind": "lost"
+      },
+      {
+        "seq": 68512917,
+        "job_id": "f85cd9c229d11c600ca9f08c6725b23f",
+        "accepted_at": "2026-10-12T05:17:41.09Z",
+        "kind": "lost"
+      },
+      {
+        "seq": 68503677,
+        "job_id": "a1be016206c237648c47261344e580b2",
+        "accepted_at": "2026-10-12T05:17:22.877Z",
+        "kind": "lost"
+      },
+      {
+        "seq": 68510212,
+        "job_id": "d78600310cdf6a5fbf2ccf981b154202",
+        "accepted_at": "2026-10-12T05:17:35.723Z",
+        "kind": "lost"
+      },
+      {
+        "seq": 68495340,
+        "job_id": "4c3c895580298624d113608fac4f9ae1",
+        "accepted_at": "2026-10-12T05:17:05.93Z",
+        "kind": "lost"
+      },
+      {
+        "seq": 68494400,
+        "job_id": "66d2b643a160b95c5d9663cdd4b9510c",
+        "accepted_at": "2026-10-12T05:17:03.96Z",
+        "kind": "lost"
+      },
+      {
+        "seq": 68500505,
+        "job_id": "4010e9f66fa0fbb336b2062917bcfa85",
+        "accepted_at": "2026-10-12T05:17:16.749Z",
+        "kind": "lost"
+      },
+      {
+        "seq": 68519426,
+        "job_id": "f87a520bf530a19a72f5184271bb9583",
+        "accepted_at": "2026-10-12T05:17:53.959Z",
+        "kind": "lost"
+      },
+      {
+        "seq": 77786566,
+        "job_id": "62c9f127bc431336b434dd0affabe914",
+        "accepted_at": "2026-10-12T10:11:48.411Z",
+        "kind": "lost"
+      },
+      {
+        "seq": 77786576,
+        "job_id": "a1934ac3c436bab4a7b01a92880cebed",
+        "accepted_at": "2026-10-12T10:11:48.413Z",
+        "kind": "lost"
+      },
+      {
+        "seq": 77786574,
+        "job_id": "2eb9465d15987418842e4f4c4fa74604",
+        "accepted_at": "2026-10-12T10:11:48.413Z",
+        "kind": "lost"
+      },
+      {
+        "seq": 77786577,
+        "job_id": "1baeae837692bfbc54a5b812a0703e72",
+        "accepted_at": "2026-10-12T10:11:48.413Z",
+        "kind": "lost"
+      },
+      {
+        "seq": 77786567,
+        "job_id": "fd5f255d0625b31854fd8d4e31af8479",
+        "accepted_at": "2026-10-12T10:11:48.411Z",
+        "kind": "lost"
+      },
+      {
+        "seq": 77786565,
+        "job_id": "cd7339fe91849058aa5c0f38c3556972",
+        "accepted_at": "2026-10-12T10:11:48.412Z",
+        "kind": "lost"
+      },
+      {
+        "seq": 77786564,
+        "job_id": "896f54f8b3ce8519885f7bbfd78fa578",
+        "accepted_at": "2026-10-12T10:11:48.411Z",
+        "kind": "lost"
+      },
+      {
+        "seq": 77786575,
+        "job_id": "494941c82e3c99e437424d2758fb7fac",
+        "accepted_at": "2026-10-12T10:11:48.413Z",
+        "kind": "lost"
+      },
+      {
+        "seq": 77786563,
+        "job_id": "8c5075d16bf4339e876051c987e68201",
+        "accepted_at": "2026-10-12T10:11:48.412Z",
+        "kind": "lost"
+      },
+      {
+        "seq": 77786573,
+        "job_id": "57197e0789b33c562ee69e8d108cec53",
+        "accepted_at": "2026-10-12T10:11:48.414Z",
+        "kind": "lost"
+      }
+    ],
+    "run_started": "2026-10-10T17:00:29.731987922Z"
+  },
+  "more": {
+    "daily": "/status/daily",
+    "events": "/events?n=200",
+    "hourly": "/status/hourly?n=168",
+    "logs": "/logs?n=500\u0026grep=",
+    "minutes": "/status/minutes?n=180",
+    "reports": "/reports?n=20"
+  },
+  "now": "2026-10-12T14:25:13.61187023Z",
+  "offered_per_s": 500,
+  "paused": false,
+  "phase": "steady",
+  "recent_events": [
+    {
+      "at": "2026-10-12T10:16:59.18352517Z",
+      "kind": "webhook_mode",
+      "data": {
+        "mode": "healthy"
+      }
+    },
+    {
+      "at": "2026-10-12T10:16:59.18458636Z",
+      "kind": "upstream_mode",
+      "data": {
+        "mode": "rate_limited_429"
+      }
+    },
+    {
+      "at": "2026-10-12T10:26:59.191828894Z",
+      "kind": "upstream_mode",
+      "data": {
+        "mode": "healthy"
+      }
+    },
+    {
+      "at": "2026-10-12T10:54:59.135203317Z",
+      "kind": "burst_start",
+      "data": {
+        "for_s": 60,
+        "rate": 2000
+      }
+    },
+    {
+      "at": "2026-10-12T10:55:59.136015575Z",
+      "kind": "burst_end"
+    },
+    {
+      "at": "2026-10-12T10:56:59.213715201Z",
+      "kind": "upstream_mode",
+      "data": {
+        "mode": "rate_limited_429"
+      }
+    },
+    {
+      "at": "2026-10-12T11:06:59.220697267Z",
+      "kind": "upstream_mode",
+      "data": {
+        "mode": "healthy"
+      }
+    },
+    {
+      "at": "2026-10-12T11:26:59.234770751Z",
+      "kind": "upstream_mode",
+      "data": {
+        "mode": "errors_503"
+      }
+    },
+    {
+      "at": "2026-10-12T11:26:59.234789261Z",
+      "kind": "webhook_mode",
+      "data": {
+        "mode": "errors_503"
+      }
+    },
+    {
+      "at": "2026-10-12T11:36:59.242553909Z",
+      "kind": "upstream_mode",
+      "data": {
+        "mode": "healthy"
+      }
+    },
+    {
+      "at": "2026-10-12T11:36:59.242542119Z",
+      "kind": "webhook_mode",
+      "data": {
+        "mode": "healthy"
+      }
+    },
+    {
+      "at": "2026-10-12T11:55:59.177551276Z",
+      "kind": "burst_start",
+      "data": {
+        "for_s": 60,
+        "rate": 2000
+      }
+    },
+    {
+      "at": "2026-10-12T11:56:59.179124533Z",
+      "kind": "burst_end"
+    },
+    {
+      "at": "2026-10-12T11:56:59.257264405Z",
+      "kind": "upstream_mode",
+      "data": {
+        "mode": "errors_503"
+      }
+    },
+    {
+      "at": "2026-10-12T12:06:59.264694388Z",
+      "kind": "upstream_mode",
+      "data": {
+        "mode": "healthy"
+      }
+    },
+    {
+      "at": "2026-10-12T12:06:59.264749998Z",
+      "kind": "webhook_mode",
+      "data": {
+        "mode": "slow"
+      }
+    },
+    {
+      "at": "2026-10-12T12:16:59.272189255Z",
+      "kind": "webhook_mode",
+      "data": {
+        "mode": "healthy"
+      }
+    },
+    {
+      "at": "2026-10-12T12:36:59.28678137Z",
+      "kind": "upstream_mode",
+      "data": {
+        "mode": "errors_503"
+      }
+    },
+    {
+      "at": "2026-10-12T12:46:59.294288516Z",
+      "kind": "upstream_mode",
+      "data": {
+        "mode": "healthy"
+      }
+    },
+    {
+      "at": "2026-10-12T12:56:59.221211302Z",
+      "kind": "burst_start",
+      "data": {
+        "for_s": 60,
+        "rate": 2000
+      }
+    },
+    {
+      "at": "2026-10-12T12:56:59.301450304Z",
+      "kind": "upstream_mode",
+      "data": {
+        "mode": "errors_503"
+      }
+    },
+    {
+      "at": "2026-10-12T12:57:59.221952399Z",
+      "kind": "burst_end"
+    },
+    {
+      "at": "2026-10-12T13:06:59.308468768Z",
+      "kind": "upstream_mode",
+      "data": {
+        "mode": "healthy"
+      }
+    },
+    {
+      "at": "2026-10-12T13:46:59.337614958Z",
+      "kind": "webhook_mode",
+      "data": {
+        "mode": "slow"
+      }
+    },
+    {
+      "at": "2026-10-12T13:56:59.344550603Z",
+      "kind": "webhook_mode",
+      "data": {
+        "mode": "healthy"
+      }
+    },
+    {
+      "at": "2026-10-12T13:57:59.263528128Z",
+      "kind": "burst_start",
+      "data": {
+        "for_s": 60,
+        "rate": 2000
+      }
+    },
+    {
+      "at": "2026-10-12T13:58:59.265093154Z",
+      "kind": "burst_end"
+    },
+    {
+      "at": "2026-10-12T14:06:59.352072585Z",
+      "kind": "upstream_mode",
+      "data": {
+        "for_s": 227,
+        "mode": "down"
+      }
+    },
+    {
+      "at": "2026-10-12T14:10:47.760726883Z",
+      "kind": "kill",
+      "data": {
+        "at_unix_ms": 1791814247744
+      }
+    },
+    {
+      "at": "2026-10-12T14:16:59.359302906Z",
+      "kind": "upstream_mode",
+      "data": {
+        "mode": "rate_limited_429"
+      }
+    }
+  ],
+  "run_started": "2026-10-10T17:00:29.731987922Z",
+  "running_for_h": 45,
+  "upstream_mode": "rate_limited_429",
+  "webhook_mode": "healthy"
+}

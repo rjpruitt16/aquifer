@@ -10,4 +10,4 @@ RUN go build -o driver ./benchmark/soak/driver
 FROM alpine:3.22
 RUN apk add --no-cache ca-certificates
 COPY --from=builder /app/driver /driver
-ENTRYPOINT ["/driver", "-data", "/data"]
+ENTRYPOINT ["/driver"]

@@ -33,6 +33,7 @@ type supervisor struct {
 	cmdPath  string
 	dataDir  string
 	debugURL string
+	storeDir string
 	logFile  string
 
 	mu        sync.Mutex
@@ -58,9 +59,10 @@ func main() {
 	cmdPath := flag.String("cmd", "/app/aquifer", "Aquifer binary")
 	dataDir := flag.String("data", "/data", "Aquifer data directory, measured for size and file count")
 	debugURL := flag.String("debug", "http://127.0.0.1:6060", "Aquifer's AQUIFER_DEBUG_ADDR, for goroutine and heap stats")
+	store := flag.String("store", "aquifer.db", "store directory under -data, reported as pebble_bytes/pebble_files (Spillway: mnesia)")
 	flag.Parse()
 
-	s := &supervisor{cmdPath: *cmdPath, dataDir: *dataDir, debugURL: *debugURL,
+	s := &supervisor{cmdPath: *cmdPath, dataDir: *dataDir, debugURL: *debugURL, storeDir: filepath.Join(*dataDir, *store),
 		logFile: filepath.Join(*dataDir, "aquifer.log"), lines: make([]string, ringSize), bootAt: time.Now()}
 	s.openLog()
 	raiseFileLimit()
@@ -299,7 +301,7 @@ func (s *supervisor) handleStats(w http.ResponseWriter, r *http.Request) {
 	size, files := dirUsage(s.dataDir)
 	out["data_bytes"] = size
 	out["data_files"] = files
-	if peb, pebFiles := dirUsage(filepath.Join(s.dataDir, "aquifer.db")); pebFiles > 0 {
+	if peb, pebFiles := dirUsage(s.storeDir); pebFiles > 0 {
 		out["pebble_bytes"] = peb
 		out["pebble_files"] = pebFiles
 	}

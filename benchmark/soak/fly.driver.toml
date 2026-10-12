@@ -6,6 +6,9 @@ primary_region = "iad"
 [build]
   dockerfile = "Dockerfile.driver"
 
+[env]
+  SOAK_DATA = "/data/run-2"
+
 [http_service]
   internal_port = 8081
   force_https = true

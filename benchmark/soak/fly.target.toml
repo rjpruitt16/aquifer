@@ -8,6 +8,21 @@ kill_timeout = 30
 [build]
   dockerfile = "Dockerfile.target"
 
+# Each run keeps its data in its own directory on the volume.
+[env]
+  SOAK_DATA_DIR = "/data/run-2"
+  DB_PATH = "/data/run-2/aquifer.db"
+  SOAK_VALKEY = "1"
+  SOAK_VALKEY_MAXMEMORY = "600mb"
+  AQUIFER_VALKEY_URL = "redis://127.0.0.1:6379"
+  AQUIFER_WS_STREAM_MAX_EVENTS = "500"
+  AQUIFER_WS_STREAM_TTL_SECONDS = "3600"
+  AQUIFER_WS_MAX_CLIENT_CONNECTIONS = "3000"
+  AQUIFER_WS_MAX_UPSTREAM_CONNECTIONS = "3000"
+  AQUIFER_WS_MAX_WAITING_CONNECTIONS = "3000"
+  AQUIFER_WS_CONNECT_RPS = "200"
+  AQUIFER_WS_SLOW_START_RPS = "20"
+
 [[mounts]]
   source = "aquifer_soak_data"
   destination = "/data"

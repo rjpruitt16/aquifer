@@ -1,0 +1,62 @@
+[
+  {
+    "date": "2026-10-10",
+    "hours": 7,
+    "rss_mb_first": 227.41796875,
+    "rss_mb_last": 225.67578125,
+    "rss_mb_max": 395.2109375,
+    "goroutines_last": 367,
+    "goroutines_max": 4857,
+    "pebble_mb_first": 756.4366607666016,
+    "pebble_mb_last": 2364.2777910232544,
+    "e2e_p99_ms_median_of_hours": 36692.71,
+    "accept_p99_ms_median_of_hours": 279.03,
+    "accepted": 11053375,
+    "lost": 0,
+    "lost_within_flush_window": 2,
+    "duplicates": 9,
+    "finished_without_webhook": 29021
+  },
+  {
+    "date": "2026-10-11",
+    "hours": 24,
+    "rss_mb_first": 216.6640625,
+    "rss_mb_last": 231.97265625,
+    "rss_mb_max": 493.52734375,
+    "goroutines_last": 379,
+    "goroutines_max": 6046,
+    "pebble_mb_first": 1647.5739612579346,
+    "pebble_mb_last": 1013.7427549362183,
+    "e2e_p99_ms_median_of_hours": 38527.34,
+    "accept_p99_ms_median_of_hours": 356.12,
+    "accepted": 40425247,
+    "lost": 0,
+    "lost_within_flush_window": 29,
+    "duplicates": 66,
+    "finished_without_webhook": 87348,
+    "ramp_ceiling_per_s": 750,
+    "ramp_steps": [
+      {
+        "offered": 500,
+        "accepted_per_s": 497.1166666666667,
+        "shed_per_s": 2.9,
+        "completed_per_s": 663.6166666666667,
+        "sustained": true
+      },
+      {
+        "offered": 750,
+        "accepted_per_s": 749.65,
+        "shed_per_s": 0,
+        "completed_per_s": 746.3833333333333,
+        "sustained": true
+      },
+      {
+        "offered": 1000,
+        "accepted_per_s": 873.3333333333334,
+        "shed_per_s": 121.93333333333334,
+        "completed_per_s": 712.45,
+        "sustained": false
+      }
+    ]
+  }
+]

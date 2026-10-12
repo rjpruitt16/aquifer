@@ -1,15 +1,21 @@
 # Soak test
 
-A week of hostile synthetic load against one Aquifer node, looking for what
-short benchmarks miss: slow leaks, storage growth, drift in latency or in the
-throughput ceiling, and jobs lost across many crashes. Tracking issue:
+A week of hostile synthetic load against one node, looking for what short
+benchmarks miss: slow leaks, storage growth, drift in latency or in the
+throughput ceiling, and jobs lost across many crashes. HTTP jobs and
+WebSocket sessions run together, so interference between them shows up.
+The same harness soaks Spillway in parallel for comparison. Tracking issue:
 [#27](https://github.com/rjpruitt16/aquifer/issues/27).
+
+Results of finished runs are in [`results/`](results/). Each run keeps its
+data in its own directory on the volumes (`/data/run-2`, ...).
 
 ## Pieces
 
 **Target** (`aquifer-soak`, performance-1x, 10GB volume, Pebble, default 100ms
-flush). Aquifer runs under `supervisor`, which restarts it when it exits and,
-on private port 9090:
+flush, plus a local Valkey for WebSocket transcripts, started outside the
+supervisor so a kill leaves it up). Aquifer runs under `supervisor`, which
+restarts it when it exits and, on private port 9090:
 
 - `POST /kill` sends SIGKILL (the same as `kill -9`);
 - `POST /reboot` exits the machine's main process, so Fly restarts the machine;
@@ -22,15 +28,28 @@ on private port 9090:
 The target has no public service. The driver reaches it over Fly's private
 network.
 
-**Driver** (`aquifer-soak-driver`, performance-2x) runs everything else:
+**Spillway target** (`spillway-soak`, same size and volume, Mnesia) runs
+Spillway under the same supervisor. Its image is built from this repository
+with Spillway cloned at a pinned commit (`Dockerfile.spillway-target`).
+
+**Driver** (`aquifer-soak-driver`, and `spillway-soak-driver` with the same
+image pointed at Spillway through `SOAK_*` environment variables,
+performance-2x) runs everything else:
 
 - **Load:**
   - 500 jobs/s steady, about half of one performance-1x machine's measured
     capacity;
-  - 2,000 jobs/s for 60 seconds every hour;
-  - every day at 04:00 UTC, a ramp from 500 to 3,000 jobs/s in one-minute
-    steps, with both misbehaving endpoints held healthy. The highest step
-    Aquifer sustains is that day's ceiling.
+  - 2,000 jobs/s for 60 seconds at the top of every hour;
+  - 200 WebSocket sessions, each sending a command a second through the
+    target's `/websocket` to the driver's own aqueduct.v1 backend, which
+    answers each with an ack and 3 events;
+  - 1,000 sessions for 60 seconds at half past every hour, so WebSocket
+    peaks fall between the HTTP ones;
+  - every day at 16:15 UTC, both peaks at once;
+  - every day at 04:00 UTC, a ramp with every misbehaving endpoint held
+    healthy: HTTP jobs from 500 to 3,000/s on even days of the year,
+    WebSocket sessions from 200 to 2,500 on odd days, in one-minute steps.
+    The highest step the target sustains is that day's ceiling.
 - **Misbehaving upstream (`/work`):** every 10 minutes it picks one mode:
 
   | Mode | Share of slots | Behavior |
@@ -49,6 +68,15 @@ network.
   | slow | 8% | 0.2–2s latency |
   | errors | 5% | 20% of requests get 503 |
   | down | 2% | 1–3 minutes of 503s |
+
+- **Misbehaving WebSocket backend (`/socket`):** every 10 minutes it picks one mode:
+
+  | Mode | Share of slots | Behavior |
+  |---|---|---|
+  | healthy | 75% | normal |
+  | slow | 10% | 50–500ms before each event |
+  | dropping | 10% | about one socket in 30 closed each second |
+  | down | 5% | 1–3 minutes of 503 handshakes, open sockets closed |
 
 - **Chaos:**
   - `kill -9` every 3–5 hours;
@@ -69,6 +97,14 @@ network.
   | `stuck_over_24h` | still queued a day later |
   | `duplicate_webhooks` | at-least-once delivery. Also counted separately within 10 minutes of a restart |
 
+  WebSocket commands have their own ledger (`websocket` on `/status`). A
+  session reconnects from the stream ID of the last message it processed and
+  resends, with the same `message_id`, any command not answered within 15
+  seconds. A command still incomplete 5 minutes after it was first sent is
+  `lost_commands` if the target confirmed recording it (**this should stay
+  0**), `unrecorded_commands` otherwise. Duplicate and out-of-order events
+  are counted, separating duplicates that follow a resend.
+
   The ledger is saved to the driver's volume every 5 minutes, and sequence
   numbers are reserved on disk ahead of use. If the driver itself crashes, the
   jobs it sent since the last save are reported as a gap instead of as losses.
@@ -80,7 +116,8 @@ network.
 
 ## Status pages (public, read-only)
 
-`https://aquifer-soak-driver.fly.dev/` is a plain-text summary with alerts. The JSON endpoints are:
+`https://aquifer-soak-driver.fly.dev/` and `https://spillway-soak-driver.fly.dev/`
+are plain-text summaries with alerts. The JSON endpoints are:
 
 | Path | Contents |
 |---|---|
@@ -111,6 +148,20 @@ fly apps create aquifer-soak-driver --org ezthrottle
 fly deploy -c benchmark/soak/fly.target.toml --dockerfile benchmark/soak/Dockerfile.target --ha=false
 fly deploy -c benchmark/soak/fly.driver.toml --dockerfile benchmark/soak/Dockerfile.driver --ha=false
 ```
+
+Spillway, with a `SECRET_KEY_BASE` secret on `spillway-soak` and a
+`SOAK_REPORT_TOKEN` on `spillway-soak-driver`:
+
+```sh
+fly apps create spillway-soak --org ezthrottle
+fly apps create spillway-soak-driver --org ezthrottle
+fly deploy -c benchmark/soak/fly.spillway-target.toml --dockerfile benchmark/soak/Dockerfile.spillway-target \
+  --build-arg SPILLWAY_REF=<commit> --ha=false
+fly deploy -c benchmark/soak/fly.spillway-driver.toml --dockerfile benchmark/soak/Dockerfile.driver --ha=false
+```
+
+For a new run, change the run directory (`SOAK_DATA_DIR`, `DB_PATH` or
+`MNESIA_DIR`, and the driver's `SOAK_DATA`) in the four `fly.*.toml` files.
 
 Tear down with `fly apps destroy aquifer-soak` and `fly apps destroy
 aquifer-soak-driver`. Before that, copy `hourly.jsonl`, `daily.jsonl` and
