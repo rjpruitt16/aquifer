@@ -10,8 +10,8 @@ kill_timeout = 30
 
 # Each run keeps its data in its own directory on the volume.
 [env]
-  SOAK_DATA_DIR = "/data/run-3"
-  DB_PATH = "/data/run-3/aquifer.db"
+  SOAK_DATA_DIR = "/data/run-3b"
+  DB_PATH = "/data/run-3b/aquifer.db"
   SOAK_VALKEY = "1"
   SOAK_VALKEY_MAXMEMORY = "600mb"
   AQUIFER_VALKEY_URL = "redis://127.0.0.1:6379"
