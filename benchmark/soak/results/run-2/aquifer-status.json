@@ -1,0 +1,375 @@
+{
+  "alerts": [
+    "10 webhooks for jobs the driver never submitted"
+  ],
+  "config": {
+    "target": "http://aquifer-soak.internal:8080",
+    "supervisor": "http://aquifer-soak.internal:9090",
+    "self": "http://aquifer-soak-driver.internal:8080",
+    "steady_rate": 500,
+    "burst_rate": 2000,
+    "ramp_hour_utc": 4,
+    "ramp_steps": [
+      500,
+      750,
+      1000,
+      1250,
+      1500,
+      2000,
+      2500,
+      3000
+    ],
+    "users": 50,
+    "chaos": true,
+    "combined_peak_hour_utc": 16,
+    "name": "Aquifer",
+    "websocket": {
+      "enabled": true,
+      "steady_sessions": 200,
+      "burst_sessions": 1000,
+      "command_every_ms": 1000,
+      "events_per_command": 3,
+      "ramp_steps_sessions": [
+        200,
+        400,
+        800,
+        1200,
+        1600,
+        2000,
+        2500
+      ]
+    }
+  },
+  "daily": null,
+  "last_hour": {
+    "at": "2026-10-12T18:00:00Z",
+    "minutes": 60,
+    "accepted_per_s": 465.00361060854,
+    "shed_per_s": 59.94666642539361,
+    "client_errors_per_s": 0,
+    "completed_per_s": 464.8194438455084,
+    "failed_per_s": 0.19555555489796303,
+    "accept_p50_ms": 41.62,
+    "accept_p99_ms": 580.08,
+    "e2e_p50_ms": 127.83,
+    "e2e_p99_ms": 30187.18,
+    "max_outstanding": 10000,
+    "max_queue_backlog": 10000,
+    "rss_mb_end": 301.6328125,
+    "rss_mb_max": 530.015625,
+    "heap_inuse_mb_end": 183.0078125,
+    "goroutines_end": 1868,
+    "goroutines_max": 8139,
+    "open_fds_end": 876,
+    "pebble_mb_end": 699.7756643295288,
+    "pebble_files_end": 94,
+    "volume_free_pct_end": 78.86020410123591,
+    "target_restarts_total": 0,
+    "minutes_target_unreachable": 0,
+    "ledger_totals": {
+      "submitted": 6503642,
+      "accepted": 5679780,
+      "shed_429_503": 806608,
+      "client_errors": 15956,
+      "completed_webhooks": 5667183,
+      "failed_webhooks": 2678,
+      "duplicate_webhooks": 10,
+      "duplicate_webhooks_within_10m_of_restart": 0,
+      "finished_without_webhook": 97,
+      "late_webhooks_after_ledger_closed": 0,
+      "webhooks_for_requests_that_errored_client_side": 0,
+      "webhooks_for_unknown_jobs": 10,
+      "webhooks_in_driver_restart_gaps": 0,
+      "lost": 0,
+      "lost_within_flush_window_of_kill": 0,
+      "stuck_over_24h": 0
+    },
+    "upstream_down_s_total": 193,
+    "webhook_down_s_total": 140,
+    "websocket": {
+      "max_sessions_open": 1000,
+      "commands_sent_per_s": 111.72388885733713,
+      "commands_completed_per_s": 96.51694438513651,
+      "disconnects_per_s": 0.22222221822222232,
+      "command_p50_ms": 42476.4,
+      "command_p99_ms": 299033.35,
+      "upstream_down_s_total": 0,
+      "ledger_totals": {
+        "version": 2,
+        "handshakes": 2600,
+        "handshakes_rejected_by_status": {},
+        "handshake_errors": 0,
+        "replay_gaps_409": 0,
+        "disconnects": 2400,
+        "server_draining": 0,
+        "commands_sent": 1348349,
+        "commands_resent": 541182,
+        "commands_recorded": 1315952,
+        "commands_completed": 1256270,
+        "events_received": 3777087,
+        "duplicate_events": 716178,
+        "duplicate_events_after_resend": 716178,
+        "out_of_order_events": 8,
+        "messages_for_unknown_commands": 387938,
+        "lost_commands": 64248,
+        "messages_after_expiry": 0,
+        "unrecorded_commands": 17902
+      }
+    }
+  },
+  "last_minute": {
+    "at": "2026-10-12T19:34:36Z",
+    "phase": "steady",
+    "offered_per_s": 500,
+    "accepted_per_s": 499.91667116591674,
+    "shed_per_s": 0,
+    "client_errors_per_s": 0,
+    "completed_per_s": 499.95000449955006,
+    "failed_per_s": 0,
+    "duplicates_per_s": 0,
+    "accept_p50_ms": 20.02,
+    "accept_p99_ms": 82.4,
+    "e2e_p50_ms": 31.05,
+    "e2e_p99_ms": 140.93,
+    "outstanding": 63,
+    "upstream_mode": "healthy",
+    "webhook_mode": "slow",
+    "target": {
+      "aquifer_pid": 661,
+      "aquifer_running": true,
+      "aquifer_up_s": 1853,
+      "data_bytes": 918055314,
+      "data_files": 96,
+      "go_heapalloc": 197492064,
+      "go_heapinuse": 205586432,
+      "go_heapobjects": 1261794,
+      "go_heapsys": 380862464,
+      "go_numgc": 820,
+      "go_sys": 423938408,
+      "goroutines": 1637,
+      "kills": 0,
+      "last_exit": "",
+      "open_fds": 726,
+      "pebble_bytes": 770163669,
+      "pebble_files": 90,
+      "restarts": 0,
+      "rss_bytes": 286310400,
+      "supervisor_up_s": 1853,
+      "threads": 77,
+      "volume_free_bytes": 8194490368,
+      "volume_total_bytes": 10447245312
+    },
+    "queue_backlog": 186,
+    "active_queues": 1,
+    "websocket": {
+      "phase": "steady",
+      "sessions_wanted": 200,
+      "sessions_open": 200,
+      "commands_sent_per_s": 83.28333408288334,
+      "commands_completed_per_s": 275.88333581628336,
+      "duplicate_events_per_s": 0,
+      "disconnects_per_s": 13.333333453333335,
+      "handshakes_failed_per_s": 0,
+      "command_p50_ms": 192759.56,
+      "command_p99_ms": 212517.42,
+      "upstream_mode": "healthy"
+    }
+  },
+  "latest_report": {
+    "at": "2026-10-12T18:25:02.923881146Z",
+    "severity": "problem",
+    "summary": "HTTP lost=0 in 4.66M accepted; WebSocket lost_commands 27,803 and rising (~25/min), unexplained",
+    "body": "Uptime: Aquifer pid 660 up since ~15:23 UTC (aquifer_up_s 10836 at 18:23). No kills and no restarts so far (kills=0, restarts=0 in /events). The first kill -9 has not happened yet, so the flush-window case is untested. No prior reports exist (/reports returned null), so this is the baseline. /status/daily is null, and hourly history covers only 15:00-18:00, so there are no multi-day trends yet.\n\nHTTP ledger (cumulative): submitted 5,324,082; accepted 4,664,538; lost 0; lost_within_flush_window 0; stuck_over_24h 0; finished_without_webhook 97 (all in the 16:52 webhook-down window, 140s); failed_webhooks 2,056 (follows webhook down/503 modes); shed_429_503 643,544 (during bursts/ramps and 429 upstream); duplicate_webhooks 10 and webhooks_for_unknown_jobs 10, both unchanged since 15:00, so static, not growing; client_errors 15,956, all in the first 36 minutes, none since.\n\nWebSocket (ledger v2, which began at the 16:22 driver restart; the v0 ledger was discarded): lost_commands 27,803; messages_for_unknown_commands 172,164; commands_resent 286,571; duplicate_events 193,241. Hourly: 366 lost at 17:00, 27,208 at 18:00, 27,803 at 18:23. Unknown messages appeared in the 17:00 hour. I cannot tell from these pages whether Aquifer drops or mis-IDs commands, or whether the driver's resend/ID bookkeeping is wrong. Ruled out: unrecorded_commands 0 and handshake errors 0. Not ruled out: Aquifer dropping commands, or a harness bug.\n\nTrends: too short to call. Over 16:23-18:23 RSS ranged 262-455 MB, goroutines 1,552-7,717 (burst peaks), open fds 706-2,747, pebble 387-932 MB with 74-195 files. Accept p99 is 48-2,165 ms, with the 2,165 ms at 17:23 during recovery. Steady-phase e2e p99 is 14-37 s, which looks high for a healthy upstream, though the queue was backlogged by 429s. The harness looks healthy: minutes_target_unreachable 0, generator_saturated not raised, hourly summaries current, one driver gap of ~22 min (16:00-16:22, while Aquifer ran).\n\nOpen issue #39 (Pebble growth, filed 2026-10-11) is from the previous run. Current pebble is 915 MB, so it is not directly comparable.\n\nNext: (1) diff WS command IDs sent vs recorded vs completed for a few lost commands in /logs; (2) confirm whether the v0-to-v2 WS ledger change is the source of the unknown-message count; (3) schedule the first kill and check lost within the flush window; (4) keep watching the daily ramp ceiling once it exists."
+  },
+  "ledger": {
+    "counters": {
+      "submitted": 7477447,
+      "accepted": 6636108,
+      "shed_429_503": 825378,
+      "client_errors": 15956,
+      "completed_webhooks": 6631513,
+      "failed_webhooks": 2678,
+      "duplicate_webhooks": 10,
+      "duplicate_webhooks_within_10m_of_restart": 0,
+      "finished_without_webhook": 144,
+      "late_webhooks_after_ledger_closed": 0,
+      "webhooks_for_requests_that_errored_client_side": 0,
+      "webhooks_for_unknown_jobs": 10,
+      "webhooks_in_driver_restart_gaps": 0,
+      "lost": 0,
+      "lost_within_flush_window_of_kill": 0,
+      "stuck_over_24h": 0
+    },
+    "outstanding": 1773,
+    "oldest_outstanding_age_s": 967,
+    "driver_restart_gaps": [
+      [
+        1508885,
+        1600000
+      ],
+      [
+        6657397,
+        6750000
+      ]
+    ],
+    "target_restarts_caused": 0,
+    "run_started": "2026-10-12T15:23:43.908069187Z"
+  },
+  "more": {
+    "daily": "/status/daily",
+    "events": "/events?n=200",
+    "hourly": "/status/hourly?n=168",
+    "logs": "/logs?n=500\u0026grep=",
+    "minutes": "/status/minutes?n=180",
+    "reports": "/reports?n=20"
+  },
+  "now": "2026-10-12T19:34:58.43206873Z",
+  "offered_per_s": 500,
+  "paused": false,
+  "phase": "steady",
+  "recent_events": [
+    {
+      "at": "2026-10-12T19:04:36.057604397Z",
+      "kind": "driver_started",
+      "data": {
+        "config": {
+          "target": "http://aquifer-soak.internal:8080",
+          "supervisor": "http://aquifer-soak.internal:9090",
+          "self": "http://aquifer-soak-driver.internal:8080",
+          "steady_rate": 500,
+          "burst_rate": 2000,
+          "ramp_hour_utc": 4,
+          "ramp_steps": [
+            500,
+            750,
+            1000,
+            1250,
+            1500,
+            2000,
+            2500,
+            3000
+          ],
+          "users": 50,
+          "chaos": true,
+          "combined_peak_hour_utc": 16,
+          "name": "Aquifer",
+          "websocket": {
+            "enabled": true,
+            "steady_sessions": 200,
+            "burst_sessions": 1000,
+            "command_every_ms": 1000,
+            "events_per_command": 3,
+            "ramp_steps_sessions": [
+              200,
+              400,
+              800,
+              1200,
+              1600,
+              2000,
+              2500
+            ]
+          }
+        }
+      }
+    },
+    {
+      "at": "2026-10-12T19:04:36.057851237Z",
+      "kind": "ws_ledger_reset",
+      "data": {
+        "discarded": {
+          "version": 2,
+          "handshakes": 2615,
+          "handshakes_rejected_by_status": {
+            "409": 1
+          },
+          "handshake_errors": 138,
+          "replay_gaps_409": 1,
+          "disconnects": 2615,
+          "server_draining": 15,
+          "commands_sent": 1355713,
+          "commands_resent": 541484,
+          "commands_recorded": 1323406,
+          "commands_completed": 1272993,
+          "events_received": 3827121,
+          "duplicate_events": 716178,
+          "duplicate_events_after_resend": 716178,
+          "out_of_order_events": 8,
+          "messages_for_unknown_commands": 387938,
+          "lost_commands": 64818,
+          "messages_after_expiry": 0,
+          "unrecorded_commands": 17902
+        },
+        "version": 3
+      }
+    },
+    {
+      "at": "2026-10-12T19:06:35.828046234Z",
+      "kind": "load_resumed"
+    },
+    {
+      "at": "2026-10-12T19:14:36.084551996Z",
+      "kind": "webhook_mode",
+      "data": {
+        "mode": "errors_503"
+      }
+    },
+    {
+      "at": "2026-10-12T19:24:36.091805407Z",
+      "kind": "webhook_mode",
+      "data": {
+        "mode": "healthy"
+      }
+    },
+    {
+      "at": "2026-10-12T19:30:00.018364503Z",
+      "kind": "ws_burst_start",
+      "data": {
+        "for_s": 60,
+        "sessions": 1000
+      }
+    },
+    {
+      "at": "2026-10-12T19:31:00.019890784Z",
+      "kind": "ws_burst_end"
+    },
+    {
+      "at": "2026-10-12T19:34:36.09939262Z",
+      "kind": "webhook_mode",
+      "data": {
+        "mode": "slow"
+      }
+    }
+  ],
+  "run_started": "2026-10-12T15:23:43.908069187Z",
+  "running_for_h": 4,
+  "upstream_mode": "healthy",
+  "webhook_mode": "slow",
+  "websocket": {
+    "backend_mode": "healthy",
+    "ledger": {
+      "version": 3,
+      "handshakes": 1000,
+      "handshakes_rejected_by_status": {},
+      "handshake_errors": 0,
+      "replay_gaps_409": 0,
+      "disconnects": 800,
+      "server_draining": 0,
+      "commands_sent": 377219,
+      "commands_resent": 0,
+      "commands_recorded": 377207,
+      "commands_completed": 370017,
+      "events_received": 1110302,
+      "duplicate_events": 0,
+      "duplicate_events_after_resend": 0,
+      "out_of_order_events": 0,
+      "messages_for_unknown_commands": 0,
+      "lost_commands": 0,
+      "messages_after_expiry": 0,
+      "unrecorded_commands": 0
+    },
+    "paused": false,
+    "phase": "steady",
+    "sessions_open": 200,
+    "sessions_wanted": 200
+  }
+}

@@ -1,0 +1,452 @@
+{
+  "alerts": null,
+  "config": {
+    "target": "http://spillway-soak.internal:4000",
+    "supervisor": "http://spillway-soak.internal:9090",
+    "self": "http://spillway-soak-driver.internal:8080",
+    "steady_rate": 500,
+    "burst_rate": 2000,
+    "ramp_hour_utc": 4,
+    "ramp_steps": [
+      500,
+      750,
+      1000,
+      1250,
+      1500,
+      2000,
+      2500,
+      3000
+    ],
+    "users": 50,
+    "chaos": true,
+    "combined_peak_hour_utc": 16,
+    "name": "Spillway",
+    "websocket": {
+      "enabled": true,
+      "steady_sessions": 200,
+      "burst_sessions": 1000,
+      "command_every_ms": 1000,
+      "events_per_command": 3,
+      "ramp_steps_sessions": [
+        200,
+        400,
+        800,
+        1200,
+        1600,
+        2000,
+        2500
+      ]
+    }
+  },
+  "daily": null,
+  "last_hour": {
+    "at": "2026-10-12T18:00:00Z",
+    "minutes": 60,
+    "accepted_per_s": 0,
+    "shed_per_s": 0,
+    "client_errors_per_s": 0,
+    "completed_per_s": 0,
+    "failed_per_s": 0,
+    "accept_p50_ms": 0,
+    "accept_p99_ms": 0,
+    "e2e_p50_ms": 0,
+    "e2e_p99_ms": 0,
+    "max_outstanding": 0,
+    "max_queue_backlog": 0,
+    "rss_mb_end": 1582.9296875,
+    "rss_mb_max": 1622.51953125,
+    "heap_inuse_mb_end": 0,
+    "goroutines_end": 0,
+    "goroutines_max": 0,
+    "open_fds_end": 21,
+    "pebble_mb_end": 695.5502052307129,
+    "pebble_files_end": 13,
+    "volume_free_pct_end": 87.61258638663811,
+    "target_restarts_total": 117,
+    "minutes_target_unreachable": 14,
+    "ledger_totals": {
+      "submitted": 3069456,
+      "accepted": 340656,
+      "shed_429_503": 2324416,
+      "client_errors": 404384,
+      "completed_webhooks": 342560,
+      "failed_webhooks": 268,
+      "duplicate_webhooks": 970,
+      "duplicate_webhooks_within_10m_of_restart": 0,
+      "finished_without_webhook": 1,
+      "late_webhooks_after_ledger_closed": 0,
+      "webhooks_for_requests_that_errored_client_side": 1588,
+      "webhooks_for_unknown_jobs": 0,
+      "webhooks_in_driver_restart_gaps": 0,
+      "lost": 0,
+      "lost_within_flush_window_of_kill": 0,
+      "stuck_over_24h": 0
+    },
+    "upstream_down_s_total": 200,
+    "webhook_down_s_total": 0,
+    "websocket": {
+      "max_sessions_open": 0,
+      "commands_sent_per_s": 0,
+      "commands_completed_per_s": 0,
+      "disconnects_per_s": 0,
+      "command_p50_ms": 0,
+      "command_p99_ms": 0,
+      "upstream_down_s_total": 194,
+      "ledger_totals": {
+        "version": 2,
+        "handshakes": 0,
+        "handshakes_rejected_by_status": {
+          "429": 22302
+        },
+        "handshake_errors": 9096,
+        "replay_gaps_409": 0,
+        "disconnects": 0,
+        "server_draining": 0,
+        "commands_sent": 0,
+        "commands_resent": 0,
+        "commands_recorded": 0,
+        "commands_completed": 0,
+        "events_received": 0,
+        "duplicate_events": 0,
+        "duplicate_events_after_resend": 0,
+        "out_of_order_events": 0,
+        "messages_for_unknown_commands": 0,
+        "lost_commands": 0,
+        "unrecorded_commands": 0
+      }
+    }
+  },
+  "last_minute": {
+    "at": "2026-10-12T19:34:26Z",
+    "phase": "steady",
+    "offered_per_s": 500,
+    "accepted_per_s": 150.33333445331667,
+    "shed_per_s": 350.4833359444342,
+    "client_errors_per_s": 0,
+    "completed_per_s": 150.31666778652584,
+    "failed_per_s": 0,
+    "duplicates_per_s": 0,
+    "accept_p50_ms": 9.63,
+    "accept_p99_ms": 82.4,
+    "e2e_p50_ms": 107335.74,
+    "e2e_p99_ms": 158583.77,
+    "outstanding": 9999,
+    "upstream_mode": "rate_limited_429",
+    "webhook_mode": "slow",
+    "target": {
+      "aquifer_pid": 664,
+      "aquifer_running": true,
+      "aquifer_up_s": 1692,
+      "data_bytes": 1741038395,
+      "data_files": 31,
+      "kills": 0,
+      "last_exit": "",
+      "open_fds": 782,
+      "pebble_bytes": 729337252,
+      "pebble_files": 13,
+      "restarts": 0,
+      "rss_bytes": 2236645376,
+      "supervisor_up_s": 1692,
+      "threads": 18,
+      "volume_free_bytes": 8153255936,
+      "volume_total_bytes": 10447245312
+    },
+    "queue_backlog": 9735,
+    "active_queues": 1,
+    "websocket": {
+      "phase": "steady",
+      "sessions_wanted": 200,
+      "sessions_open": 200,
+      "commands_sent_per_s": 199.98333482320916,
+      "commands_completed_per_s": 205.700001532465,
+      "duplicate_events_per_s": 0,
+      "disconnects_per_s": 0,
+      "handshakes_failed_per_s": 0,
+      "command_p50_ms": 229.56,
+      "command_p99_ms": 2165.71,
+      "upstream_mode": "healthy"
+    }
+  },
+  "latest_report": null,
+  "ledger": {
+    "counters": {
+      "submitted": 3673505,
+      "accepted": 572420,
+      "shed_429_503": 2696671,
+      "client_errors": 404384,
+      "completed_webhooks": 564326,
+      "failed_webhooks": 268,
+      "duplicate_webhooks": 970,
+      "duplicate_webhooks_within_10m_of_restart": 0,
+      "finished_without_webhook": 1,
+      "late_webhooks_after_ledger_closed": 0,
+      "webhooks_for_requests_that_errored_client_side": 1588,
+      "webhooks_for_unknown_jobs": 0,
+      "webhooks_in_driver_restart_gaps": 0,
+      "lost": 0,
+      "lost_within_flush_window_of_kill": 0,
+      "stuck_over_24h": 0
+    },
+    "outstanding": 9998,
+    "oldest_outstanding_age_s": 219,
+    "driver_restart_gaps": [
+      [
+        2671916,
+        2750000
+      ]
+    ],
+    "target_restarts_caused": 0,
+    "run_started": "2026-10-12T14:47:48.084363446Z"
+  },
+  "more": {
+    "daily": "/status/daily",
+    "events": "/events?n=200",
+    "hourly": "/status/hourly?n=168",
+    "logs": "/logs?n=500\u0026grep=",
+    "minutes": "/status/minutes?n=180",
+    "reports": "/reports?n=20"
+  },
+  "now": "2026-10-12T19:34:59.44587305Z",
+  "offered_per_s": 500,
+  "paused": false,
+  "phase": "steady",
+  "recent_events": [
+    {
+      "at": "2026-10-12T16:22:26.017080534Z",
+      "kind": "webhook_mode",
+      "data": {
+        "mode": "errors_503"
+      }
+    },
+    {
+      "at": "2026-10-12T16:30:00.012951638Z",
+      "kind": "ws_burst_start",
+      "data": {
+        "for_s": 60,
+        "sessions": 1000
+      }
+    },
+    {
+      "at": "2026-10-12T16:31:00.015413667Z",
+      "kind": "ws_burst_end"
+    },
+    {
+      "at": "2026-10-12T16:32:26.033977126Z",
+      "kind": "upstream_mode",
+      "data": {
+        "mode": "rate_limited_429"
+      }
+    },
+    {
+      "at": "2026-10-12T16:32:26.034392728Z",
+      "kind": "webhook_mode",
+      "data": {
+        "mode": "healthy"
+      }
+    },
+    {
+      "at": "2026-10-12T16:35:41.121559408Z",
+      "kind": "load_paused"
+    },
+    {
+      "at": "2026-10-12T16:42:26.051917627Z",
+      "kind": "upstream_mode",
+      "data": {
+        "mode": "healthy"
+      }
+    },
+    {
+      "at": "2026-10-12T16:52:26.068616905Z",
+      "kind": "ws_upstream_mode",
+      "data": {
+        "mode": "slow"
+      }
+    },
+    {
+      "at": "2026-10-12T16:52:26.069529863Z",
+      "kind": "upstream_mode",
+      "data": {
+        "mode": "errors_503"
+      }
+    },
+    {
+      "at": "2026-10-12T17:02:26.086608872Z",
+      "kind": "upstream_mode",
+      "data": {
+        "mode": "healthy"
+      }
+    },
+    {
+      "at": "2026-10-12T17:02:26.086818657Z",
+      "kind": "ws_upstream_mode",
+      "data": {
+        "mode": "healthy"
+      }
+    },
+    {
+      "at": "2026-10-12T17:22:26.120789342Z",
+      "kind": "webhook_mode",
+      "data": {
+        "mode": "slow"
+      }
+    },
+    {
+      "at": "2026-10-12T17:32:26.137862005Z",
+      "kind": "webhook_mode",
+      "data": {
+        "mode": "healthy"
+      }
+    },
+    {
+      "at": "2026-10-12T17:52:26.171159277Z",
+      "kind": "ws_upstream_mode",
+      "data": {
+        "mode": "dropping"
+      }
+    },
+    {
+      "at": "2026-10-12T18:02:26.187973602Z",
+      "kind": "ws_upstream_mode",
+      "data": {
+        "for_s": 89,
+        "mode": "down"
+      }
+    },
+    {
+      "at": "2026-10-12T18:12:26.206694648Z",
+      "kind": "upstream_mode",
+      "data": {
+        "mode": "slow"
+      }
+    },
+    {
+      "at": "2026-10-12T18:12:26.2068473Z",
+      "kind": "ws_upstream_mode",
+      "data": {
+        "mode": "healthy"
+      }
+    },
+    {
+      "at": "2026-10-12T18:22:26.223540444Z",
+      "kind": "upstream_mode",
+      "data": {
+        "mode": "healthy"
+      }
+    },
+    {
+      "at": "2026-10-12T18:32:26.240814534Z",
+      "kind": "ws_upstream_mode",
+      "data": {
+        "for_s": 104,
+        "mode": "down"
+      }
+    },
+    {
+      "at": "2026-10-12T18:42:26.257694721Z",
+      "kind": "upstream_mode",
+      "data": {
+        "for_s": 200,
+        "mode": "down"
+      }
+    },
+    {
+      "at": "2026-10-12T18:42:26.257813702Z",
+      "kind": "ws_upstream_mode",
+      "data": {
+        "mode": "slow"
+      }
+    },
+    {
+      "at": "2026-10-12T18:52:26.274270079Z",
+      "kind": "ws_upstream_mode",
+      "data": {
+        "mode": "dropping"
+      }
+    },
+    {
+      "at": "2026-10-12T18:52:26.274387295Z",
+      "kind": "upstream_mode",
+      "data": {
+        "mode": "healthy"
+      }
+    },
+    {
+      "at": "2026-10-12T19:02:26.291151371Z",
+      "kind": "ws_upstream_mode",
+      "data": {
+        "for_s": 142,
+        "mode": "down"
+      }
+    },
+    {
+      "at": "2026-10-12T19:12:26.307706755Z",
+      "kind": "ws_upstream_mode",
+      "data": {
+        "mode": "healthy"
+      }
+    },
+    {
+      "at": "2026-10-12T19:14:51.319428363Z",
+      "kind": "load_resumed"
+    },
+    {
+      "at": "2026-10-12T19:30:00.098405367Z",
+      "kind": "ws_burst_start",
+      "data": {
+        "for_s": 60,
+        "sessions": 1000
+      }
+    },
+    {
+      "at": "2026-10-12T19:31:00.101283092Z",
+      "kind": "ws_burst_end"
+    },
+    {
+      "at": "2026-10-12T19:32:26.340798531Z",
+      "kind": "webhook_mode",
+      "data": {
+        "mode": "slow"
+      }
+    },
+    {
+      "at": "2026-10-12T19:32:26.341012644Z",
+      "kind": "upstream_mode",
+      "data": {
+        "mode": "rate_limited_429"
+      }
+    }
+  ],
+  "run_started": "2026-10-12T14:47:48.084363446Z",
+  "running_for_h": 4,
+  "upstream_mode": "rate_limited_429",
+  "webhook_mode": "slow",
+  "websocket": {
+    "backend_mode": "healthy",
+    "ledger": {
+      "version": 2,
+      "handshakes": 1000,
+      "handshakes_rejected_by_status": {
+        "429": 22302
+      },
+      "handshake_errors": 9096,
+      "replay_gaps_409": 0,
+      "disconnects": 800,
+      "server_draining": 0,
+      "commands_sent": 271095,
+      "commands_resent": 0,
+      "commands_recorded": 271081,
+      "commands_completed": 271036,
+      "events_received": 813134,
+      "duplicate_events": 0,
+      "duplicate_events_after_resend": 0,
+      "out_of_order_events": 0,
+      "messages_for_unknown_commands": 0,
+      "lost_commands": 0,
+      "unrecorded_commands": 0
+    },
+    "paused": false,
+    "phase": "steady",
+    "sessions_open": 200,
+    "sessions_wanted": 200
+  }
+}
