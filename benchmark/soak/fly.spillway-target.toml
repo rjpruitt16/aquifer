@@ -13,7 +13,11 @@ kill_timeout = 30
   SOAK_DATA_DIR = "/data/run-2"
   MNESIA_DIR = "/data/run-2/mnesia"
   SPILLWAY_DEFAULT_RPS = "5000"
-  SPILLWAY_MEMORY_LIMIT_MB = "1400"
+  # Admission compares the VM's own memory count with this limit, and the
+  # process's resident size runs up to ~1.4x that count. 1400 let RSS reach
+  # the 2GB machine's limit, so the kernel killed Spillway before admission
+  # ever refused a job (21 OOM kills in run 2's first hour).
+  SPILLWAY_MEMORY_LIMIT_MB = "1000"
   SPILLWAY_DB_MAX_BYTES = "6000000000"
   SPILLWAY_WS_STREAM_MAX_EVENTS = "500"
   SPILLWAY_WS_STREAM_TTL_SECONDS = "3600"

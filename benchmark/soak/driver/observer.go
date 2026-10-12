@@ -648,6 +648,7 @@ func (o *observer) wsStatus() any {
 	}
 	return map[string]any{
 		"phase":           o.d.wsPhase.Load(),
+		"paused":          o.d.paused.Load(),
 		"sessions_wanted": o.d.wsWanted.Load(),
 		"sessions_open":   o.d.wsLedger.open.Load(),
 		"backend_mode":    o.d.wsUpstream.modeName(),
