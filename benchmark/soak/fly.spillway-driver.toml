@@ -1,0 +1,33 @@
+# Soak driver for Spillway: the same image as aquifer-soak-driver, pointed at
+# spillway-soak. Only the read-only status pages (8081) are public.
+app = "spillway-soak-driver"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile.driver"
+
+[env]
+  SOAK_NAME = "Spillway"
+  SOAK_TARGET = "http://spillway-soak.internal:4000"
+  SOAK_SUPERVISOR = "http://spillway-soak.internal:9090"
+  SOAK_SELF = "http://spillway-soak-driver.internal:8080"
+  SOAK_DATA = "/data/run-2"
+
+[http_service]
+  internal_port = 8081
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = false
+  min_machines_running = 1
+
+[[mounts]]
+  source = "spillway_soak_driver_data"
+  destination = "/data"
+  initial_size = "3gb"
+
+[[restart]]
+  policy = "always"
+
+[[vm]]
+  size = "performance-2x"
+  memory = "4gb"

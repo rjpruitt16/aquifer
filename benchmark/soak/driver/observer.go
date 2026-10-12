@@ -43,7 +43,23 @@ type minute struct {
 	TargetError  string         `json:"target_error,omitempty"`
 	QueueBacklog float64        `json:"queue_backlog"`
 	ActiveQueues float64        `json:"active_queues"`
+	WS           *wsMinute      `json:"websocket,omitempty"`
 	accept, e2e  histCounts
+	wsCmd        histCounts
+}
+
+type wsMinute struct {
+	Phase        string  `json:"phase"`
+	Wanted       int64   `json:"sessions_wanted"`
+	Open         int64   `json:"sessions_open"`
+	Sent         float64 `json:"commands_sent_per_s"`
+	Completed    float64 `json:"commands_completed_per_s"`
+	Duplicates   float64 `json:"duplicate_events_per_s"`
+	Disconnects  float64 `json:"disconnects_per_s"`
+	Rejected     float64 `json:"handshakes_failed_per_s"`
+	CmdP50       float64 `json:"command_p50_ms"`
+	CmdP99       float64 `json:"command_p99_ms"`
+	UpstreamMode string  `json:"upstream_mode"`
 }
 
 // hour summarizes 60 minutes; these are what the monitoring agent compares
@@ -76,6 +92,18 @@ type hour struct {
 	Ledger          Counters  `json:"ledger_totals"`
 	UpstreamDownS   int64     `json:"upstream_down_s_total"`
 	WebhookDownS    int64     `json:"webhook_down_s_total"`
+	WS              *wsHour   `json:"websocket,omitempty"`
+}
+
+type wsHour struct {
+	MaxOpen     int64      `json:"max_sessions_open"`
+	Sent        float64    `json:"commands_sent_per_s"`
+	Completed   float64    `json:"commands_completed_per_s"`
+	Disconnects float64    `json:"disconnects_per_s"`
+	CmdP50      float64    `json:"command_p50_ms"`
+	CmdP99      float64    `json:"command_p99_ms"`
+	DownS       int64      `json:"upstream_down_s_total"`
+	Ledger      WSCounters `json:"ledger_totals"`
 }
 
 type day struct {
@@ -96,7 +124,11 @@ type day struct {
 	Duplicates     uint64     `json:"duplicates"`
 	NoWebhook      uint64     `json:"finished_without_webhook"`
 	Ceiling        int        `json:"ramp_ceiling_per_s,omitempty"`
+	RampKind       string     `json:"ramp_kind,omitempty"`
 	RampSteps      []rampStep `json:"ramp_steps,omitempty"`
+	WSCompleted    uint64     `json:"ws_commands_completed,omitempty"`
+	WSLost         uint64     `json:"ws_lost_commands,omitempty"`
+	WSDupEvents    uint64     `json:"ws_duplicate_events,omitempty"`
 }
 
 type observer struct {
@@ -110,6 +142,7 @@ type observer struct {
 }
 
 type ramp struct {
+	Kind    string
 	Ceiling int
 	Steps   []rampStep
 }
@@ -155,9 +188,9 @@ func appendJSONL(path string, v any) {
 	f.Write(append(b, '\n'))
 }
 
-func (o *observer) recordRamp(ceiling int, steps []rampStep) {
+func (o *observer) recordRamp(kind string, ceiling int, steps []rampStep) {
 	o.mu.Lock()
-	o.ramps[time.Now().UTC().Format("2006-01-02")] = ramp{ceiling, steps}
+	o.ramps[time.Now().UTC().Format("2006-01-02")] = ramp{kind, ceiling, steps}
 	o.mu.Unlock()
 }
 
@@ -195,6 +228,18 @@ func (o *observer) observe(now time.Time, secs float64) {
 	m.AcceptP50, m.AcceptP99 = m.accept.ms(0.5), m.accept.ms(0.99)
 	m.E2EP50, m.E2EP99 = m.e2e.ms(0.5), m.e2e.ms(0.99)
 	m.Outstanding = d.ledger.view().Outstanding
+	if d.cfg.WS.Enabled {
+		ww := &d.wsWin
+		m.wsCmd = ww.cmd.take()
+		m.WS = &wsMinute{Phase: d.wsPhase.Load().(string), Wanted: d.wsWanted.Load(), Open: d.wsLedger.open.Load(),
+			Sent:         float64(ww.sent.Swap(0)) / secs,
+			Completed:    float64(ww.completed.Swap(0)) / secs,
+			Duplicates:   float64(ww.dups.Swap(0)) / secs,
+			Disconnects:  float64(ww.disconnects.Swap(0)) / secs,
+			Rejected:     float64(ww.rejected.Swap(0)) / secs,
+			UpstreamMode: d.wsUpstream.modeName()}
+		m.WS.CmdP50, m.WS.CmdP99 = m.wsCmd.ms(0.5), m.wsCmd.ms(0.99)
+	}
 
 	c := &http.Client{Timeout: 15 * time.Second}
 	if st, err := fetchJSON(c, d.cfg.Supervisor+"/stats"); err == nil {
@@ -243,12 +288,22 @@ func num(m map[string]any, k string) float64 {
 // summarizeHour must be called with o.mu held.
 func (o *observer) summarizeHour(start time.Time) hour {
 	h := hour{At: start}
-	var acc, e2e histCounts
+	var acc, e2e, wsCmd histCounts
+	var ws wsHour
+	wsMinutes := 0
 	for _, m := range o.minutes {
 		if m.At.Truncate(time.Hour) != start {
 			continue
 		}
 		h.Minutes++
+		if m.WS != nil {
+			wsMinutes++
+			ws.MaxOpen = max(ws.MaxOpen, m.WS.Open)
+			ws.Sent += m.WS.Sent
+			ws.Completed += m.WS.Completed
+			ws.Disconnects += m.WS.Disconnects
+			wsCmd.merge(m.wsCmd)
+		}
 		h.Accepted += m.Accepted
 		h.Shed += m.Shed
 		h.ClientErrors += m.ClientErrors
@@ -285,6 +340,14 @@ func (o *observer) summarizeHour(start time.Time) hour {
 	h.Ledger = o.d.ledger.view().Counters
 	h.UpstreamDownS = o.d.upstream.downSeconds()
 	h.WebhookDownS = o.d.webhook.downSeconds()
+	if wsMinutes > 0 {
+		n := float64(wsMinutes)
+		ws.Sent, ws.Completed, ws.Disconnects = ws.Sent/n, ws.Completed/n, ws.Disconnects/n
+		ws.CmdP50, ws.CmdP99 = wsCmd.ms(0.5), wsCmd.ms(0.99)
+		ws.DownS = o.d.wsUpstream.downSeconds()
+		ws.Ledger = o.d.wsLedger.view()
+		h.WS = &ws
+	}
 	return h
 }
 
@@ -307,9 +370,13 @@ func (o *observer) closeDay(date string) {
 	// Totals are cumulative; the day's share is the change since the last
 	// hour before it.
 	var base Counters
+	var wsBase WSCounters
 	for _, h := range o.hours {
 		if h.At.Format("2006-01-02") < date {
 			base = h.Ledger
+			if h.WS != nil {
+				wsBase = h.WS.Ledger
+			}
 		}
 	}
 	dd := day{Date: date, Hours: len(hs)}
@@ -332,9 +399,15 @@ func (o *observer) closeDay(date string) {
 		dd.LostFlush = c.LostInFlushWindow - base.LostInFlushWindow
 		dd.Duplicates = c.Duplicates - base.Duplicates
 		dd.NoWebhook = c.TerminalNoWebhook - base.TerminalNoWebhook
+		if last.WS != nil {
+			w := last.WS.Ledger
+			dd.WSCompleted = w.Completed - wsBase.Completed
+			dd.WSLost = w.Lost - wsBase.Lost
+			dd.WSDupEvents = w.DupEvents - wsBase.DupEvents
+		}
 	}
 	if r, ok := o.ramps[date]; ok {
-		dd.Ceiling, dd.RampSteps = r.Ceiling, r.Steps
+		dd.Ceiling, dd.RampKind, dd.RampSteps = r.Ceiling, r.Kind, r.Steps
 	}
 	o.days = append(o.days, dd)
 	o.mu.Unlock()
@@ -354,6 +427,15 @@ func (o *observer) alerts(v ledgerView, last *minute) []string {
 	}
 	if c.UnknownWebhooks > 0 {
 		out = append(out, fmt.Sprintf("%d webhooks for jobs the driver never submitted", c.UnknownWebhooks))
+	}
+	if o.d.cfg.WS.Enabled {
+		w := o.d.wsLedger.view()
+		if w.Lost > 0 {
+			out = append(out, fmt.Sprintf("%d WebSocket commands recorded by the target but never completed", w.Lost))
+		}
+		if w.Unknown > 0 {
+			out = append(out, fmt.Sprintf("%d WebSocket messages for commands this driver never sent", w.Unknown))
+		}
 	}
 	if v.OldestAgeS > 3600 {
 		out = append(out, fmt.Sprintf("oldest unfinished job is %dm old", v.OldestAgeS/60))
@@ -428,6 +510,7 @@ func (o *observer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"upstream_mode": o.d.upstream.modeName(),
 		"webhook_mode":  o.d.webhook.modeName(),
 		"ledger":        v,
+		"websocket":     o.wsStatus(),
 		"last_minute":   last,
 		"last_hour":     lastHour,
 		"daily":         days,
@@ -520,7 +603,7 @@ func (o *observer) handleIndex(w http.ResponseWriter, r *http.Request) {
 	o.mu.Unlock()
 	c := v.Counters
 	var b strings.Builder
-	fmt.Fprintf(&b, "Aquifer soak test, running %s (since %s)\n\n", time.Since(v.RunStarted).Round(time.Minute), v.RunStarted.Format(time.RFC3339))
+	fmt.Fprintf(&b, "%s soak test, running %s (since %s)\n\n", o.d.cfg.Name, time.Since(v.RunStarted).Round(time.Minute), v.RunStarted.Format(time.RFC3339))
 	if a := o.alerts(v, last); len(a) > 0 {
 		b.WriteString("ALERTS\n")
 		for _, s := range a {
@@ -538,6 +621,13 @@ func (o *observer) handleIndex(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(&b, "\nlast minute (%s): offered %d/s, accepted %.0f/s, completed %.0f/s, shed %.1f/s, accept p99 %.1fms, e2e p99 %.0fms\n",
 			last.Phase, last.Offered, last.Accepted, last.Completed, last.Shed, last.AcceptP99, last.E2EP99)
 		fmt.Fprintf(&b, "upstream %s, webhook receiver %s\n", last.UpstreamMode, last.WebhookMode)
+		if ws := last.WS; ws != nil {
+			w := o.d.wsLedger.view()
+			fmt.Fprintf(&b, "\nwebsocket (%s): %d/%d sessions open, %.0f commands/s sent, %.0f/s completed, command p99 %.0fms, backend %s\n",
+				ws.Phase, ws.Open, ws.Wanted, ws.Sent, ws.Completed, ws.CmdP99, ws.UpstreamMode)
+			fmt.Fprintf(&b, "websocket totals: completed %d  lost %d  unrecorded %d  resent %d  duplicate events %d (%d after a resend)  out of order %d  replay gaps %d  disconnects %d\n",
+				w.Completed, w.Lost, w.Unrecorded, w.Resent, w.DupEvents, w.DupAfterResend, w.OutOfOrder, w.ReplayGaps, w.Disconnects)
+		}
 		if t := last.Target; t != nil {
 			fmt.Fprintf(&b, "target: rss %.0fMB, heap %.0fMB, goroutines %.0f, fds %.0f, pebble %.0fMB in %.0f files, restarts %.0f\n",
 				num(t, "rss_bytes")/(1<<20), num(t, "go_heapinuse")/(1<<20), num(t, "goroutines"), num(t, "open_fds"),
@@ -550,4 +640,17 @@ func (o *observer) handleIndex(w http.ResponseWriter, r *http.Request) {
 	b.WriteString("\nJSON: /status  /status/hourly  /status/minutes  /status/daily  /events  /logs  /reports\n")
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	io.WriteString(w, b.String())
+}
+
+func (o *observer) wsStatus() any {
+	if !o.d.cfg.WS.Enabled {
+		return nil
+	}
+	return map[string]any{
+		"phase":           o.d.wsPhase.Load(),
+		"sessions_wanted": o.d.wsWanted.Load(),
+		"sessions_open":   o.d.wsLedger.open.Load(),
+		"backend_mode":    o.d.wsUpstream.modeName(),
+		"ledger":          o.d.wsLedger.view(),
+	}
 }

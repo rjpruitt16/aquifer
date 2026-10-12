@@ -1,0 +1,17 @@
+Aquifer soak test, running 45h25m0s (since 2026-10-10T17:00:29Z)
+
+ALERTS
+  - 878 accepted jobs lost (not explained by the 100ms flush window); see recent_lost
+
+accepted 75881806  shed 9554127  client errors 234430
+webhooks: completed 74956403  failed 762564  duplicates 657
+finished without webhook 161249  lost 878  lost in flush window 46  stuck 0
+outstanding 669 (oldest 12s)  kills/restarts caused 11
+
+last minute (steady): offered 500/s, accepted 500/s, completed 499/s, shed 0.0/s, accept p99 127.8ms, e2e p99 9828ms
+upstream rate_limited_429, webhook receiver healthy
+target: rss 221MB, heap 143MB, goroutines 616, fds 448, pebble 852MB in 104 files, restarts 1
+
+latest monitor report (2026-10-12T12:21:34Z, problem): Lost jobs rose 868 -> 878: 10 accepted at a 10:11 full machine reboot, plus the unexplained 868 from 05:17; Pebble and RSS flat
+
+JSON: /status  /status/hourly  /status/minutes  /status/daily  /events  /logs  /reports

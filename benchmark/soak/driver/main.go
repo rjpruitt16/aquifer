@@ -51,6 +51,9 @@ type config struct {
 	RebootEvery time.Duration `json:"-"`
 	Users       int           `json:"users"`
 	Chaos       bool          `json:"chaos"`
+	PeakHourUTC int           `json:"combined_peak_hour_utc"`
+	Name        string        `json:"name"`
+	WS          wsConfig      `json:"websocket"`
 }
 
 // window counts one minute of activity.
@@ -76,16 +79,35 @@ type driver struct {
 	phase  atomic.Value // "steady", "burst", "ramp"
 	busy   sync.Mutex   // held by burst and ramp so they never overlap
 
+	runID      string // prefixes WebSocket session IDs, new per driver process
+	wsUpstream *endpoint
+	wsLedger   *wsLedger
+	wsWin      wsWindow
+	wsWanted   atomic.Int64 // sessions wanted right now
+	wsPhase    atomic.Value // "steady", "burst", "ramp"
+	wsBusy     sync.Mutex   // held by WebSocket bursts and ramps
+	wsSessions sync.Map     // index -> *wsSession
+
 	obs *observer
+}
+
+// envOr lets the deploy config set a flag's default, so one image serves
+// both the Aquifer and the Spillway soak.
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
 }
 
 func main() {
 	var cfg config
-	var rampSteps string
-	flag.StringVar(&cfg.Target, "target", "http://aquifer-soak.internal:8080", "Aquifer base URL")
-	flag.StringVar(&cfg.Supervisor, "supervisor", "http://aquifer-soak.internal:9090", "supervisor control URL")
-	flag.StringVar(&cfg.Self, "self", "http://aquifer-soak-driver.internal:8080", "base URL Aquifer uses to reach this driver")
-	flag.StringVar(&cfg.DataDir, "data", "/data", "where the ledger, snapshots and events are kept")
+	var rampSteps, wsRampSteps string
+	flag.StringVar(&cfg.Name, "name", envOr("SOAK_NAME", "Aquifer"), "name of the system under test, for the status page")
+	flag.StringVar(&cfg.Target, "target", envOr("SOAK_TARGET", "http://aquifer-soak.internal:8080"), "target base URL")
+	flag.StringVar(&cfg.Supervisor, "supervisor", envOr("SOAK_SUPERVISOR", "http://aquifer-soak.internal:9090"), "supervisor control URL")
+	flag.StringVar(&cfg.Self, "self", envOr("SOAK_SELF", "http://aquifer-soak-driver.internal:8080"), "base URL the target uses to reach this driver")
+	flag.StringVar(&cfg.DataDir, "data", envOr("SOAK_DATA", "/data"), "where the ledger, snapshots and events are kept")
 	flag.IntVar(&cfg.Rate, "rate", 500, "steady jobs/s")
 	flag.IntVar(&cfg.BurstRate, "burst-rate", 2000, "jobs/s during the hourly burst")
 	flag.DurationVar(&cfg.BurstEvery, "burst-every", time.Hour, "time between bursts")
@@ -98,7 +120,20 @@ func main() {
 	flag.DurationVar(&cfg.RebootEvery, "reboot-every", 36*time.Hour, "time between full machine restarts (0 disables)")
 	flag.IntVar(&cfg.Users, "users", 50, "distinct user_ids")
 	flag.BoolVar(&cfg.Chaos, "chaos", true, "misbehaving upstream/webhook receiver and kills")
+	flag.IntVar(&cfg.PeakHourUTC, "peak-hour", 16, "UTC hour (at :15) of the daily combined HTTP and WebSocket peak (-1 disables)")
+	flag.BoolVar(&cfg.WS.Enabled, "ws", envOr("SOAK_WS", "true") == "true", "WebSocket sessions through the target's /websocket")
+	flag.IntVar(&cfg.WS.Sessions, "ws-sessions", 200, "steady WebSocket sessions")
+	flag.IntVar(&cfg.WS.BurstSessions, "ws-burst-sessions", 1000, "WebSocket sessions during the half-hourly burst")
+	flag.DurationVar(&cfg.WS.CmdEvery, "ws-cmd-every", time.Second, "time between commands on each session")
+	flag.IntVar(&cfg.WS.Events, "ws-events", 3, "events the backend sends per command")
+	flag.StringVar(&wsRampSteps, "ws-ramp-steps", "200,400,800,1200,1600,2000,2500", "WebSocket ramp steps, sessions")
 	flag.Parse()
+	cfg.WS.CmdEveryMS = cfg.WS.CmdEvery.Milliseconds()
+	for _, s := range strings.Split(wsRampSteps, ",") {
+		if n, err := strconv.Atoi(strings.TrimSpace(s)); err == nil {
+			cfg.WS.RampSteps = append(cfg.WS.RampSteps, n)
+		}
+	}
 	for _, s := range strings.Split(rampSteps, ",") {
 		if n, err := strconv.Atoi(strings.TrimSpace(s)); err == nil {
 			cfg.RampSteps = append(cfg.RampSteps, n)
@@ -116,10 +151,17 @@ func main() {
 		client: &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{
 			MaxIdleConns: 4096, MaxIdleConnsPerHost: 4096, IdleConnTimeout: 60 * time.Second,
 		}},
-		sem: make(chan struct{}, 4096),
+		sem:        make(chan struct{}, 4096),
+		runID:      fmt.Sprintf("r%d", time.Now().Unix()),
+		wsUpstream: newEndpoint("ws_upstream", wsUpstreamModes),
+		wsLedger:   openWSLedger(cfg.DataDir),
 	}
 	d.rate.Store(int64(cfg.Rate))
 	d.phase.Store("steady")
+	d.wsPhase.Store("steady")
+	if cfg.WS.Enabled {
+		d.wsWanted.Store(int64(cfg.WS.Sessions))
+	}
 	d.obs = newObserver(d)
 	d.events.add("driver_started", map[string]any{"config": cfg})
 
@@ -127,6 +169,7 @@ func main() {
 	priv.HandleFunc("/.well-known/l8", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(404) })
 	priv.HandleFunc("/work", d.handleWork)
 	priv.HandleFunc("/hook", d.handleHook)
+	priv.HandleFunc("/socket", d.handleWSUpstream)
 	go func() { log.Fatal(http.ListenAndServe(":8080", priv)) }()
 
 	pub := http.NewServeMux()
@@ -138,7 +181,16 @@ func main() {
 	if cfg.Chaos {
 		go d.upstream.schedule(10*time.Minute, d.events, stop)
 		go d.webhook.schedule(10*time.Minute, d.events, stop)
+		if cfg.WS.Enabled {
+			go d.wsUpstream.schedule(10*time.Minute, d.events, stop)
+		}
 		go d.killLoop(stop)
+	}
+	if cfg.WS.Enabled {
+		go d.wsManager(stop)
+		go d.wsExpireLoop(stop)
+		go d.wsBurstLoop(stop)
+		go d.peakLoop(stop)
 	}
 	go d.burstLoop(stop)
 	go d.rampLoop(stop)
@@ -152,6 +204,9 @@ func main() {
 	<-sig
 	close(stop)
 	if err := d.ledger.save(); err != nil {
+		logf("%v", err)
+	}
+	if err := d.wsLedger.save(); err != nil {
 		logf("%v", err)
 	}
 	d.events.add("driver_stopped", nil)
@@ -237,13 +292,18 @@ func (d *driver) submit() {
 	}
 }
 
-// burstLoop offers burst-rate load for burst-for, every burst-every.
+// burstLoop offers burst-rate load for burst-for at the top of every hour
+// (every burst-every when that isn't an hour, as in local runs).
 func (d *driver) burstLoop(stop <-chan struct{}) {
 	for {
+		wait := d.cfg.BurstEvery
+		if wait == time.Hour {
+			wait = untilNext(0)
+		}
 		select {
 		case <-stop:
 			return
-		case <-time.After(d.cfg.BurstEvery):
+		case <-time.After(wait):
 		}
 		if d.paused.Load() || !d.busy.TryLock() {
 			continue // paused, or a ramp is running
@@ -268,8 +328,10 @@ type rampStep struct {
 }
 
 // rampLoop runs once a day at ramp-hour UTC: holds the misbehaving endpoints
-// healthy, steps the rate up, and records the highest rate Aquifer sustained.
-// A falling ceiling over the week is drift that short benchmarks miss.
+// healthy, steps the load up, and records the highest step the target
+// sustained. With WebSockets on, odd days of the year ramp WebSocket sessions
+// instead of HTTP jobs. A falling ceiling over the week is drift that short
+// benchmarks miss.
 func (d *driver) rampLoop(stop <-chan struct{}) {
 	if d.cfg.RampHourUTC < 0 {
 		return
@@ -286,8 +348,23 @@ func (d *driver) rampLoop(stop <-chan struct{}) {
 		case <-time.After(time.Until(next)):
 		}
 		d.busy.Lock()
+		d.wsBusy.Lock()
 		d.upstream.forced.Store(true)
 		d.webhook.forced.Store(true)
+		d.wsUpstream.forced.Store(true)
+		if d.cfg.WS.Enabled && next.YearDay()%2 == 1 {
+			d.events.add("ws_ramp_start", map[string]any{"steps_sessions": d.cfg.WS.RampSteps})
+			ceiling, steps := d.wsRamp()
+			time.Sleep(2 * time.Minute)
+			d.upstream.forced.Store(false)
+			d.webhook.forced.Store(false)
+			d.wsUpstream.forced.Store(false)
+			d.obs.recordRamp("websocket_sessions", ceiling, steps)
+			d.events.add("ws_ramp_end", map[string]any{"ceiling_sessions": ceiling, "steps": steps})
+			d.wsBusy.Unlock()
+			d.busy.Unlock()
+			continue
+		}
 		d.phase.Store("ramp")
 		d.events.add("ramp_start", map[string]any{"steps": d.cfg.RampSteps})
 		var steps []rampStep
@@ -313,9 +390,11 @@ func (d *driver) rampLoop(stop <-chan struct{}) {
 		time.Sleep(2 * time.Minute) // let the backlog drain before chaos resumes
 		d.upstream.forced.Store(false)
 		d.webhook.forced.Store(false)
+		d.wsUpstream.forced.Store(false)
 		d.phase.Store("steady")
-		d.obs.recordRamp(ceiling, steps)
+		d.obs.recordRamp("http_jobs_per_s", ceiling, steps)
 		d.events.add("ramp_end", map[string]any{"ceiling": ceiling, "steps": steps})
+		d.wsBusy.Unlock()
 		d.busy.Unlock()
 	}
 }
@@ -338,7 +417,9 @@ func (d *driver) killLoop(stop <-chan struct{}) {
 		case <-time.After(wait):
 		}
 		d.busy.Lock() // never during a burst or ramp, so their numbers stay clean
+		d.wsBusy.Lock()
 		if d.paused.Load() {
+			d.wsBusy.Unlock()
 			d.busy.Unlock()
 			continue
 		}
@@ -359,6 +440,7 @@ func (d *driver) killLoop(stop <-chan struct{}) {
 			d.events.add(action, map[string]any{"at_unix_ms": at.UnixMilli()})
 		}
 		time.Sleep(30 * time.Second)
+		d.wsBusy.Unlock()
 		d.busy.Unlock()
 	}
 }
@@ -428,6 +510,9 @@ func (d *driver) saveLoop(stop <-chan struct{}) {
 		case <-tick.C:
 			if err := d.ledger.save(); err != nil {
 				d.events.add("ledger_save_failed", map[string]any{"error": err.Error()})
+			}
+			if err := d.wsLedger.save(); err != nil {
+				d.events.add("ws_ledger_save_failed", map[string]any{"error": err.Error()})
 			}
 		}
 	}
