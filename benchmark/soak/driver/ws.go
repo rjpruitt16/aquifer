@@ -63,7 +63,10 @@ type wsConfig struct {
 // wsLedgerVersion changes when the meaning of the counters changes. A saved
 // ledger from another version is logged as an event and replaced, so one
 // run's totals never mix two behaviours. 2: resends only after a reconnect.
-const wsLedgerVersion = 2
+// 3: each session gets a new ID (a reused one replayed the old session's
+// transcript, counted as unknown messages), and messages for commands
+// already counted lost are counted separately.
+const wsLedgerVersion = 3
 
 // WSCounters are cumulative and saved with the ledger.
 type WSCounters struct {
@@ -84,6 +87,7 @@ type WSCounters struct {
 	OutOfOrder        uint64            `json:"out_of_order_events"`
 	Unknown           uint64            `json:"messages_for_unknown_commands"`
 	Lost              uint64            `json:"lost_commands"`
+	AfterExpiry       uint64            `json:"messages_after_expiry"`
 	Unrecorded        uint64            `json:"unrecorded_commands"`
 }
 
@@ -265,12 +269,19 @@ type wsSession struct {
 	next    int
 	mu      sync.Mutex
 	pending map[string]*wsCmd
-	done    map[string]bool // recently completed, to tell duplicates from unknowns
+	done    map[string]doneKind // recently closed, to tell duplicates and late messages from unknowns
 	order   []string
 }
 
-func (s *wsSession) markDone(mid string) {
-	s.done[mid] = true
+type doneKind uint8
+
+const (
+	doneCompleted doneKind = iota + 1
+	doneExpired
+)
+
+func (s *wsSession) markDone(mid string, kind doneKind) {
+	s.done[mid] = kind
 	s.order = append(s.order, mid)
 	if len(s.order) > 1024 {
 		delete(s.done, s.order[0])
@@ -300,8 +311,11 @@ func (d *driver) wsManager(stop <-chan struct{}) {
 		for i := 0; i < want; i++ {
 			if !running[i] {
 				running[i] = true
-				s := &wsSession{d: d, idx: i, id: fmt.Sprintf("%s-ws-%d", d.runID, i),
-					pending: map[string]*wsCmd{}, done: map[string]bool{}}
+				// A new ID each time: a burst session started at the same
+				// index as an earlier one would otherwise connect without a
+				// cursor and get the earlier session's whole transcript.
+				s := &wsSession{d: d, idx: i, id: fmt.Sprintf("%s-ws-%d-%d", d.runID, i, time.Now().UnixMilli()),
+					pending: map[string]*wsCmd{}, done: map[string]doneKind{}}
 				d.wsSessions.Store(i, s)
 				go func() {
 					s.run(stop)
@@ -555,12 +569,15 @@ func (s *wsSession) handleBackend(m wsEnvelope, now time.Time) {
 	}
 	c := s.pending[m.CausedBy]
 	if c == nil {
-		known := s.done[m.CausedBy]
+		kind := s.done[m.CausedBy]
 		s.mu.Unlock()
-		if known {
+		switch kind {
+		case doneCompleted:
 			d.wsLedger.add(func(cc *WSCounters) { cc.DupEvents++; cc.DupAfterResend++ })
 			d.wsWin.dups.Add(1)
-		} else {
+		case doneExpired:
+			d.wsLedger.add(func(cc *WSCounters) { cc.AfterExpiry++ })
+		default:
 			d.wsLedger.add(func(cc *WSCounters) { cc.Unknown++ })
 		}
 		return
@@ -594,7 +611,7 @@ func (s *wsSession) handleBackend(m wsEnvelope, now time.Time) {
 	resent := c.sends > 1
 	if complete {
 		delete(s.pending, m.CausedBy)
-		s.markDone(m.CausedBy)
+		s.markDone(m.CausedBy, doneCompleted)
 	}
 	s.mu.Unlock()
 
@@ -636,7 +653,7 @@ func (s *wsSession) expire(now time.Time) {
 				unrecorded++
 			}
 			delete(s.pending, mid)
-			s.markDone(mid)
+			s.markDone(mid, doneExpired)
 		}
 	}
 	s.mu.Unlock()

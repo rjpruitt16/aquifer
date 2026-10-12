@@ -431,7 +431,7 @@ func (o *observer) alerts(v ledgerView, last *minute) []string {
 	if o.d.cfg.WS.Enabled {
 		w := o.d.wsLedger.view()
 		if w.Lost > 0 {
-			out = append(out, fmt.Sprintf("%d WebSocket commands recorded by the target but never completed", w.Lost))
+			out = append(out, fmt.Sprintf("%d WebSocket commands recorded by the target but not completed within 5 minutes (%d of their messages arrived later)", w.Lost, w.AfterExpiry))
 		}
 		if w.Unknown > 0 {
 			out = append(out, fmt.Sprintf("%d WebSocket messages for commands this driver never sent", w.Unknown))
