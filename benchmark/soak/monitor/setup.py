@@ -1,15 +1,20 @@
 # Copyright 2026 Rahmi Pruitt
 # SPDX-License-Identifier: Apache-2.0
 
-"""Creates the soak monitor on Claude Managed Agents: a locked-down
+"""Creates a soak monitor on Claude Managed Agents: a locked-down
 environment, a vault holding the two secrets, the agent, and a scheduled
-deployment (created paused, so a manual dry run comes first).
+deployment (created paused, so a manual dry run comes first). One monitor
+per soak target:
 
-    ANTHROPIC_API_KEY=... SOAK_REPORT_TOKEN_FILE=... GITHUB_TOKEN_FILE=... \
+    SOAK_MONITOR_TARGET=spillway ANTHROPIC_API_KEY=... \
+        SOAK_REPORT_TOKEN_FILE=... GITHUB_TOKEN_FILE=... \
         python3 benchmark/soak/monitor/setup.py
 
-Secrets are read from files and sent only to the vault; nothing is printed
-except resource IDs. IDs are written to monitor/ids.json.
+SOAK_MONITOR_TARGET is aquifer (the default) or spillway. The report token is
+that target's driver's SOAK_REPORT_TOKEN. Re-running updates the agent's
+instructions in place. Secrets are read from files and sent only to the
+vault; nothing is printed except resource IDs. IDs are written to
+monitor/ids.json (aquifer) or monitor/ids-spillway.json.
 """
 import json
 import os
@@ -19,7 +24,36 @@ import urllib.request
 
 API = "https://api.anthropic.com/v1"
 HERE = pathlib.Path(__file__).parent
-STATUS_HOST = "aquifer-soak-driver.fly.dev"
+
+TARGETS = {
+    "aquifer": {
+        "SYSTEM": "Aquifer",
+        "OTHER": "Spillway",
+        "DESCRIPTION": "a Go job queue and WebSocket proxy that sits between AI agents and rate-limited upstream APIs, storing jobs in Pebble and WebSocket transcripts in a local Valkey.",
+        "HOST": "aquifer-soak-driver.fly.dev",
+        "REPO": "rjpruitt16/aquifer",
+        "STORE": "Pebble",
+        "FLUSH": "Aquifer syncs writes every 100ms, so jobs accepted just before a kill -9 may be lost;",
+        "ids": "ids.json",
+        "cron": "15 */6 * * *",
+    },
+    "spillway": {
+        "SYSTEM": "Spillway",
+        "OTHER": "Aquifer",
+        "DESCRIPTION": "an Elixir job queue and WebSocket proxy, Aquifer's sibling implementation of the same API, that sits between AI agents and rate-limited upstream APIs and stores jobs and WebSocket transcripts in Mnesia.",
+        "HOST": "spillway-soak-driver.fly.dev",
+        "REPO": "rjpruitt16/spillway",
+        "STORE": "Mnesia",
+        "FLUSH": "jobs accepted within 300ms before a kill -9; Mnesia's durability window differs from Aquifer's 100ms flush, so if these are frequent, say so rather than assuming they are expected;",
+        "ids": "ids-spillway.json",
+        "cron": "45 */6 * * *",
+    },
+}
+TARGET_NAME = os.environ.get("SOAK_MONITOR_TARGET", "aquifer")
+if TARGET_NAME not in TARGETS:
+    raise SystemExit(f"SOAK_MONITOR_TARGET must be one of {', '.join(TARGETS)}")
+TARGET = TARGETS[TARGET_NAME]
+STATUS_HOST = TARGET["HOST"]
 MODEL = os.environ.get("SOAK_MONITOR_MODEL", "claude-haiku-5-5")
 BUDGET_CENTS = os.environ.get("SOAK_MONITOR_BUDGET_CENTS", "100")  # per run
 
@@ -47,12 +81,24 @@ def secret(env):
     return pathlib.Path(os.environ[env]).read_text().strip()
 
 
-ids_path = HERE / "ids.json"
+
+
+def instructions():
+    text = (HERE / "system.md").read_text()
+    for key, value in TARGET.items():
+        if key.isupper():
+            text = text.replace("{{" + key + "}}", value)
+    if "{{" in text:
+        raise SystemExit("system.md has a placeholder setup.py doesn't fill")
+    return text
+
+
+ids_path = HERE / TARGET["ids"]
 ids = json.loads(ids_path.read_text()) if ids_path.exists() else {}
 
 if "environment" not in ids:
     env = call("POST", "/environments", {
-        "name": "aquifer-soak-monitor",
+        "name": f"{TARGET_NAME}-soak-monitor",
         "config": {"type": "cloud", "networking": {
             "type": "limited",
             "allowed_hosts": [STATUS_HOST, "api.github.com"],
@@ -61,7 +107,7 @@ if "environment" not in ids:
     ids["environment"] = env["id"]
 
 if "vault" not in ids:
-    vault = call("POST", "/vaults", {"display_name": "aquifer-soak-monitor"})
+    vault = call("POST", "/vaults", {"display_name": f"{TARGET_NAME}-soak-monitor"})
     ids["vault"] = vault["id"]
     for name, file_env, host in [
         ("SOAK_REPORT_TOKEN", "SOAK_REPORT_TOKEN_FILE", STATUS_HOST),
@@ -79,9 +125,9 @@ if "vault" not in ids:
         })
 
 agent_body = {
-    "name": "Aquifer soak monitor",
+    "name": f"{TARGET['SYSTEM']} soak monitor",
     "model": MODEL,
-    "system": (HERE / "system.md").read_text(),
+    "system": instructions(),
     "tools": [{"type": "agent_toolset_20260401"}],
 }
 if "agent" not in ids:
@@ -91,14 +137,14 @@ else:
 
 if "deployment" not in ids:
     dep = call("POST", "/deployments", {
-        "name": "Aquifer soak monitor, every 6h",
+        "name": f"{TARGET['SYSTEM']} soak monitor, every 6h",
         "agent": ids["agent"],
         "environment_id": ids["environment"],
         "vault_ids": [ids["vault"]],
         "initial_events": [{"type": "user.message", "content": [{"type": "text", "text":
             "Run your soak-test check now: read your earlier reports, review the status pages, "
             "post one report, and raise a soak-alert issue only if something warrants it."}]}],
-        "schedule": {"type": "cron", "expression": "15 */6 * * *", "timezone": "UTC"},
+        "schedule": {"type": "cron", "expression": TARGET["cron"], "timezone": "UTC"},
         "budget": {"type": "limit", "max_list_cost": {"amount": BUDGET_CENTS, "currency": "USD"}},
     })
     ids["deployment"] = dep["id"]
