@@ -10,12 +10,11 @@ kill_timeout = 30
   dockerfile = "Dockerfile.spillway-target"
 
 [env]
-  SOAK_DATA_DIR = "/data/run-2"
-  # run-2/mnesia grew past what 2GB of RAM could reload on boot (Mnesia
-  # disc_copies tables live entirely in RAM), so Spillway crash-looped even
-  # with no load. Restarted on 4GB with an empty store; the old directory is
-  # kept for inspection.
-  MNESIA_DIR = "/data/run-2/mnesia-4gb"
+  SOAK_DATA_DIR = "/data/run-3"
+  # Run 2's store grew past what 2GB of RAM could reload on boot (Mnesia
+  # disc_copies tables live entirely in RAM) and Spillway crash-looped, so
+  # it runs on 4GB from run 3, twice Aquifer's memory.
+  MNESIA_DIR = "/data/run-3/mnesia"
   SPILLWAY_DEFAULT_RPS = "5000"
   # Admission compares the VM's own memory count with this limit, and the
   # process's resident size runs up to ~1.4x that count. 1400 let RSS reach

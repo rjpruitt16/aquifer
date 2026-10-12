@@ -1,0 +1,113 @@
+[
+  {
+    "at": "2026-10-12T19:04:36.057604397Z",
+    "kind": "driver_started",
+    "data": {
+      "config": {
+        "target": "http://aquifer-soak.internal:8080",
+        "supervisor": "http://aquifer-soak.internal:9090",
+        "self": "http://aquifer-soak-driver.internal:8080",
+        "steady_rate": 500,
+        "burst_rate": 2000,
+        "ramp_hour_utc": 4,
+        "ramp_steps": [
+          500,
+          750,
+          1000,
+          1250,
+          1500,
+          2000,
+          2500,
+          3000
+        ],
+        "users": 50,
+        "chaos": true,
+        "combined_peak_hour_utc": 16,
+        "name": "Aquifer",
+        "websocket": {
+          "enabled": true,
+          "steady_sessions": 200,
+          "burst_sessions": 1000,
+          "command_every_ms": 1000,
+          "events_per_command": 3,
+          "ramp_steps_sessions": [
+            200,
+            400,
+            800,
+            1200,
+            1600,
+            2000,
+            2500
+          ]
+        }
+      }
+    }
+  },
+  {
+    "at": "2026-10-12T19:04:36.057851237Z",
+    "kind": "ws_ledger_reset",
+    "data": {
+      "discarded": {
+        "version": 2,
+        "handshakes": 2615,
+        "handshakes_rejected_by_status": {
+          "409": 1
+        },
+        "handshake_errors": 138,
+        "replay_gaps_409": 1,
+        "disconnects": 2615,
+        "server_draining": 15,
+        "commands_sent": 1355713,
+        "commands_resent": 541484,
+        "commands_recorded": 1323406,
+        "commands_completed": 1272993,
+        "events_received": 3827121,
+        "duplicate_events": 716178,
+        "duplicate_events_after_resend": 716178,
+        "out_of_order_events": 8,
+        "messages_for_unknown_commands": 387938,
+        "lost_commands": 64818,
+        "messages_after_expiry": 0,
+        "unrecorded_commands": 17902
+      },
+      "version": 3
+    }
+  },
+  {
+    "at": "2026-10-12T19:06:35.828046234Z",
+    "kind": "load_resumed"
+  },
+  {
+    "at": "2026-10-12T19:14:36.084551996Z",
+    "kind": "webhook_mode",
+    "data": {
+      "mode": "errors_503"
+    }
+  },
+  {
+    "at": "2026-10-12T19:24:36.091805407Z",
+    "kind": "webhook_mode",
+    "data": {
+      "mode": "healthy"
+    }
+  },
+  {
+    "at": "2026-10-12T19:30:00.018364503Z",
+    "kind": "ws_burst_start",
+    "data": {
+      "for_s": 60,
+      "sessions": 1000
+    }
+  },
+  {
+    "at": "2026-10-12T19:31:00.019890784Z",
+    "kind": "ws_burst_end"
+  },
+  {
+    "at": "2026-10-12T19:34:36.09939262Z",
+    "kind": "webhook_mode",
+    "data": {
+      "mode": "slow"
+    }
+  }
+]

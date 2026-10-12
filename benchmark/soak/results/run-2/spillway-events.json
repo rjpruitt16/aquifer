@@ -1,0 +1,279 @@
+[
+  {
+    "at": "2026-10-12T16:22:26.001494945Z",
+    "kind": "driver_started",
+    "data": {
+      "config": {
+        "target": "http://spillway-soak.internal:4000",
+        "supervisor": "http://spillway-soak.internal:9090",
+        "self": "http://spillway-soak-driver.internal:8080",
+        "steady_rate": 500,
+        "burst_rate": 2000,
+        "ramp_hour_utc": 4,
+        "ramp_steps": [
+          500,
+          750,
+          1000,
+          1250,
+          1500,
+          2000,
+          2500,
+          3000
+        ],
+        "users": 50,
+        "chaos": true,
+        "combined_peak_hour_utc": 16,
+        "name": "Spillway",
+        "websocket": {
+          "enabled": true,
+          "steady_sessions": 200,
+          "burst_sessions": 1000,
+          "command_every_ms": 1000,
+          "events_per_command": 3,
+          "ramp_steps_sessions": [
+            200,
+            400,
+            800,
+            1200,
+            1600,
+            2000,
+            2500
+          ]
+        }
+      }
+    }
+  },
+  {
+    "at": "2026-10-12T16:22:26.001878851Z",
+    "kind": "ws_ledger_reset",
+    "data": {
+      "discarded": {
+        "version": 0,
+        "handshakes": 2121,
+        "handshakes_rejected_by_status": {
+          "429": 29648
+        },
+        "handshake_errors": 29711,
+        "replay_gaps_409": 0,
+        "disconnects": 2121,
+        "server_draining": 0,
+        "commands_sent": 507210,
+        "commands_resent": 582311,
+        "commands_recorded": 505808,
+        "commands_completed": 493103,
+        "events_received": 1479957,
+        "duplicate_events": 546508,
+        "duplicate_events_after_resend": 546508,
+        "out_of_order_events": 0,
+        "messages_for_unknown_commands": 0,
+        "lost_commands": 12705,
+        "unrecorded_commands": 1404
+      },
+      "version": 2
+    }
+  },
+  {
+    "at": "2026-10-12T16:22:26.017080534Z",
+    "kind": "webhook_mode",
+    "data": {
+      "mode": "errors_503"
+    }
+  },
+  {
+    "at": "2026-10-12T16:30:00.012951638Z",
+    "kind": "ws_burst_start",
+    "data": {
+      "for_s": 60,
+      "sessions": 1000
+    }
+  },
+  {
+    "at": "2026-10-12T16:31:00.015413667Z",
+    "kind": "ws_burst_end"
+  },
+  {
+    "at": "2026-10-12T16:32:26.033977126Z",
+    "kind": "upstream_mode",
+    "data": {
+      "mode": "rate_limited_429"
+    }
+  },
+  {
+    "at": "2026-10-12T16:32:26.034392728Z",
+    "kind": "webhook_mode",
+    "data": {
+      "mode": "healthy"
+    }
+  },
+  {
+    "at": "2026-10-12T16:35:41.121559408Z",
+    "kind": "load_paused"
+  },
+  {
+    "at": "2026-10-12T16:42:26.051917627Z",
+    "kind": "upstream_mode",
+    "data": {
+      "mode": "healthy"
+    }
+  },
+  {
+    "at": "2026-10-12T16:52:26.068616905Z",
+    "kind": "ws_upstream_mode",
+    "data": {
+      "mode": "slow"
+    }
+  },
+  {
+    "at": "2026-10-12T16:52:26.069529863Z",
+    "kind": "upstream_mode",
+    "data": {
+      "mode": "errors_503"
+    }
+  },
+  {
+    "at": "2026-10-12T17:02:26.086608872Z",
+    "kind": "upstream_mode",
+    "data": {
+      "mode": "healthy"
+    }
+  },
+  {
+    "at": "2026-10-12T17:02:26.086818657Z",
+    "kind": "ws_upstream_mode",
+    "data": {
+      "mode": "healthy"
+    }
+  },
+  {
+    "at": "2026-10-12T17:22:26.120789342Z",
+    "kind": "webhook_mode",
+    "data": {
+      "mode": "slow"
+    }
+  },
+  {
+    "at": "2026-10-12T17:32:26.137862005Z",
+    "kind": "webhook_mode",
+    "data": {
+      "mode": "healthy"
+    }
+  },
+  {
+    "at": "2026-10-12T17:52:26.171159277Z",
+    "kind": "ws_upstream_mode",
+    "data": {
+      "mode": "dropping"
+    }
+  },
+  {
+    "at": "2026-10-12T18:02:26.187973602Z",
+    "kind": "ws_upstream_mode",
+    "data": {
+      "for_s": 89,
+      "mode": "down"
+    }
+  },
+  {
+    "at": "2026-10-12T18:12:26.206694648Z",
+    "kind": "upstream_mode",
+    "data": {
+      "mode": "slow"
+    }
+  },
+  {
+    "at": "2026-10-12T18:12:26.2068473Z",
+    "kind": "ws_upstream_mode",
+    "data": {
+      "mode": "healthy"
+    }
+  },
+  {
+    "at": "2026-10-12T18:22:26.223540444Z",
+    "kind": "upstream_mode",
+    "data": {
+      "mode": "healthy"
+    }
+  },
+  {
+    "at": "2026-10-12T18:32:26.240814534Z",
+    "kind": "ws_upstream_mode",
+    "data": {
+      "for_s": 104,
+      "mode": "down"
+    }
+  },
+  {
+    "at": "2026-10-12T18:42:26.257694721Z",
+    "kind": "upstream_mode",
+    "data": {
+      "for_s": 200,
+      "mode": "down"
+    }
+  },
+  {
+    "at": "2026-10-12T18:42:26.257813702Z",
+    "kind": "ws_upstream_mode",
+    "data": {
+      "mode": "slow"
+    }
+  },
+  {
+    "at": "2026-10-12T18:52:26.274270079Z",
+    "kind": "ws_upstream_mode",
+    "data": {
+      "mode": "dropping"
+    }
+  },
+  {
+    "at": "2026-10-12T18:52:26.274387295Z",
+    "kind": "upstream_mode",
+    "data": {
+      "mode": "healthy"
+    }
+  },
+  {
+    "at": "2026-10-12T19:02:26.291151371Z",
+    "kind": "ws_upstream_mode",
+    "data": {
+      "for_s": 142,
+      "mode": "down"
+    }
+  },
+  {
+    "at": "2026-10-12T19:12:26.307706755Z",
+    "kind": "ws_upstream_mode",
+    "data": {
+      "mode": "healthy"
+    }
+  },
+  {
+    "at": "2026-10-12T19:14:51.319428363Z",
+    "kind": "load_resumed"
+  },
+  {
+    "at": "2026-10-12T19:30:00.098405367Z",
+    "kind": "ws_burst_start",
+    "data": {
+      "for_s": 60,
+      "sessions": 1000
+    }
+  },
+  {
+    "at": "2026-10-12T19:31:00.101283092Z",
+    "kind": "ws_burst_end"
+  },
+  {
+    "at": "2026-10-12T19:32:26.340798531Z",
+    "kind": "webhook_mode",
+    "data": {
+      "mode": "slow"
+    }
+  },
+  {
+    "at": "2026-10-12T19:32:26.341012644Z",
+    "kind": "upstream_mode",
+    "data": {
+      "mode": "rate_limited_429"
+    }
+  }
+]
