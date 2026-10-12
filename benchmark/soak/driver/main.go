@@ -154,8 +154,9 @@ func main() {
 		sem:        make(chan struct{}, 4096),
 		runID:      fmt.Sprintf("r%d", time.Now().Unix()),
 		wsUpstream: newEndpoint("ws_upstream", wsUpstreamModes),
-		wsLedger:   openWSLedger(cfg.DataDir),
 	}
+	var discardedWS *WSCounters
+	d.wsLedger, discardedWS = openWSLedger(cfg.DataDir)
 	d.rate.Store(int64(cfg.Rate))
 	d.phase.Store("steady")
 	d.wsPhase.Store("steady")
@@ -164,6 +165,9 @@ func main() {
 	}
 	d.obs = newObserver(d)
 	d.events.add("driver_started", map[string]any{"config": cfg})
+	if discardedWS != nil {
+		d.events.add("ws_ledger_reset", map[string]any{"version": wsLedgerVersion, "discarded": discardedWS})
+	}
 
 	priv := http.NewServeMux()
 	priv.HandleFunc("/.well-known/l8", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(404) })

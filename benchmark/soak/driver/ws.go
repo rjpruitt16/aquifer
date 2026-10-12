@@ -14,11 +14,15 @@ package main
 // and every event have arrived.
 //
 // The session keeps the stream_id of the last message it processed and
-// reconnects from it. Commands that were recorded but not answered when a
-// connection dropped are resent with the same message_id, since aqueduct.v1
-// does not replay commands after an ambiguous upstream failure. A command
-// still incomplete 5 minutes after it was first sent is counted as lost if
-// the target confirmed recording it, unrecorded otherwise.
+// reconnects from it. aqueduct.v1 does not replay commands after an
+// ambiguous upstream failure, so unanswered commands are resent, with the
+// same message_id, exactly when one may have been lost: after the session
+// reconnects (once the replay is done), and when the target reports a new
+// backend connection (status "connected" after the first). A slow answer on
+// a healthy connection is never resent: run 2 first resent on a 15s timer,
+// and under load that became a retry storm of its own. A command still
+// incomplete 5 minutes after it was first sent is counted as lost if the
+// target confirmed recording it, unrecorded otherwise.
 
 import (
 	"encoding/json"
@@ -56,8 +60,14 @@ type wsConfig struct {
 	RampSteps     []int         `json:"ramp_steps_sessions"`
 }
 
+// wsLedgerVersion changes when the meaning of the counters changes. A saved
+// ledger from another version is logged as an event and replaced, so one
+// run's totals never mix two behaviours. 2: resends only after a reconnect.
+const wsLedgerVersion = 2
+
 // WSCounters are cumulative and saved with the ledger.
 type WSCounters struct {
+	Version           int               `json:"version"`
 	Handshakes        uint64            `json:"handshakes"`
 	HandshakeRejected map[string]uint64 `json:"handshakes_rejected_by_status"`
 	HandshakeErrors   uint64            `json:"handshake_errors"`
@@ -84,15 +94,26 @@ type wsLedger struct {
 	open atomic.Int64 // sessions connected right now
 }
 
-func openWSLedger(dir string) *wsLedger {
+// openWSLedger loads the saved ledger. It returns the saved counters it
+// discarded, if they were from another ledger version.
+func openWSLedger(dir string) (*wsLedger, *WSCounters) {
 	l := &wsLedger{path: filepath.Join(dir, "ws-ledger.json")}
+	var discarded *WSCounters
 	if b, err := os.ReadFile(l.path); err == nil {
-		json.Unmarshal(b, &l.c)
+		var saved WSCounters
+		if json.Unmarshal(b, &saved) == nil {
+			if saved.Version == wsLedgerVersion {
+				l.c = saved
+			} else {
+				discarded = &saved
+			}
+		}
 	}
+	l.c.Version = wsLedgerVersion
 	if l.c.HandshakeRejected == nil {
 		l.c.HandshakeRejected = map[string]uint64{}
 	}
-	return l
+	return l, discarded
 }
 
 func (l *wsLedger) add(f func(c *WSCounters)) {
@@ -388,8 +409,9 @@ func (s *wsSession) connectOnce(stop <-chan struct{}) bool {
 
 	closed := make(chan struct{})
 	replayed := make(chan struct{}, 1)
-	go s.writer(conn, send, closed, replayed, stop)
-	s.reader(conn, replayed)
+	upstreamBack := make(chan struct{}, 1)
+	go s.writer(conn, send, closed, replayed, upstreamBack, stop)
+	s.reader(conn, replayed, upstreamBack)
 	close(closed)
 	conn.Close()
 	d.wsLedger.add(func(c *WSCounters) { c.Disconnects++ })
@@ -397,7 +419,7 @@ func (s *wsSession) connectOnce(stop <-chan struct{}) bool {
 	return true
 }
 
-func (s *wsSession) writer(conn *websocket.Conn, send func(string, bool) error, closed <-chan struct{}, replayed <-chan struct{}, stop <-chan struct{}) {
+func (s *wsSession) writer(conn *websocket.Conn, send func(string, bool) error, closed, replayed, upstreamBack <-chan struct{}, stop <-chan struct{}) {
 	d := s.d
 	// Wait for the replay to finish before resending, so commands the
 	// backend already answered aren't sent twice.
@@ -407,17 +429,17 @@ func (s *wsSession) writer(conn *websocket.Conn, send func(string, bool) error, 
 	case <-closed:
 		return
 	}
-	resend := func(olderThan time.Duration) {
+	// resend sends every unanswered command again. Only called when a
+	// command may have been lost: a new client or backend connection.
+	resend := func() {
 		now := time.Now()
 		var mids []string
 		s.mu.Lock()
 		for mid, c := range s.pending {
 			if !c.acked || c.gotN < len(c.got) {
-				if now.Sub(c.lastSent) >= olderThan {
-					c.lastSent = now
-					c.sends++
-					mids = append(mids, mid)
-				}
+				c.lastSent = now
+				c.sends++
+				mids = append(mids, mid)
 			}
 		}
 		s.mu.Unlock()
@@ -427,7 +449,7 @@ func (s *wsSession) writer(conn *websocket.Conn, send func(string, bool) error, 
 			}
 		}
 	}
-	resend(0)
+	resend()
 
 	every := d.cfg.WS.CmdEvery
 	tick := time.NewTicker(every)
@@ -443,8 +465,9 @@ func (s *wsSession) writer(conn *websocket.Conn, send func(string, bool) error, 
 		case <-stop:
 			conn.Close()
 			return
+		case <-upstreamBack:
+			resend()
 		case <-check.C:
-			resend(15 * time.Second)
 			s.mu.Lock()
 			idle := len(s.pending) == 0
 			s.mu.Unlock()
@@ -474,8 +497,15 @@ func (s *wsSession) writer(conn *websocket.Conn, send func(string, bool) error, 
 	}
 }
 
-func (s *wsSession) reader(conn *websocket.Conn, replayed chan<- struct{}) {
+func (s *wsSession) reader(conn *websocket.Conn, replayed, upstreamBack chan<- struct{}) {
 	d := s.d
+	backendConnected := false
+	signal := func(ch chan<- struct{}) {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
 	for {
 		conn.SetReadDeadline(time.Now().Add(2 * time.Minute))
 		var m wsEnvelope
@@ -486,10 +516,17 @@ func (s *wsSession) reader(conn *websocket.Conn, replayed chan<- struct{}) {
 		switch m.Type {
 		case "status":
 			switch m.State {
-			case "replay_complete", "connected":
-				select {
-				case replayed <- struct{}{}:
-				default:
+			case "replay_complete":
+				signal(replayed)
+			case "connected":
+				// The first one belongs to this client connection; a later
+				// one means the target reconnected the backend, and commands
+				// in flight then may never have reached it.
+				if backendConnected {
+					signal(upstreamBack)
+				} else {
+					backendConnected = true
+					signal(replayed)
 				}
 			case "server_draining":
 				d.wsLedger.add(func(c *WSCounters) { c.ServerDraining++ })
