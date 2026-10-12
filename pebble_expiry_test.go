@@ -126,3 +126,49 @@ func TestPebbleStatusChangeReplacesExpiryKey(t *testing.T) {
 		t.Fatalf("expected empty store, got %+v", counts)
 	}
 }
+
+// Cleanup spans several batches: every expired job and its idempotency key
+// go, and the queued count stays right.
+func TestPebbleCleanupAcrossBatches(t *testing.T) {
+	store := NewPebbleStore(filepath.Join(t.TempDir(), "pebble"))
+	defer store.Close()
+
+	n := expireBatchSize*2 + 7
+	for i := 0; i < n; i++ {
+		job := expiryTestJob(store, fmt.Sprintf("batch-%d", i))
+		store.UpdateStatus(job.ID, StatusCompleted)
+	}
+	queued := expiryTestJob(store, "still-queued")
+
+	store.deleteExpired(time.Now().Add(31 * time.Minute).UnixMilli())
+	if got := countExpiryKeys(t, store); got != 1 {
+		t.Fatalf("expected only the queued job's expiry key left, got %d", got)
+	}
+	if counts := store.Counts(); counts.QueueDepth != 1 {
+		t.Fatalf("expected 1 queued job counted, got %+v", counts)
+	}
+	if _, ok := store.getRecord(queued.ID); !ok {
+		t.Fatal("queued job was deleted before its expiry")
+	}
+	// The expired jobs' idempotency keys are free again.
+	again := NewJob(&JobRequest{UserID: "u", IdempotentKey: "batch-0", URL: "http://x", Method: "POST", WebhookURL: "http://w"})
+	if existing, dup := store.CheckOrInsert(again); dup {
+		t.Fatalf("idempotency key of an expired job still points at %s", existing)
+	}
+}
+
+func BenchmarkPebbleDeleteExpired(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		store := NewPebbleStore(filepath.Join(b.TempDir(), "pebble"))
+		for j := 0; j < 20000; j++ {
+			job := NewJob(&JobRequest{UserID: "u", IdempotentKey: fmt.Sprintf("bench-%d-%d", i, j), URL: "http://x", Method: "POST", WebhookURL: "http://w"})
+			store.CheckOrInsert(job)
+			store.UpdateStatus(job.ID, StatusCompleted)
+		}
+		b.StartTimer()
+		store.deleteExpired(time.Now().Add(31 * time.Minute).UnixMilli())
+		b.StopTimer()
+		store.Close()
+	}
+}

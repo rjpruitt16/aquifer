@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/cockroachdb/pebble/bloom"
 )
 
 // PebbleStore is a memory-first LSM-tree alternative to the SQLite-backed
@@ -128,6 +129,10 @@ func NewPebbleStore(path string) *PebbleStore {
 	db, err := pebble.Open(path, &pebble.Options{
 		Cache:              cache,
 		WALMinSyncInterval: func() time.Duration { return syncInterval },
+		// Bloom filters let a lookup for a key that isn't there (every new
+		// idempotency key) skip a table without reading its blocks. One entry
+		// applies to every level, as Pebble's default single entry does.
+		Levels: []pebble.LevelOptions{{FilterPolicy: bloom.FilterPolicy(10)}},
 	})
 	if err != nil {
 		log.Fatalf("pebble: open %s: %v", path, err)
@@ -697,8 +702,17 @@ func (s *PebbleStore) cleanupLoop() {
 	}
 }
 
+// expireBatchSize is how many expired jobs one cleanup batch deletes.
+const expireBatchSize = 512
+
 // deleteExpired deletes jobs whose expiry is before now, reading only the
-// expiry index keys that are due.
+// expiry index keys that are due. Each due job is read once and its deletes
+// go into shared unsynced batches: the soak test found a busy instance
+// spending a fifth of its CPU here when every expired job was read twice
+// (here and again in DeleteJob) and deleted in its own synced commit. If a
+// crash loses an unsynced batch, the index keys it would have cleared are
+// still there (the range deletion is written last), so the next pass
+// deletes those jobs.
 func (s *PebbleStore) deleteExpired(now int64) {
 	iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: []byte("exp:"), UpperBound: expKeyBound(now)})
 	if err != nil {
@@ -710,18 +724,45 @@ func (s *PebbleStore) deleteExpired(now int64) {
 		dueKeys = append(dueKeys, append([]byte(nil), iter.Key()...))
 	}
 	iter.Close()
+	if len(dueKeys) == 0 {
+		return
+	}
+
+	batch := s.db.NewBatch()
+	var statuses []Status
+	commit := func() bool {
+		err := batch.Commit(pebble.NoSync)
+		batch.Close()
+		batch = s.db.NewBatch()
+		if err != nil {
+			log.Printf("pebble: delete expired jobs: %v", err)
+			statuses = statuses[:0]
+			return false
+		}
+		for _, status := range statuses {
+			s.countStatus(status, -1)
+		}
+		statuses = statuses[:0]
+		return true
+	}
+	defer func() { batch.Close() }()
 
 	for _, k := range dueKeys {
 		// "exp:" + 16 hex digits + ":" precede the job id.
-		if len(k) > 21 {
-			id := string(k[21:])
-			if rec, ok := s.getRecord(id); ok && rec.ExpiresAt < now {
-				s.DeleteJob(id)
-			}
+		if len(k) <= 21 {
+			continue
 		}
-	}
-	if len(dueKeys) == 0 {
-		return
+		id := string(k[21:])
+		rec, ok := s.getRecord(id)
+		if !ok || rec.ExpiresAt >= now {
+			continue
+		}
+		batch.Delete(jobKey(id), nil)
+		batch.Delete(idemKey(rec.Job.dedupHash()), nil)
+		statuses = append(statuses, rec.Job.Status)
+		if len(statuses) == expireBatchSize && !commit() {
+			return
+		}
 	}
 	// One range deletion instead of a tombstone per key. Index keys are in
 	// time order, so everything due is one contiguous range, and no writer
@@ -729,9 +770,10 @@ func (s *PebbleStore) deleteExpired(now int64) {
 	// tombstones on this append-only range piled up in L0 without being
 	// compacted away; a range tombstone lets Pebble drop whole files it
 	// covers without rewriting them.
-	if err := s.db.DeleteRange([]byte("exp:"), expKeyBound(now), pebble.NoSync); err != nil {
+	if err := batch.DeleteRange([]byte("exp:"), expKeyBound(now), nil); err != nil {
 		log.Printf("pebble: delete expiry index keys: %v", err)
 	}
+	commit()
 }
 
 // backfillExpiryIndex gives every job written by an older version an
