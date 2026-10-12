@@ -11,13 +11,18 @@ kill_timeout = 30
 
 [env]
   SOAK_DATA_DIR = "/data/run-2"
-  MNESIA_DIR = "/data/run-2/mnesia"
+  # run-2/mnesia grew past what 2GB of RAM could reload on boot (Mnesia
+  # disc_copies tables live entirely in RAM), so Spillway crash-looped even
+  # with no load. Restarted on 4GB with an empty store; the old directory is
+  # kept for inspection.
+  MNESIA_DIR = "/data/run-2/mnesia-4gb"
   SPILLWAY_DEFAULT_RPS = "5000"
   # Admission compares the VM's own memory count with this limit, and the
   # process's resident size runs up to ~1.4x that count. 1400 let RSS reach
   # the 2GB machine's limit, so the kernel killed Spillway before admission
-  # ever refused a job (21 OOM kills in run 2's first hour).
-  SPILLWAY_MEMORY_LIMIT_MB = "1000"
+  # ever refused a job (21 OOM kills in run 2's first hour). On 4GB, 2600
+  # leaves room for that ratio.
+  SPILLWAY_MEMORY_LIMIT_MB = "2600"
   SPILLWAY_DB_MAX_BYTES = "6000000000"
   SPILLWAY_WS_STREAM_MAX_EVENTS = "500"
   SPILLWAY_WS_STREAM_TTL_SECONDS = "3600"
@@ -37,4 +42,4 @@ kill_timeout = 30
 
 [[vm]]
   size = "performance-1x"
-  memory = "2gb"
+  memory = "4gb"
