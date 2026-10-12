@@ -172,15 +172,18 @@ driver, and cents for the volumes.
 
 ## Monitor
 
-A scheduled [Claude Managed Agent](https://platform.claude.com/docs/en/managed-agents/scheduled-deployments)
-checks the status pages every 6 hours (at :15 UTC past 00, 06, 12 and 18). Its instructions are in
-[`monitor/system.md`](monitor/system.md), and `monitor/setup.py` creates the agent. The agent:
+One scheduled [Claude Managed Agent](https://platform.claude.com/docs/en/managed-agents/scheduled-deployments)
+per target checks its status pages every 6 hours: Aquifer's at :15 UTC past 00, 06, 12 and 18,
+Spillway's at :45. Their instructions are one template, [`monitor/system.md`](monitor/system.md),
+and `monitor/setup.py` creates or updates an agent for the target named by `SOAK_MONITOR_TARGET`
+(`aquifer`, the default, or `spillway`), keeping its IDs in `monitor/ids.json` or
+`monitor/ids-spillway.json`. Each agent:
 
 - runs on Claude Haiku 5.5, capped at $1 per run (the dry run cost about 2 cents);
 - can reach only the status host and `api.github.com`;
-- holds two secrets in a vault, each sent only to its own host: the report token, and a fine-grained GitHub token limited to Issues;
+- holds two secrets in a vault, each sent only to its own host: its driver's report token, and a fine-grained GitHub token limited to Issues on its own repository;
 - posts each report to `/reports`, which is also its memory between runs;
-- on a warning or problem, opens a `soak-alert` issue, or comments on the open one, and goes no further. A person decides what happens next.
+- on a warning or problem, opens a `soak-alert` issue in its own repository (aquifer or spillway), or comments on the open one, and goes no further. A person decides what happens next.
 
 ## Running it locally
 
