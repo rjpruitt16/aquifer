@@ -1,0 +1,96 @@
+// Copyright 2026 Rahmi Pruitt
+// SPDX-License-Identifier: Apache-2.0
+
+package aquifer
+
+import (
+	"math"
+	"net/http"
+	"strconv"
+)
+
+// fullnessHeader tells whoever is in front of this instance -- a gateway
+// like Canalis, or a client -- how full it is, 0-100, on every response.
+// What to do about it is the caller's call: Canalis stops sending new users
+// to an instance past its own threshold, and queues them itself once every
+// instance is past it.
+const fullnessHeader = "X-Aqueduct-Fullness"
+
+// Fullness is how full this instance is, 0-100: the most-constrained of the
+// limits it already enforces -- memory against AQUIFER_MEMORY_LIMIT_MB, the
+// database against AQUIFER_DB_MAX_BYTES, and each upstream's backlog
+// against its backlog budget (AQUIFER_MAX_PENDING_PER_UPSTREAM, or the
+// upstream's own X-Aqueduct-Max-Backlog). The tightest one wins, because
+// that's the one that will start turning work away first. Limits that are
+// switched off don't count.
+//
+// Unlike X-Aqueduct-Admission-Pressure, which stays at 0 until a backlog
+// reaches fair admission's 70% starting point, this rises linearly from
+// the first queued job, so a caller can see an instance filling up before
+// it starts pushing back.
+//
+// Sampled at most once per admissionSampleTTL: it goes on every response,
+// and the readings behind it aren't free.
+func (a *Aquifer) Fullness() int {
+	if a == nil {
+		return 0
+	}
+	return int(a.fullnessSample.get(func() int64 {
+		ratio := a.admission.fullnessRatio()
+		if a.registry != nil {
+			ratio = math.Max(ratio, a.registry.backlogFullnessRatio())
+		}
+		return fullnessPercent(ratio)
+	}))
+}
+
+func fullnessPercent(ratio float64) int64 {
+	return int64(math.Round(clampFloat(ratio, 0, 1) * 100))
+}
+
+// fullnessRatio is the higher of memory and database use against their
+// configured limits, reusing the same samples Check uses.
+func (c *AdmissionController) fullnessRatio() float64 {
+	if c == nil {
+		return 0
+	}
+	var ratio float64
+	if c.limits.MemoryLimitMB > 0 {
+		ratio = math.Max(ratio, float64(c.memSample.get(processMemoryMB))/float64(c.limits.MemoryLimitMB))
+	}
+	if c.limits.DBMaxBytes > 0 && c.dbPath != "" {
+		size := c.dbSample.get(func() int64 { return dbSizeBytes(c.dbPath) })
+		ratio = math.Max(ratio, float64(size)/float64(c.limits.DBMaxBytes))
+	}
+	return ratio
+}
+
+// backlogFullnessRatio is the fullest upstream's backlog against its own
+// backlog budget. Per upstream, not summed: one upstream at its limit is
+// already turning work away, however idle the others are.
+func (r *Registry) backlogFullnessRatio() float64 {
+	r.mu.Lock()
+	workers := make([]*URLWorker, 0, len(r.workers))
+	for _, worker := range r.workers {
+		workers = append(workers, worker)
+	}
+	r.mu.Unlock()
+
+	var ratio float64
+	for _, worker := range workers {
+		snapshot := worker.Snapshot()
+		if snapshot.MaxBacklog > 0 {
+			ratio = math.Max(ratio, float64(snapshot.UpstreamBacklog)/float64(snapshot.MaxBacklog))
+		}
+	}
+	return ratio
+}
+
+func withFullnessHeader(next http.Handler, a *Aquifer) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if a != nil {
+			w.Header().Set(fullnessHeader, strconv.Itoa(a.Fullness()))
+		}
+		next.ServeHTTP(w, r)
+	})
+}

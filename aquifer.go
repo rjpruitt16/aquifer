@@ -27,7 +27,10 @@ type Aquifer struct {
 	l8        *L8Registry
 	admission *AdmissionController
 	pools     *PoolRegistry
-	remote    RemoteIdempotency
+	// fullnessSample caches Fullness() (see fullness.go), which goes on
+	// every response.
+	fullnessSample sampledInt64
+	remote         RemoteIdempotency
 	// regionAdapter backs /proxy's cross-region redirect (proxy.go). Left
 	// nil by NewAquifer deliberately -- SetRegionAdapter is how it gets
 	// wired in, so every existing NewAquifer caller (tests included) is
@@ -61,6 +64,7 @@ func NewAquifer(store JobStore, registry *Registry, broker *Broker, l8 *L8Regist
 	}
 	if registry != nil {
 		a.inbound.SetBacklogSource(func() int64 { return registry.QueueSnapshot().UpstreamBacklog })
+		registry.SetFullnessSource(a.Fullness)
 	}
 	return a
 }

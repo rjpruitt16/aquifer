@@ -78,7 +78,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /.well-known/l8", s.wellKnownL8)
 	mux.HandleFunc("POST /l8/challenge", s.l8Challenge)
 	mux.HandleFunc("GET /l8-spec", s.l8Spec)
-	return mux
+	return withFullnessHeader(mux, s.aquifer)
 }
 
 func (s *Server) webSocket(w http.ResponseWriter, r *http.Request) {

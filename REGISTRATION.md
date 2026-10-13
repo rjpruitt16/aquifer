@@ -39,9 +39,12 @@ it exists and is reachable.
   "reported_at": "2026-09-03T22:00:00Z",
   "reserved_for": "acme",
   "role": "http",
-  "drain_state": "unassigned"
+  "drain_state": "unassigned",
+  "fullness": 35
 }
 ```
+
+`fullness` is how full this instance is, `0`–`100`: the same number as the `X-Aqueduct-Fullness` response header (see [API.md](API.md)), so a control plane knows before sending an instance anything.
 
 `reserved_for` and `role` are only present when their env vars are set. `drain_state` is only present when drain mode is enabled ([DRAIN_MODE.md](DRAIN_MODE.md)): it's drain mode's own `active` / `draining` / `unassigned`, kept separate from `state` because drain mode's "draining" means "finishing one tenant's burst", not "shutting down". Reaching `unassigned` sends a ping right away instead of waiting for the next heartbeat, since that's the control plane's cue to hand this instance to someone else.
 
