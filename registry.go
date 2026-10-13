@@ -199,7 +199,12 @@ func (r *Registry) DrainState() DrainState {
 }
 
 func (r *Registry) setDrainState(s DrainState) {
-	r.drainState.Store(s)
+	prev, _ := r.drainState.Swap(s).(DrainState)
+	// Becoming free is the one transition a control plane is waiting on,
+	// so report it now instead of on the next heartbeat.
+	if s == DrainStateUnassigned && prev != DrainStateUnassigned && r.registrationCfg.Enabled() {
+		go r.pingRegistry()
+	}
 }
 
 // DrainSnapshot reports drain mode's current state for GET /health, or nil

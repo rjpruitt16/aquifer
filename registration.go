@@ -7,6 +7,7 @@ import (
 	"context"
 	"log"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -35,6 +36,14 @@ type RegistrationConfig struct {
 	URL             string // AQUIFER_REGISTRY_URL -- presence enables this feature
 	Port            string // PORT (same env var and "8080" default region_adapter_fly.go already uses)
 	IntervalSeconds int64  // AQUIFER_REGISTRY_INTERVAL_SECONDS
+	// ReservedFor (AQUIFER_REGISTRY_RESERVED_FOR) tells the control plane
+	// this instance is dedicated to one user_id and shouldn't be handed to
+	// anyone else. Role (AQUIFER_REGISTRY_ROLE, e.g. "http" or "ws") says
+	// which kind of traffic it's meant for. Both are reported as-is and
+	// left out of the ping when unset; what they mean is the control
+	// plane's call, same as everything else in this ping.
+	ReservedFor string
+	Role        string
 }
 
 func (cfg RegistrationConfig) Enabled() bool {
@@ -52,6 +61,8 @@ func LoadRegistrationConfig() RegistrationConfig {
 		URL:             os.Getenv("AQUIFER_REGISTRY_URL"),
 		Port:            port,
 		IntervalSeconds: envInt64("AQUIFER_REGISTRY_INTERVAL_SECONDS", defaultRegistrationIntervalSeconds),
+		ReservedFor:     strings.TrimSpace(os.Getenv("AQUIFER_REGISTRY_RESERVED_FOR")),
+		Role:            strings.ToLower(strings.TrimSpace(os.Getenv("AQUIFER_REGISTRY_ROLE"))),
 	}
 }
 
@@ -93,9 +104,23 @@ func (r *Registry) ReportOffline(ctx context.Context) {
 }
 
 func (r *Registry) registrationPayload(state LifecycleState) map[string]any {
-	return map[string]any{
+	payload := map[string]any{
 		"port":        r.registrationCfg.Port,
 		"state":       state,
 		"reported_at": time.Now().UTC().Format(time.RFC3339),
 	}
+	if r.registrationCfg.ReservedFor != "" {
+		payload["reserved_for"] = r.registrationCfg.ReservedFor
+	}
+	if r.registrationCfg.Role != "" {
+		payload["role"] = r.registrationCfg.Role
+	}
+	// Drain mode's own position, separate from "state": drain mode's
+	// "draining" means "finishing one tenant's burst", not "shutting down",
+	// and "unassigned" is the control plane's cue to hand this instance to
+	// someone else.
+	if r.drainCfg.Enabled {
+		payload["drain_state"] = r.DrainState()
+	}
+	return payload
 }
