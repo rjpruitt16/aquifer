@@ -122,5 +122,11 @@ func (r *Registry) registrationPayload(state LifecycleState) map[string]any {
 	if r.drainCfg.Enabled {
 		payload["drain_state"] = r.DrainState()
 	}
+	// 0-100, same number as the X-Aqueduct-Fullness response header, so a
+	// control plane knows how full an instance is before sending it
+	// anything.
+	if source, ok := r.fullnessSource.Load().(func() int); ok {
+		payload["fullness"] = source()
+	}
 	return payload
 }

@@ -34,11 +34,15 @@ type Registry struct {
 	drainBatch        bool
 	registrationCfg   RegistrationConfig
 	registrationState atomic.Value // LifecycleState
-	closeOnce         sync.Once
-	ctx               context.Context
-	cancel            context.CancelFunc
-	stop              chan struct{}
-	wg                sync.WaitGroup
+	// fullnessSource reports the whole instance's fullness (Aquifer.Fullness,
+	// which needs the admission limits the registry doesn't own) for the
+	// registration ping. Set after construction, so read atomically.
+	fullnessSource atomic.Value // func() int
+	closeOnce      sync.Once
+	ctx            context.Context
+	cancel         context.CancelFunc
+	stop           chan struct{}
+	wg             sync.WaitGroup
 }
 
 func (r *Registry) SetClusterRouter(router *ClusterRouter) {
@@ -510,5 +514,13 @@ func (r *Registry) JobDone() {
 func (r *Registry) applyDrainEvents() {
 	if s, ok := r.store.(interface{ SetDrainEventsEnabled(bool) }); ok {
 		s.SetDrainEventsEnabled(r.drainCfg.Enabled)
+	}
+}
+
+// SetFullnessSource gives the registration ping the instance's fullness
+// (see fullness.go). Wired by NewAquifer.
+func (r *Registry) SetFullnessSource(source func() int) {
+	if r != nil && source != nil {
+		r.fullnessSource.Store(source)
 	}
 }
