@@ -137,3 +137,99 @@ func waitForRegistrationState(t *testing.T, states <-chan string, expected strin
 		}
 	}
 }
+
+// pingBodies collects every registration ping's decoded body.
+func pingBodies(t *testing.T) (*httptest.Server, <-chan map[string]any) {
+	t.Helper()
+	bodies := make(chan map[string]any, 16)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if skipL8Probe(w, r) {
+			return
+		}
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		bodies <- body
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, bodies
+}
+
+func nextPing(t *testing.T, bodies <-chan map[string]any) map[string]any {
+	t.Helper()
+	select {
+	case body := <-bodies:
+		return body
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for a registration ping")
+		return nil
+	}
+}
+
+// TestRegistrationReportsReservedForAndRole: a control plane like Canalis
+// needs to know an instance is dedicated to one user, or meant for one
+// kind of traffic, before it hands the instance to anyone.
+func TestRegistrationReportsReservedForAndRole(t *testing.T) {
+	srv, bodies := pingBodies(t)
+	t.Setenv("AQUIFER_REGISTRY_URL", srv.URL)
+	t.Setenv("AQUIFER_REGISTRY_INTERVAL_SECONDS", "3600")
+	t.Setenv("AQUIFER_REGISTRY_RESERVED_FOR", " acme ")
+	t.Setenv("AQUIFER_REGISTRY_ROLE", "WS")
+	drainTestRegistry(t, NoopMetricsAdapter{})
+
+	body := nextPing(t, bodies)
+	if body["reserved_for"] != "acme" {
+		t.Fatalf("expected reserved_for %q, got %v", "acme", body["reserved_for"])
+	}
+	if body["role"] != "ws" {
+		t.Fatalf("expected role %q, got %v", "ws", body["role"])
+	}
+}
+
+// TestRegistrationOmitsOptionalFieldsByDefault keeps the ping exactly as it
+// was for anyone not using these features.
+func TestRegistrationOmitsOptionalFieldsByDefault(t *testing.T) {
+	srv, bodies := pingBodies(t)
+	t.Setenv("AQUIFER_REGISTRY_URL", srv.URL)
+	t.Setenv("AQUIFER_REGISTRY_INTERVAL_SECONDS", "3600")
+	t.Setenv("AQUIFER_REGISTRY_RESERVED_FOR", "")
+	t.Setenv("AQUIFER_REGISTRY_ROLE", "")
+	drainTestRegistry(t, NoopMetricsAdapter{})
+
+	body := nextPing(t, bodies)
+	for _, key := range []string{"reserved_for", "role", "drain_state"} {
+		if _, ok := body[key]; ok {
+			t.Fatalf("expected no %q in a default ping, got %v", key, body)
+		}
+	}
+}
+
+// TestRegistrationPingsAsSoonAsDrainModeIsUnassigned: a drain-mode
+// instance that just freed itself shouldn't sit idle until the next
+// heartbeat before the control plane can hand it to another tenant.
+func TestRegistrationPingsAsSoonAsDrainModeIsUnassigned(t *testing.T) {
+	srv, bodies := pingBodies(t)
+	t.Setenv("AQUIFER_REGISTRY_URL", srv.URL)
+	t.Setenv("AQUIFER_REGISTRY_INTERVAL_SECONDS", "3600")
+	r := drainTestRegistry(t, NoopMetricsAdapter{})
+	nextPing(t, bodies) // the immediate startup ping
+
+	r.drainCfg.Enabled = true
+	r.setDrainState(DrainStateUnassigned)
+
+	body := nextPing(t, bodies)
+	if body["drain_state"] != string(DrainStateUnassigned) {
+		t.Fatalf("expected drain_state %q, got %v", DrainStateUnassigned, body["drain_state"])
+	}
+	if body["state"] != string(LifecycleStateActive) {
+		t.Fatalf("drain mode's state must not change the lifecycle state, got %v", body["state"])
+	}
+
+	// Already unassigned: no second extra ping for a repeat transition.
+	r.setDrainState(DrainStateUnassigned)
+	select {
+	case body := <-bodies:
+		t.Fatalf("expected no ping for a repeated unassigned state, got %v", body)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
