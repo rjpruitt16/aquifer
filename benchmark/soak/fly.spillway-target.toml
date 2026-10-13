@@ -10,8 +10,8 @@ kill_timeout = 30
   dockerfile = "Dockerfile.spillway-target"
 
 [env]
-  SOAK_DATA_DIR = "/data/run-3d"
-  MNESIA_DIR = "/data/run-3d/mnesia"
+  SOAK_DATA_DIR = "/data/run-3e"
+  MNESIA_DIR = "/data/run-3e/mnesia"
   # Jobs, results and idempotency keys in RocksDB, not RAM. In runs 2 and 3
   # the RAM store grew with retention until Spillway crash-looped (2GB) or
   # its cleanup fell behind and admission refused every job (4GB). With
