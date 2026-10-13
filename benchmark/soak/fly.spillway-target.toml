@@ -25,7 +25,9 @@ kill_timeout = 30
   # Admission compares this with resident memory. Leaves room for Valkey's
   # 600MB ceiling on the 2GB machine.
   SPILLWAY_MEMORY_LIMIT_MB = "1200"
-  SPILLWAY_DB_MAX_BYTES = "6000000000"
+  # The volume has about 5GB free (earlier runs' directories remain);
+  # refuse new jobs well before it fills.
+  SPILLWAY_DB_MAX_BYTES = "3500000000"
   SPILLWAY_WS_STREAM_MAX_EVENTS = "500"
   SPILLWAY_WS_STREAM_TTL_SECONDS = "3600"
   SPILLWAY_WS_MAX_CLIENT_CONNECTIONS = "3000"
