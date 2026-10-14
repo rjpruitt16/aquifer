@@ -185,3 +185,13 @@ jobs:
             test-registration
             --aquifer-source=./aquifer
             --canalis-source=./canalis-rs
+
+      - name: Contract test -- Aquifer and Canalis claim users with the same Lua
+        uses: dagger/dagger-for-github@v8.4.1
+        with:
+          version: "0.21.8"
+          module: ./aqueduct-runner
+          call: >-
+            test-claim-script
+            --aquifer-source=./aquifer
+            --canalis-source=./canalis-rs
