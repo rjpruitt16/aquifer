@@ -29,6 +29,21 @@ Idempotent — duplicate `idempotent_key` per `user_id` returns the existing job
 
 **422** the upstream's L8 `request_schemas` rejects the body (see [Request schemas](#request-schemas-l8-02)).
 
+### Best practice: confirm batched webhook intake
+
+For high-throughput webhook intake, keep Pebble's default 100 ms batched flush and use Aquifer's idempotency as a confirmation retry:
+
+1. Verify the provider signature, use its event ID as `idempotent_key`, and keep the provider request open.
+2. Submit the event to Aquifer. Continue only after Aquifer returns **200** or **201**.
+3. Wait about four seconds with jitter, staying within the provider's timeout, then submit the exact same request again.
+4. A **200** response with `"duplicate": true` confirms that Aquifer still knows the accepted job. Return `2xx` to the provider.
+5. If the confirmation returns **201**, the earlier job was absent and this request created its replacement. Wait and confirm again before acknowledging the provider.
+6. If the intake process dies first, it never acknowledges the provider, so the provider's normal retry sends the event again.
+
+Both submissions must use the same `user_id` and `idempotent_key` and reach the same Aquifer owner. Aquifer's cluster routing provides that ownership for the same routing key; independent unclustered instances behind a random load balancer do not. Jitter prevents a burst of original webhooks from producing a second synchronized burst four seconds later.
+
+This adds one inexpensive idempotency lookup per event while preserving batched write throughput. It substantially narrows the default crash-loss window, but `duplicate:true` is not an fsync receipt. Set `AQUIFER_PEBBLE_FLUSH_INTERVAL_MS=0` when every accepted event requires a strict disk-sync guarantee, or when the provider timeout is too short to complete the confirmation.
+
 ### Retries
 
 Connection errors, `5xx`, `408` and `429` are retried; any other response (including other `4xx`) is final. Set the limit per job with `"max_retries"` in the body or the `X-Aqueduct-Max-Retries` request header (the header wins):

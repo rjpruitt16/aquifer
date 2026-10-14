@@ -46,6 +46,12 @@ agents / clients  →  POST /jobs to Aquifer  →  your backend (at controlled R
 ```
 Agents hammering your API over HTTP? Aquifer queues their requests and drains them to your backend at a pace it can handle. Your backend returns `X-Aqueduct-Rps` headers to signal how fast it wants traffic in real time.
 
+**Webhook ingestion — keep noisy senders from monopolizing processing**
+```
+webhook providers  →  your verification endpoint  →  POST /jobs to Aquifer  →  webhook handlers
+```
+Verify each provider's signature at your edge, map the sender or customer to `user_id`, and use the provider's event ID as the `idempotent_key`. Aquifer absorbs bursts into its persisted queue and paces work into your handlers. With AccountQueue mode enabled, one noisy sender gets its own queue; under shared backlog pressure, fair admission increasingly rejects that oversized queue while leaving room for quieter senders. Aquifer does not replace provider authentication or translate arbitrary webhook formats, so the verification endpoint or a custom adapter remains the public front door. For high-throughput intake, keep the default batched Pebble flush and resubmit the same event after a short jittered delay before acknowledging the provider; see the [confirmation best practice](API.md#best-practice-confirm-batched-webhook-intake). Use `AQUIFER_PEBBLE_FLUSH_INTERVAL_MS=0` when every accepted event requires a strict disk-sync guarantee.
+
 **Outbound — a durable checkpoint in front of a rate-limited resource**
 ```
 your app  →  POST /jobs to Aquifer  →  database / CI runner / OpenAI / Stripe / any rate-limited API
@@ -66,7 +72,7 @@ Aquifer can persist an ordered WebSocket transcript in Valkey, replay missed bac
 
 **Sleep through partial outages.** On Fly.io, set `AQUIFER_FLY_REGIONS` and that same overload signal drives real cross-region redirect: other regions Aquifer is deployed to get tried live, over Fly's private network, before this instance ever falls back to its own local queue, nearest-first by measured latency, deterministic enough that two callers racing the same job converge on the same region instead of each chasing their own nearest option. One region degrading routes around itself instead of paging you at 3am. If every known region is down too, that's a real fleet-wide problem, and Aquifer says so with a `429` and a long `Retry-After` rather than quietly queueing it somewhere and hoping. See [`POST /proxy`](API.md#post-proxy)'s "Cross-region redirect" section for the full mechanics, including the one honestly-documented tradeoff it doesn't try to hide.
 
-In all five, the upstream can lower the dispatch pace via response headers. See [Dynamic Pacing](#dynamic-pacing) for how the ceiling, backoff, and recovery actually work.
+In all six, the upstream can lower the dispatch pace via response headers. See [Dynamic Pacing](#dynamic-pacing) for how the ceiling, backoff, and recovery actually work.
 
 Long-term protocol goal: if more services emit `X-Aqueduct-*`, agents can respond to capacity signals instead of independently guessing retry and concurrency behavior. Aquifer works today without ecosystem adoption; broader protocol adoption is the longer-term goal.
 
