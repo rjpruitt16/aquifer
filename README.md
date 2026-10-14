@@ -20,13 +20,13 @@ The usual answer to that is more hardware: double the fleet, triple the GPU budg
 
 ![How teams handle traffic spikes: overprovisioning the fleet versus queueing the burst and pacing the flow while capacity catches up](docs/images/how-teams-handle-traffic-spikes.png)
 
-Aquifer gives those agents a coordination layer: a self-hosted load balancer that absorbs the burst, queues requests durably (SQLite by default, or Pebble, see below), and releases them at a rate you configure, or a slower one, if the destination service asks for it.
+Aquifer gives those agents a coordination layer: a self-hosted load balancer that absorbs the burst, queues requests durably (Pebble by default, or SQLite, see below), and releases them at a rate you configure, or a slower one, if the destination service asks for it.
 
 What's usually behind that backend can't scale instantly either: a GPU, a database, a CI runner. Aquifer buys time for more of it to come online; it's overkill if that ceiling is fixed for good.
 
 Exposed through pluggable adapters (an MCP server for agent tool-calling, a plain HTTP API, or an A2A/Agent2Agent-protocol agent), with cryptographic agent identity via the L8 protocol for trustless webhook delivery.
 
-**Benchmarked:** 10x traffic spikes absorbed with zero failures, 30/30 jobs surviving a `kill -9` mid-drain (with per-write sync, `AQUIFER_PEBBLE_FLUSH_INTERVAL_MS=0`), and clean `429` admission shedding under sustained overload, including a real GPU under load, where the ORCA fallback signal cut peak backend queue depth from 449 to 8 waiting requests. See [benchmark.md](benchmark.md) for throughput ceilings, crash recovery, memory behavior, capacity by machine size, and the [GPU/vLLM run](benchmark.md#9-gpu-inference-and-the-retry-tax-runpodvllm).
+**Benchmarked:** 10x traffic spikes absorbed with zero failures, 30/30 jobs surviving a `kill -9` mid-drain (with per-write sync, `AQUIFER_PEBBLE_FLUSH_INTERVAL_MS=0`; the default 100ms flush is faster but can lose up to 100ms of accepted jobs in a crash), and clean `429` admission shedding under sustained overload, including a real GPU under load, where the ORCA fallback signal cut peak backend queue depth from 449 to 8 waiting requests. See [benchmark.md](benchmark.md) for throughput ceilings, crash recovery, memory behavior, capacity by machine size, and the [GPU/vLLM run](benchmark.md#9-gpu-inference-and-the-retry-tax-runpodvllm).
 
 ![Traditional load balancing collapsing under a spike, round-robin flickering faster as instances die, versus Aqueduct pacing that keeps the fleet stable while an autoscaler brings real capacity online](docs/images/fleet-degradation.gif)
 
@@ -75,7 +75,7 @@ Long-term protocol goal: if more services emit `X-Aqueduct-*`, agents can respon
 ## How it works
 
 1. Client submits a job through an adapter (MCP tool or HTTP endpoint) and moves on
-2. Aquifer persists it to SQLite, surviving crashes and re-dispatching on restart
+2. Aquifer persists it to disk (Pebble by default), surviving crashes and re-dispatching on restart
 3. A per-upstream worker dispatches at your configured RPS with jitter
 4. On completion Aquifer POSTs your webhook with the response body and status, or skips it if you [stayed on the line](#streaming--stay-on-the-line-or-hang-up) and got the result there
 5. The upstream can adjust the rate live via `X-Aqueduct-*` response headers
@@ -149,7 +149,7 @@ upstreams:
 | `CONFIG_PATH` | _(none)_     | Path to rate limit config YAML |
 | `AQUIFER_STORE_BACKEND` | `pebble` | Storage engine: `pebble` (pure-Go LSM store, the faster backend; see [benchmark.md](benchmark.md)) or `sqlite`. If `DB_PATH` is an existing SQLite file, Aquifer stays on SQLite so an upgrade doesn't orphan queued jobs |
 | `AQUIFER_PEBBLE_WAL_SYNC_INTERVAL_MS` | `5` | Pebble only: batches concurrent durable writes into fewer real fsyncs under load (Pebble's own group-commit); each caller still blocks until its own write is actually durable |
-| `AQUIFER_PEBBLE_FLUSH_INTERVAL_MS` | `100` | Pebble only: answer before a write reaches disk and sync the log on this timer, like Spillway's 100ms Mnesia flush. A crash can lose up to this many milliseconds of accepted jobs. On Fly it took one machine from about 150 to about 700 jobs/s end to end (see [benchmark.md](benchmark.md#11-per-job-overhead-make-perf)). Set `0` to make every write wait for its own fsync: zero acknowledged-job loss, much lower throughput |
+| `AQUIFER_PEBBLE_FLUSH_INTERVAL_MS` | `100` | Pebble only: answer before a write reaches disk and sync the log on this timer. A crash can lose up to this many milliseconds of accepted jobs. On Fly it took one machine from about 150 to about 700 jobs/s end to end (see [benchmark.md](benchmark.md#11-per-job-overhead-make-perf)). Set `0` to make every write wait for its own fsync: zero acknowledged-job loss, much lower throughput |
 | `AQUIFER_PEBBLE_CACHE_MB` | `64` | Pebble only: block cache size. Pebble's own default (8MB) is too small to keep recently written jobs in memory, so status updates read them back from disk |
 | `AQUIFER_DEBUG_ADDR` | unset | Serves Go's `net/http/pprof` (goroutine counts, heap, CPU profiles) on its own listener, e.g. `127.0.0.1:6060`. Off when unset. Bind it to loopback or a private network; it is not meant to be public |
 | `AQUIFER_MEMORY_LIMIT_MB` | _(none, disabled)_ | Reject new jobs with `429` once process memory exceeds this many MB |
@@ -385,9 +385,9 @@ None of this needs instances sharing state centrally, and that's the normal shap
 
 ## Deployment model
 
-Aquifer runs four ways: as a **sidecar** alongside your app, as a **standalone service** multiple services point to, **embedded directly as a Go library** in your own process (see [Framework adapters](#framework-adapters)), or as an **extension behind a Gateway API proxy** like Envoy Gateway in Kubernetes, where the proxy owns routing and TLS and Aquifer owns the queue behind it (see [examples/kubernetes](examples/kubernetes)). Each instance persists to its own SQLite volume, with no external database or coordination service to run.
+Aquifer runs four ways: as a **sidecar** alongside your app, as a **standalone service** multiple services point to, **embedded directly as a Go library** in your own process (see [Framework adapters](#framework-adapters)), or as an **extension behind a Gateway API proxy** like Envoy Gateway in Kubernetes, where the proxy owns routing and TLS and Aquifer owns the queue behind it (see [examples/kubernetes](examples/kubernetes)). Each instance persists to its own volume, with no external database or coordination service to run.
 
-People run Aquifer in front of things like: internal coding platforms (GitLab, Forgejo), CI runners, database read replicas, and MCP servers, anywhere a burst of agent or service traffic needs to hit something that has its own capacity limit.
+Aquifer is designed to sit in front of things like: internal coding platforms (GitLab, Forgejo), CI runners, database read replicas, and MCP servers, anywhere a burst of agent or service traffic needs to hit something that has its own capacity limit.
 
 <details>
 <summary>Full deployment reference — partitioning, scaling, security note</summary>
