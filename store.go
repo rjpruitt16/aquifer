@@ -100,6 +100,7 @@ func (s *Store) migrate() {
 			body                TEXT NOT NULL DEFAULT '',
 			headers             TEXT NOT NULL DEFAULT '{}',
 			webhook_url         TEXT NOT NULL DEFAULT '',
+			webhook_delivery    INTEGER NOT NULL DEFAULT 0,
 			status              TEXT NOT NULL DEFAULT 'queued',
 			queue_key           TEXT NOT NULL DEFAULT '',
 			created_at          INTEGER NOT NULL,
@@ -115,6 +116,11 @@ func (s *Store) migrate() {
 	// NULL means the caller didn't set webhook_max_retries.
 	s.db.Exec(`ALTER TABLE jobs ADD COLUMN webhook_max_retries INTEGER`)
 	s.db.Exec(`ALTER TABLE jobs ADD COLUMN result TEXT NOT NULL DEFAULT ''`)
+	if _, err := s.db.Exec(`ALTER TABLE jobs ADD COLUMN webhook_delivery INTEGER NOT NULL DEFAULT 0`); err == nil {
+		// Before this column existed, only internal webhook-delivery jobs could
+		// have an empty webhook_url. Preserve their identity across migration.
+		s.db.Exec(`UPDATE jobs SET webhook_delivery = 1 WHERE webhook_url = ''`)
+	}
 	// Jobs are no longer marked in_flight; rows left that way by older
 	// versions are just unfinished work.
 	s.db.Exec(`UPDATE jobs SET status = 'queued' WHERE status = 'in_flight'`)
@@ -146,9 +152,9 @@ func (s *Store) CheckOrInsert(job *Job) (string, bool) {
 
 	res, err := s.db.Exec(`
 		INSERT OR IGNORE INTO jobs
-			(id, user_id, idempotent_key_hash, url, method, body, headers, webhook_url, status, created_at, execute_before, expires_at, max_retries, attempts, webhook_max_retries)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)
-	`, job.ID, job.UserID, hashed, job.URL, job.Method, job.Body, string(headers), job.WebhookURL, job.CreatedAt, job.ExecuteBefore, expiresAt, job.MaxRetries, job.Attempts, job.WebhookMaxRetries)
+			(id, user_id, idempotent_key_hash, url, method, body, headers, webhook_url, webhook_delivery, status, created_at, execute_before, expires_at, max_retries, attempts, webhook_max_retries)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)
+	`, job.ID, job.UserID, hashed, job.URL, job.Method, job.Body, string(headers), job.WebhookURL, job.isWebhookDeliveryJob(), job.CreatedAt, job.ExecuteBefore, expiresAt, job.MaxRetries, job.Attempts, job.WebhookMaxRetries)
 
 	if err == nil {
 		if n, _ := res.RowsAffected(); n == 1 {
@@ -208,7 +214,7 @@ func (s *Store) GetResult(jobID string) (JobResult, bool) {
 
 func (s *Store) RecoverQueued(queueKey string) []*Job {
 	rows, err := s.db.Query(`
-		SELECT id, user_id, url, method, body, headers, webhook_url, status, created_at, execute_before, idempotent_key_hash, max_retries, attempts, webhook_max_retries
+		SELECT id, user_id, url, method, body, headers, webhook_url, webhook_delivery, status, created_at, execute_before, idempotent_key_hash, max_retries, attempts, webhook_max_retries
 		FROM jobs
 		WHERE queue_key = ? AND status IN ('queued', 'in_flight') AND expires_at > ?
 	`, queueKey, time.Now().UnixMilli())
@@ -265,7 +271,7 @@ func (s *Store) Counts() StoreCounts {
 
 func (s *Store) GetJob(jobID string) *Job {
 	row := s.db.QueryRow(`
-		SELECT id, user_id, url, method, body, headers, webhook_url, status, created_at, execute_before, idempotent_key_hash, max_retries, attempts, webhook_max_retries
+		SELECT id, user_id, url, method, body, headers, webhook_url, webhook_delivery, status, created_at, execute_before, idempotent_key_hash, max_retries, attempts, webhook_max_retries
 		FROM jobs WHERE id = ? AND expires_at > ?
 	`, jobID, time.Now().UnixMilli())
 	return scanJob(row)
@@ -273,7 +279,7 @@ func (s *Store) GetJob(jobID string) *Job {
 
 func (s *Store) GetQueuedJobs() []*Job {
 	rows, err := s.db.Query(`
-		SELECT id, user_id, url, method, body, headers, webhook_url, status, created_at, execute_before, idempotent_key_hash, max_retries, attempts, webhook_max_retries
+		SELECT id, user_id, url, method, body, headers, webhook_url, webhook_delivery, status, created_at, execute_before, idempotent_key_hash, max_retries, attempts, webhook_max_retries
 		FROM jobs WHERE status IN ('queued', 'in_flight') AND expires_at > ?
 	`, time.Now().UnixMilli())
 	if err != nil {
@@ -294,11 +300,11 @@ func (s *Store) GetQueuedJobs() []*Job {
 // ListIdempotentKeys backs drain mode's ledger export -- hash-only, matches
 // what this table has always stored (the plaintext idempotent key was never
 // persisted here, only its hash, see hashKey/CheckOrInsert). Excludes
-// webhook-delivery jobs (webhook_url = ”, see Job.isWebhookDeliveryJob) --
+// webhook-delivery jobs (webhook_delivery = 1) --
 // those are internal delivery bookkeeping, not real user-submitted work, and
 // have no business appearing in a ledger meant for tenant-handoff dedup.
 func (s *Store) ListIdempotentKeys() []LedgerEntry {
-	rows, err := s.db.Query(`SELECT idempotent_key_hash, id, status FROM jobs WHERE expires_at > ? AND webhook_url != ''`, time.Now().UnixMilli())
+	rows, err := s.db.Query(`SELECT idempotent_key_hash, id, status FROM jobs WHERE expires_at > ? AND webhook_delivery = 0`, time.Now().UnixMilli())
 	if err != nil {
 		log.Printf("ListIdempotentKeys: %v", err)
 		return nil
@@ -392,13 +398,18 @@ func scanJob(s scanner) *Job {
 	var j Job
 	var headersJSON string
 	var webhookMaxRetries sql.NullInt64
-	err := s.Scan(&j.ID, &j.UserID, &j.URL, &j.Method, &j.Body, &headersJSON, &j.WebhookURL, &j.Status, &j.CreatedAt, &j.ExecuteBefore, &j.DedupHash, &j.MaxRetries, &j.Attempts, &webhookMaxRetries)
+	var webhookDelivery bool
+	err := s.Scan(&j.ID, &j.UserID, &j.URL, &j.Method, &j.Body, &headersJSON, &j.WebhookURL, &webhookDelivery, &j.Status, &j.CreatedAt, &j.ExecuteBefore, &j.DedupHash, &j.MaxRetries, &j.Attempts, &webhookMaxRetries)
 	if err != nil {
 		return nil
 	}
 	if webhookMaxRetries.Valid {
 		n := int(webhookMaxRetries.Int64)
 		j.WebhookMaxRetries = &n
+	}
+	j.Kind = jobKindUser
+	if webhookDelivery {
+		j.Kind = jobKindWebhookDelivery
 	}
 	json.Unmarshal([]byte(headersJSON), &j.Headers)
 	return &j

@@ -47,6 +47,18 @@ func TestMCPStdioAdapterListsToolsAndResourceTemplates(t *testing.T) {
 	if len(tools) != 5 {
 		t.Fatalf("expected 5 tools, got %d", len(tools))
 	}
+	for _, rawTool := range tools {
+		tool := rawTool.(map[string]any)
+		if tool["name"] != "aquifer_enqueue_job" {
+			continue
+		}
+		required := tool["inputSchema"].(map[string]any)["required"].([]any)
+		for _, field := range required {
+			if field == "webhook_url" {
+				t.Fatal("webhook_url must remain optional in the MCP enqueue schema")
+			}
+		}
+	}
 
 	templatesResult := responses[2]["result"].(map[string]any)
 	templates := templatesResult["resourceTemplates"].([]any)

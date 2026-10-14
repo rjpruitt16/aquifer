@@ -22,6 +22,17 @@ func TestDomainAllowlistUnsetMeansUnrestricted(t *testing.T) {
 	}
 }
 
+func TestWebhookURLIsOptional(t *testing.T) {
+	req := validRequest("https://api.example.com/webhook")
+	req.WebhookURL = ""
+	if msg := req.Validate(); msg != "" {
+		t.Fatalf("expected webhook_url to be optional, got: %q", msg)
+	}
+	if NewJob(&req).isWebhookDeliveryJob() {
+		t.Fatal("callback-free user job must not be treated as an internal webhook delivery")
+	}
+}
+
 func TestDomainAllowlistExactMatch(t *testing.T) {
 	t.Setenv("AQUIFER_ALLOWED_URL_DOMAINS", "api.openai.com,example.com")
 

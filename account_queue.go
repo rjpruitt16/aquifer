@@ -403,7 +403,7 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 						log.Printf("[AccountQueue] panic executing job %s: %v", j.ID, r)
 						q.store.UpdateStatus(j.ID, StatusFailed)
 						q.metrics.JobFailed(j.UserID, q.upstream, "internal panic")
-						if !j.isWebhookDeliveryJob() {
+						if !j.isWebhookDeliveryJob() && j.WebhookURL != "" {
 							q.enqueueWebhook(j.ID, j.UserID, j.WebhookURL, j.webhookMaxRetries(), map[string]any{
 								"job_id": j.ID,
 								"status": "failed",
@@ -664,7 +664,7 @@ func execute(ctx context.Context, job *Job, dispatchURL, upstream string, store 
 			},
 		})
 		metrics.JobCompleted(job.UserID, upstream, time.Since(startedAt).Milliseconds())
-		if !job.isWebhookDeliveryJob() && !streamed {
+		if !job.isWebhookDeliveryJob() && job.WebhookURL != "" && !streamed {
 			payload := map[string]any{
 				"job_id":          job.ID,
 				"status":          "completed",
@@ -737,7 +737,7 @@ func failJob(job *Job, upstream, reason string, responseStatus int, body []byte,
 		Data:  map[string]any{"job_id": job.ID, "reason": reason, "response_status": responseStatus, "body": string(body), "attempts": job.Attempts + 1},
 	})
 	metrics.JobFailed(job.UserID, upstream, reason)
-	if !job.isWebhookDeliveryJob() && !streamed {
+	if !job.isWebhookDeliveryJob() && job.WebhookURL != "" && !streamed {
 		payload := map[string]any{
 			"job_id":          job.ID,
 			"status":          "failed",
@@ -825,7 +825,7 @@ func failExpiredJob(job *Job, upstream string, store JobStore, broker *Broker, m
 		"job_id": job.ID, "reason": reason,
 	}})
 	metrics.JobFailed(job.UserID, upstream, reason)
-	if !job.isWebhookDeliveryJob() {
+	if !job.isWebhookDeliveryJob() && job.WebhookURL != "" {
 		payload := map[string]any{"job_id": job.ID, "status": "failed", "reason": reason}
 		if resultKey != "" {
 			payload["result_key"] = resultKey
