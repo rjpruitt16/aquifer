@@ -41,5 +41,5 @@ ENV PORT=4000 \
     PHX_SERVER=true \
     PHX_HOST=spillway-soak \
     SOAK_CMD=/app/run-spillway.sh \
-    SOAK_STORE=mnesia
+    SOAK_STORE=store
 CMD ["/app/target-start.sh"]
