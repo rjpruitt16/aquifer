@@ -78,6 +78,11 @@ type jobDoneMsg struct {
 type webhookEnqueuer func(originalJobID, userID, webhookURL string, maxRetries int, payload map[string]any)
 
 type AccountQueue struct {
+	// accountQueueSignal, when set, hears the destination's
+	// X-Aqueduct-Account-Queue answer (true: one queue per tenant, false:
+	// one shared queue). Set by the URLWorker right after creating the
+	// queue, so read atomically from the run loop.
+	accountQueueSignal atomic.Pointer[func(bool)]
 	key                string
 	upstream           string
 	pool               *Pool // nil unless this queue dispatches into a registered pool instead of a fixed URL
@@ -483,6 +488,13 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 			}
 			if msg.maxBacklog != nil && onMaxBacklogSignal != nil {
 				onMaxBacklogSignal(*msg.maxBacklog)
+			}
+			if msg.accountQueue != nil {
+				if on, ok := parseAccountQueueValue(*msg.accountQueue); ok {
+					if signal := q.accountQueueSignal.Load(); signal != nil {
+						(*signal)(on)
+					}
+				}
 			}
 			idle.Reset(idleTimeout)
 

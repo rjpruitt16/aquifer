@@ -133,6 +133,11 @@ func (a *Aquifer) AttemptDirect(ctx context.Context, req JobRequest, timeout tim
 	}
 	defer resp.Body.Close()
 	worker.HandleMaxBacklogHeader(pacingHeader(resp.Header, "Max-Backlog"))
+	// The destination's say on one queue per tenant vs one shared queue,
+	// learned from direct responses as well as queued ones.
+	if on, ok := parseAccountQueueValue(pacingHeader(resp.Header, "Account-Queue")); ok {
+		worker.handleDestinationAccountQueue(on)
+	}
 
 	if overloadCooldown, kind, overloaded := isOverloadSignal(resp); overloaded {
 		worker.TripBreaker(overloadCooldown, kind)

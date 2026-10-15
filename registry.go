@@ -12,28 +12,34 @@ import (
 )
 
 type Registry struct {
-	mu                sync.Mutex
-	enqueuing         sync.WaitGroup // enqueues past the stopping check; Close waits for them
-	workers           map[string]*URLWorker
-	store             JobStore
-	cfg               *Config
-	broker            *Broker
-	l8                *L8Registry
-	metrics           MetricsAdapter
-	pools             *PoolRegistry
-	clusterRouter     *ClusterRouter
-	drainRemote       RemoteIdempotency
-	resultRecorder    JobResultRecorder
-	users             *userLoadTracker
-	totalJobs         atomic.Int64
-	queueDepth        atomic.Int64
-	drainCfg          DrainConfig
-	drainFlushMu      sync.Mutex
-	drainState        atomic.Value // DrainState, read from Health() concurrently with the watchdog goroutine writing it
-	drainWatchdog     bool
-	drainBatch        bool
-	registrationCfg   RegistrationConfig
-	registrationState atomic.Value // LifecycleState
+	mu        sync.Mutex
+	enqueuing sync.WaitGroup // enqueues past the stopping check; Close waits for them
+	workers   map[string]*URLWorker
+	// accountQueueDefault is the node owner's AQUIFER_ACCOUNT_QUEUE.
+	// destinationAccountQueue remembers each destination's own
+	// X-Aqueduct-Account-Queue answer, so it outlives the destination's
+	// worker being retired when idle (guarded by mu).
+	accountQueueDefault     bool
+	destinationAccountQueue map[string]bool
+	store                   JobStore
+	cfg                     *Config
+	broker                  *Broker
+	l8                      *L8Registry
+	metrics                 MetricsAdapter
+	pools                   *PoolRegistry
+	clusterRouter           *ClusterRouter
+	drainRemote             RemoteIdempotency
+	resultRecorder          JobResultRecorder
+	users                   *userLoadTracker
+	totalJobs               atomic.Int64
+	queueDepth              atomic.Int64
+	drainCfg                DrainConfig
+	drainFlushMu            sync.Mutex
+	drainState              atomic.Value // DrainState, read from Health() concurrently with the watchdog goroutine writing it
+	drainWatchdog           bool
+	drainBatch              bool
+	registrationCfg         RegistrationConfig
+	registrationState       atomic.Value // LifecycleState
 	// fullnessSource reports the whole instance's fullness (Aquifer.Fullness,
 	// which needs the admission limits the registry doesn't own) for the
 	// registration ping. Set after construction, so read atomically.
@@ -62,19 +68,21 @@ func (r *Registry) SetClusterRouter(router *ClusterRouter) {
 func NewRegistry(store JobStore, cfg *Config, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, pools *PoolRegistry) *Registry {
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &Registry{
-		users:           newUserLoadTracker(),
-		workers:         make(map[string]*URLWorker),
-		store:           store,
-		cfg:             cfg,
-		broker:          broker,
-		l8:              l8,
-		metrics:         ensureMetrics(metrics),
-		pools:           pools,
-		drainCfg:        LoadDrainConfig(),
-		registrationCfg: LoadRegistrationConfig(),
-		ctx:             ctx,
-		cancel:          cancel,
-		stop:            make(chan struct{}),
+		users:                   newUserLoadTracker(),
+		workers:                 make(map[string]*URLWorker),
+		accountQueueDefault:     accountQueueDefault(),
+		destinationAccountQueue: make(map[string]bool),
+		store:                   store,
+		cfg:                     cfg,
+		broker:                  broker,
+		l8:                      l8,
+		metrics:                 ensureMetrics(metrics),
+		pools:                   pools,
+		drainCfg:                LoadDrainConfig(),
+		registrationCfg:         LoadRegistrationConfig(),
+		ctx:                     ctx,
+		cancel:                  cancel,
+		stop:                    make(chan struct{}),
 	}
 	r.applyDrainEvents()
 	counts := store.Counts()
@@ -455,6 +463,15 @@ func (r *Registry) resolveWorkerLocked(job *Job) (string, *URLWorker) {
 			if current := r.workers[k]; current == idleWorker {
 				delete(r.workers, k)
 			}
+			r.mu.Unlock()
+		})
+		var remembered *bool
+		if on, ok := r.destinationAccountQueue[key]; ok {
+			remembered = &on
+		}
+		w.setAccountQueuePolicy(r.accountQueueDefault, remembered, func(on bool) {
+			r.mu.Lock()
+			r.destinationAccountQueue[key] = on
 			r.mu.Unlock()
 		})
 		r.workers[key] = w

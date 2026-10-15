@@ -162,6 +162,7 @@ upstreams:
 | `AQUIFER_MAX_BODY_BYTES` | `1048576` (1MB) | Reject oversized request bodies with `413` |
 | `AQUIFER_DB_MAX_BYTES` | 80% of the disk | Reject new jobs with `429` once the database exceeds this size. Unset, Aquifer sizes it at startup to 80% of the space the database can use (free space on its filesystem plus its current size), so it fits the volume without configuration. The startup log shows the value. Set a number to override, or `0` to disable. Falls back to 800MB where disk space can't be read |
 | `AQUIFER_MAX_PENDING_PER_UPSTREAM` | `10000` | Shared per-upstream backlog budget used by fair admission; `0` disables it |
+| `AQUIFER_ACCOUNT_QUEUE` | `on` | `on`: each tenant gets its own queue at every upstream; `off`: tenants share one queue per upstream. An upstream's own `X-Aqueduct-Account-Queue` response header overrides this; a sender can only ask for `on` |
 | `AQUIFER_RETRY_AFTER_SECONDS` | `5` | Base `Retry-After` value sent on `429` admission rejections |
 | `AQUIFER_IDLE_TIMEOUT_SECONDS` | `300` (5min) | How long a per-tenant/per-domain queue can sit idle before self-tearing-down; see [drain mode](#partitioning-strategies) for why this gates a real drain flush |
 | `AQUIFER_ALLOWED_URL_DOMAINS` | _(none, unrestricted)_ | Comma-separated hostnames `url`-routed jobs are permitted to target; see [`POST /jobs`](API.md#post-jobs) |
@@ -228,13 +229,19 @@ The upstream controls pace at runtime via response headers (`X-Aqueduct-Rps`, `X
 |------------------------------|-------------------------------|------------------------------------------|
 | `X-Aqueduct-Rps`            | `X-Aquifer-Rps`               | Reduce dispatch rate to this value      |
 | `X-Aqueduct-Max-Concurrent` | `X-Aquifer-Max-Concurrent`    | Reduce max in-flight requests           |
-| `X-Aqueduct-Account-Queue`  | `X-Aquifer-Account-Queue`     | `enabled`: isolate each tenant's queue |
+| `X-Aqueduct-Account-Queue`  | `X-Aquifer-Account-Queue`     | `enabled` / `disabled`: one queue per tenant, or one shared queue (has the last say) |
 | `X-Aqueduct-Slow-Start`     | `X-Aquifer-Slow-Start`        | `true`: new queues ramp up instead of firing at full rate immediately |
 | `X-Aqueduct-Max-Backlog`    | `X-Aquifer-Max-Backlog`       | Set the shared backlog budget used by fair admission |
 
 Aquifer reads both namespaces, preferring `X-Aqueduct-*` when both are present.
 
-With `X-Aqueduct-Account-Queue: enabled`, each `(user_id, api_key)` pair gets its own independently paced queue, so one tenant's burst can't slow down another. Each queue's pace still stays inside the upstream's actual budget: a background check throttles the *sum* of every active tenant queue proportionally if too many are active at once, so isolation never means an unbounded copy of the full rate per tenant.
+By default each `(user_id, api_key)` pair gets its own independently paced queue at every upstream, so one tenant's burst, or one tenant's broken endpoint retrying, can't slow down another: a failed attempt gives its concurrency slot back and waits out its backoff in that tenant's own queue.
+
+Who decides, in order:
+
+1. **The upstream.** Answering with `X-Aqueduct-Account-Queue: disabled` (or `false`) puts everyone sending to it in one shared queue, for example an API that needs one global order. `enabled` (or `true`) gives everyone their own. Aquifer remembers the choice per upstream.
+2. **The node owner.** `AQUIFER_ACCOUNT_QUEUE=on` (the default) or `off`.
+3. **A sender**, with the same header on its request, can ask for `enabled` when the node owner chose `off`, but can never turn isolation off. The mode is per upstream, so one sender switching it off would take isolation away from every other tenant. Each queue's pace still stays inside the upstream's actual budget: a background check throttles the *sum* of every active tenant queue proportionally if too many are active at once, so isolation never means an unbounded copy of the full rate per tenant.
 
 When that shared backlog crosses 70% of `X-Aqueduct-Max-Backlog`, queues holding more than their current fair share receive progressively more `429` responses while smaller queues continue entering. One active queue can still use the whole budget. See [API.md](API.md#fair-queue-admission) for the formula, response headers, and scope.
 
