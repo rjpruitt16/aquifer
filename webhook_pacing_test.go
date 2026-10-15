@@ -167,8 +167,14 @@ func TestWebhookDeliveryIsPacedByAccountQueue(t *testing.T) {
 		w, ok := registry.workers[key]
 		registry.mu.Unlock()
 		if ok {
+			// Whichever queue the delivery landed in: the original job's
+			// tenant's own, with account queues on.
 			w.mu.Lock()
-			q, ok := w.queues[sharedKey]
+			var q *AccountQueue
+			for _, candidate := range w.queues {
+				q = candidate
+			}
+			ok := q != nil
 			w.mu.Unlock()
 			// q.RPS() reads an atomic.Int64 that starts at its Go zero
 			// value until AccountQueue's own goroutine initializes it to

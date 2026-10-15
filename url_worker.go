@@ -7,40 +7,55 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"math"
 	"net/url"
+	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
 type URLWorker struct {
-	mu               sync.Mutex
-	domain           string
-	rps              float64
-	maxConc          int
-	pool             *Pool // nil unless this worker dispatches into a registered pool instead of a fixed domain
+	mu      sync.Mutex
+	domain  string
+	rps     float64
+	maxConc int
+	pool    *Pool // nil unless this worker dispatches into a registered pool instead of a fixed domain
+	// accountQueueMode is the effective mode -- one queue per tenant, or one
+	// shared queue -- recomputed by applyAccountQueueModeLocked from, in
+	// order: the destination's own say (destinationMode, from its
+	// X-Aqueduct-Account-Queue responses), the node owner's default
+	// (AQUIFER_ACCOUNT_QUEUE), and a sender asking for it (senderOptIn,
+	// which can only turn it on).
 	accountQueueMode bool
-	slowStart        bool // set by an upstream's X-Aqueduct-Slow-Start response header; applies to the *next* new queue created for this domain, not retroactively
-	maxBacklog       atomic.Int64
-	activeQueues     atomic.Int64
-	backlog          atomic.Int64
-	queues           map[string]*AccountQueue
-	store            JobStore
-	broker           *Broker
-	l8               *L8Registry
-	metrics          MetricsAdapter
-	enqueueWebhook   webhookEnqueuer
-	resultRecorder   JobResultRecorder
-	onJobDone        func(*Job)
-	onIdle           func(string, *URLWorker)
-	breakerUntil     time.Time // zero value means the breaker is closed
-	breakerKind      string    // "queue" or "reroute" — which kind of signal tripped it, see classifyOverload
-	closeOnce        sync.Once
-	stopOnce         sync.Once
-	stop             chan struct{}
-	done             chan struct{}
+	nodeDefault      bool
+	senderOptIn      bool
+	destinationMode  *bool
+	// onDestinationMode lets the registry remember the destination's choice
+	// across this worker being retired and recreated.
+	onDestinationMode func(bool)
+	slowStart         bool // set by an upstream's X-Aqueduct-Slow-Start response header; applies to the *next* new queue created for this domain, not retroactively
+	maxBacklog        atomic.Int64
+	activeQueues      atomic.Int64
+	backlog           atomic.Int64
+	queues            map[string]*AccountQueue
+	store             JobStore
+	broker            *Broker
+	l8                *L8Registry
+	metrics           MetricsAdapter
+	enqueueWebhook    webhookEnqueuer
+	resultRecorder    JobResultRecorder
+	onJobDone         func(*Job)
+	onIdle            func(string, *URLWorker)
+	breakerUntil      time.Time // zero value means the breaker is closed
+	breakerKind       string    // "queue" or "reroute" — which kind of signal tripped it, see classifyOverload
+	closeOnce         sync.Once
+	stopOnce          sync.Once
+	stop              chan struct{}
+	done              chan struct{}
 }
 
 // BreakerOpen reports whether proxy mode should skip a direct dispatch
@@ -345,6 +360,8 @@ func (w *URLWorker) reserve(job *Job, enforceAdmission bool) (*AccountQueue, Que
 		}, func(v int64) {
 			w.maxBacklog.Store(v)
 		})
+		destinationSignal := w.handleDestinationAccountQueue
+		q.accountQueueSignal.Store(&destinationSignal)
 		w.queues[key] = q
 	}
 
@@ -382,10 +399,84 @@ func (w *URLWorker) Snapshot() QueueSnapshot {
 	return w.snapshotForQueueLocked("")
 }
 
+// handleAccountQueueHeader applies a sender's X-Aqueduct-Account-Queue
+// request header. A sender can ask for one queue per tenant but can't turn
+// that off: the mode is per destination, so one sender switching it off
+// would take isolation away from every other tenant sending there. Only
+// the node owner (AQUIFER_ACCOUNT_QUEUE) and the destination can.
 func (w *URLWorker) handleAccountQueueHeader(val string) {
+	on, ok := parseAccountQueueValue(val)
+	if !ok || !on {
+		return
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.accountQueueMode = val == "enabled"
+	w.senderOptIn = true
+	w.applyAccountQueueModeLocked()
+}
+
+// setAccountQueuePolicy sets the node owner's default and, if the registry
+// remembers one, the destination's earlier choice. Called once, right
+// after the worker is created.
+func (w *URLWorker) setAccountQueuePolicy(nodeDefault bool, destination *bool, onDestinationMode func(bool)) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.nodeDefault = nodeDefault
+	w.destinationMode = destination
+	w.onDestinationMode = onDestinationMode
+	w.applyAccountQueueModeLocked()
+}
+
+// handleDestinationAccountQueue applies the destination's own
+// X-Aqueduct-Account-Queue answer, which overrides everything else.
+func (w *URLWorker) handleDestinationAccountQueue(on bool) {
+	w.mu.Lock()
+	changed := w.destinationMode == nil || *w.destinationMode != on
+	w.destinationMode = &on
+	w.applyAccountQueueModeLocked()
+	remember := w.onDestinationMode
+	w.mu.Unlock()
+	if changed && remember != nil {
+		remember(on)
+	}
+}
+
+func (w *URLWorker) applyAccountQueueModeLocked() {
+	if w.destinationMode != nil {
+		w.accountQueueMode = *w.destinationMode
+		return
+	}
+	w.accountQueueMode = w.nodeDefault || w.senderOptIn
+}
+
+// parseAccountQueueValue reads an X-Aqueduct-Account-Queue value: enabled,
+// true, on, yes or 1 for one queue per tenant; disabled, false, off, no or
+// 0 for one shared queue. ok is false for anything else.
+func parseAccountQueueValue(val string) (on bool, ok bool) {
+	switch strings.ToLower(strings.TrimSpace(val)) {
+	case "enabled", "true", "on", "yes", "1":
+		return true, true
+	case "disabled", "false", "off", "no", "0":
+		return false, true
+	}
+	return false, false
+}
+
+// accountQueueDefault is the node owner's AQUIFER_ACCOUNT_QUEUE: on (the
+// default) gives each tenant its own queue at every destination unless the
+// destination says otherwise; off shares one queue per destination unless
+// a sender or the destination asks for isolation.
+func accountQueueDefault() bool {
+	val := os.Getenv("AQUIFER_ACCOUNT_QUEUE")
+	if val == "" {
+		return true
+	}
+	on, ok := parseAccountQueueValue(val)
+	if !ok {
+		log.Printf("AQUIFER_ACCOUNT_QUEUE=%q isn't on or off; using on", val)
+		return true
+	}
+	return on
 }
 
 const sharedKey = "__shared__"

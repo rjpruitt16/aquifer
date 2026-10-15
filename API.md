@@ -83,7 +83,7 @@ Each retry emits a `retrying` SSE event (`attempt`, `max_retries`, `retry_at`, `
 
 Each upstream has a soft shared backlog budget `B`, defaulting to `AQUIFER_MAX_PENDING_PER_UPSTREAM=10000`. The upstream may update it at runtime with `X-Aqueduct-Max-Backlog` (or `X-Aquifer-Max-Backlog`); `0` disables this count-based limit. Dynamic values are learned from direct proxy responses and queued dispatch responses.
 
-With AccountQueue mode enabled, Aquifer gives idle capacity to whoever can use it while protecting smaller queues once the upstream becomes congested. For a prospective request, let `q` be its queue's projected backlog, `Q` the projected upstream backlog, and `N` the projected number of active account queues:
+With AccountQueue mode enabled (the default, see the README's pacing reference for who can change it), Aquifer gives idle capacity to whoever can use it while protecting smaller queues once the upstream becomes congested. For a prospective request, let `q` be its queue's projected backlog, `Q` the projected upstream backlog, and `N` the projected number of active account queues:
 
 ```text
 F        = B / N

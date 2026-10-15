@@ -94,6 +94,9 @@ func TestAccountQueueHeaderIsolatesTenants(t *testing.T) {
 // (the pre-fix, default behavior), so the fix doesn't accidentally force
 // isolation on for everyone.
 func TestAccountQueueHeaderOmittedSharesQueue(t *testing.T) {
+	// Account queues are on by default now; this is the node owner
+	// choosing one shared queue per destination.
+	t.Setenv("AQUIFER_ACCOUNT_QUEUE", "off")
 	r := testRegistry(t)
 
 	a := jobFor("tenant-a", "key-a")

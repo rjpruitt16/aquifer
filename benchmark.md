@@ -77,7 +77,7 @@ Every job persisted to SQLite before dispatch, so a kill mid-flight just means t
 
 ## 5. Multi-tenant fairness (`X-Aqueduct-Account-Queue`)
 
-Without isolation, every job hitting the same upstream domain shares one dispatch queue — a noisy tenant can starve everyone behind it. Setting `X-Aqueduct-Account-Queue: enabled` isolates pacing per `(user_id, api_key)`.
+Without isolation, every job hitting the same upstream domain shares one dispatch queue — a noisy tenant can starve everyone behind it. Isolation per `(user_id, api_key)` is on by default (`AQUIFER_ACCOUNT_QUEUE`); an upstream can switch it off for itself with `X-Aqueduct-Account-Queue: disabled`. `TestABrokenTenantDoesNotStallAHealthyOneOnTheSameHost` measures it: with a broken tenant retrying a 40-job burst, a healthy tenant on the same host finishes 20 jobs in ~0.2s with isolation and 0 of 20 in 5s without it.
 
 **Surfaced a real bug during benchmarking:** the isolation mechanism existed, but the handler that turns it on was never actually wired into the HTTP request path — every job silently shared one queue regardless of the header. Filed and fixed as [issue #5](https://github.com/rjpruitt16/aquifer/issues/5), covered by `TestAccountQueueHeaderIsolatesTenants` and `TestAccountQueueHeaderOmittedSharesQueue`.
 
@@ -131,7 +131,7 @@ That fix surfaced a third issue: `CheckOrInsert` checked for duplicates via `INS
 - [ ] **Traffic sustains above ~200-300 req/s?** Re-run `benchmark/capacity_by_size.sh` against your own traffic shape first — verify the ceiling is actually hardware-bound, not code-level.
 - [ ] **Bursts followed by quiet periods?** A 500-job burst drains in ~75-79s at a 50 RPS dispatch pace, regardless of machine size — scale linearly against your own `CONFIG_PATH` rate.
 - [ ] **A ceiling looks identical no matter what you scale?** Treat it as a code-path question, not a bigger-machine question.
-- [ ] **Need per-tenant fairness under a shared upstream?** Set `X-Aqueduct-Account-Queue: enabled`.
+- [ ] **Need per-tenant fairness under a shared upstream?** It's on by default; check nobody set `AQUIFER_ACCOUNT_QUEUE=off` and that the upstream doesn't answer `X-Aqueduct-Account-Queue: disabled`.
 
 ---
 
