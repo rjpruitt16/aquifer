@@ -41,7 +41,7 @@ func defaultRedirectTargetURL(region string) string {
 
 // redirectGate answers "is attempting cross-region redirect itself worth
 // trying right now" — distinct from URLWorker's per-domain breaker, which
-// answers "is this one upstream domain healthy." Trips after a redirect
+// answers "is this one target API domain healthy." Trips after a redirect
 // tour finds no reachable alternate region at all; while tripped, /proxy
 // skips redirect entirely and behaves exactly as it does without this
 // feature — a safe, already-understood fallback state. Decided
@@ -216,7 +216,7 @@ func redirectExhaustedRetryAfterSeconds() int64 {
 // tour, checked as this function's first line. It tours other known-live
 // regions directly over Fly's private network before this instance falls
 // back to its own local queue, mirroring what AttemptDirect already does
-// for the local upstream, just aimed at sibling Aquifer instances.
+// for the local target API, just aimed at sibling Aquifer instances.
 //
 // Returns redirectNotApplicable when the feature isn't configured at all
 // (no RegionAdapter ever set) or this request is itself someone else's

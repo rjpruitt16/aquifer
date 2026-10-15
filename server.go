@@ -138,7 +138,7 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 
 	// Account-queue mode is a request header, never part of the JSON body —
 	// same X-Aqueduct-*/X-Aquifer-* precedence used for pacing headers
-	// elsewhere. Empty means "no opinion," leaving the upstream's current
+	// elsewhere. Empty means "no opinion," leaving the target API's current
 	// mode unchanged rather than forcing it off for every request that
 	// doesn't happen to set this.
 	req.AccountQueueMode = pacingHeader(r.Header, "Account-Queue")
@@ -277,8 +277,8 @@ func (s *Server) l8Spec(w http.ResponseWriter, r *http.Request) {
 
 // ProxyFallbackInfo carries the one extra SSE event proxy mode's fallback
 // path emits before the normal queued/dispatching/terminal sequence — see
-// streamEvents. Status is 0 when a real upstream status was never received
-// (a skipped attempt or a timeout), non-zero when the upstream actually
+// streamEvents. Status is 0 when a real target API status was never received
+// (a skipped attempt or a timeout), non-zero when the target API actually
 // responded (e.g. 429/503).
 type ProxyFallbackInfo struct {
 	Reason string
@@ -367,7 +367,7 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request, job *Job, 
 	}
 }
 
-// proxyJob is proxy mode's HTTP entry point: try the upstream directly and
+// proxyJob is proxy mode's HTTP entry point: try the target API directly and
 // synchronously; on success, relay its response verbatim; on failure,
 // overload, or an already-open circuit breaker, fall back to the same
 // durable-queue-and-SSE path createJob/streamJob always use, on this same
@@ -593,7 +593,7 @@ func (s *Server) relaySSE(w http.ResponseWriter, r *http.Request, resp *http.Res
 
 // streamExistingJob handles a proxy-mode request that turned out to be a
 // duplicate of one already in flight or already finished. Job never
-// persists its upstream response body past the transient SSE/webhook
+// persists its target API response body past the transient SSE/webhook
 // payload (see Job), so a duplicate of an already-terminal job has no
 // cached response to replay — opening a stream for it would just keepalive
 // forever, since its completed/failed event already fired before this

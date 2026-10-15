@@ -296,13 +296,13 @@ func (r *Registry) startRegistrationLoop() {
 	}()
 }
 
-// Enqueue queues a job on the URLWorker for its upstream domain, or for
+// Enqueue queues a job on the URLWorker for its target API domain, or for
 // its target pool if the job carries a PoolID instead of a URL.
 // accountQueueHeader is the raw X-Aqueduct-Account-Queue/X-Aquifer-Account-Queue
 // value from the originating HTTP request, or "" if this job has no live
 // request behind it (e.g. recovered from disk at startup). An empty value
 // leaves the worker's current account-queue mode unchanged rather than
-// forcing it off — the mode is shared per upstream domain, so one request
+// forcing it off — the mode is shared per target API domain, so one request
 // that doesn't care about it shouldn't be able to flip it off for every
 // other concurrent tenant relying on it being on.
 func (r *Registry) Enqueue(job *Job, accountQueueHeader string) {
@@ -484,7 +484,7 @@ func (r *Registry) resolveWorkerLocked(job *Job) (string, *URLWorker) {
 // (RPS/concurrency limits, X-Aqueduct-* response-header throttling) instead
 // of firing immediately with a fixed retry schedule — a slow or
 // rate-limited webhook receiver can now shed load exactly the way an
-// upstream API already can, and delivery is durable across a restart the
+// target API already can, and delivery is durable across a restart the
 // same way a real job is (the underlying webhook-delivery Job is persisted
 // via CheckOrInsert, not just an in-memory retry loop).
 //
@@ -493,7 +493,7 @@ func (r *Registry) resolveWorkerLocked(job *Job) (string, *URLWorker) {
 // called twice for it. maxRetries is the original job's webhook_max_retries.
 //
 // Delivery skips admission control: the job it reports on was already
-// admitted and its upstream call already made, so refusing the delivery
+// admitted and its target API call already made, so refusing the delivery
 // would throw away finished work rather than shed new load.
 func (r *Registry) EnqueueWebhook(originalJobID, userID, webhookURL string, maxRetries int, payload map[string]any) {
 	if webhookURL == "" || r.stopping() {

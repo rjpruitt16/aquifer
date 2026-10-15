@@ -98,7 +98,7 @@ type JobRequest struct {
 
 	// IdempotencyScope "shared" dedups on idempotent_key alone, across every
 	// user_id, so concurrent callers asking for the same resource coalesce
-	// onto one upstream call and one cached result. Empty or "user" keeps
+	// onto one target API call and one cached result. Empty or "user" keeps
 	// the default per-user scope. Requires AQUIFER_SHARED_IDEMPOTENCY_ENABLED.
 	IdempotencyScope string `json:"idempotency_scope,omitempty"`
 
@@ -109,10 +109,10 @@ type JobRequest struct {
 	MaxRetries *int `json:"max_retries,omitempty"`
 
 	// WebhookMaxRetries is max_retries for this job's webhook delivery rather
-	// than its upstream call, with the same values: nil means
+	// than its target API call, with the same values: nil means
 	// DefaultMaxRetries, -1 retries until the receiver accepts it (bounded by
 	// the queued-job TTL). It is separate because the two calls go to
-	// different places: a caller may want a non-idempotent upstream tried
+	// different places: a caller may want a non-idempotent target API tried
 	// once but the webhook retried through a long receiver outage. The
 	// X-Aqueduct-Webhook-Max-Retries request header overrides this field.
 	WebhookMaxRetries *int `json:"webhook_max_retries,omitempty"`
@@ -141,7 +141,7 @@ type JobRequest struct {
 	// AccountQueueMode is never read from the request body — it's set by the
 	// HTTP adapter from the X-Aqueduct-Account-Queue / X-Aquifer-Account-Queue
 	// request header, the only source of truth for this setting. Empty means
-	// "no opinion, leave the upstream's current mode unchanged."
+	// "no opinion, leave the target API's current mode unchanged."
 	AccountQueueMode string `json:"-"`
 }
 

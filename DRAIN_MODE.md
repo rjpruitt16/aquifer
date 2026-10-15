@@ -29,8 +29,8 @@ reprovisioning per-tenant ones.
 
 | State | Meaning |
 |---|---|
-| `active` | At least one upstream has live work. Normal state, drain mode enabled or not. |
-| `draining` | Every upstream has gone idle, but either the drain timer hasn't elapsed yet or a flush attempt is in flight/being retried. Not yet safe to hand off. |
+| `active` | At least one target API has live work. Normal state, drain mode enabled or not. |
+| `draining` | Every target API has gone idle, but either the drain timer hasn't elapsed yet or a flush attempt is in flight/being retried. Not yet safe to hand off. |
 | `unassigned` | The ledger was flushed (or there was nothing to flush) and local state is clear — safe to hand off. Reverts to `active` the instant new work arrives. |
 
 `unassigned` is a status label, not an access gate — Aquifer keeps accepting new jobs in every state.

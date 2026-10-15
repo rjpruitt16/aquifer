@@ -23,10 +23,10 @@ Aquifer ran from 15:23 UTC. Spillway ran from 14:47 UTC, was down from about
 ## What it found
 
 **Aquifer: the run loop stalled at its minimum pace** (fixed in #48). After a
-short upstream outage halved the pace to the floor, the queue's run loop
+short target API outage halved the pace to the floor, the queue's run loop
 slept out each dispatch interval in place and stopped reading completions and
 new jobs, including its own webhook deliveries. It took about 17 minutes to
-notice the upstream had recovered. Run 2 was restarted on the fix at 15:23.
+notice the target API had recovered. Run 2 was restarted on the fix at 15:23.
 
 **Driver: WebSocket resend storm** (fixed in #51). The driver resent every
 unanswered command every 15 seconds, which produced 2M resends and 70k false
@@ -60,7 +60,7 @@ pressure and checks resident memory. Spillway moved to 4GB with a fresh store.
 
 **Spillway: throughput falls as the store grows.** On 4GB with #38, Spillway
 was stable (no restarts) but accepted 300 jobs/s at 520MB, 200 at 815MB, 158
-at 1.2GB and 71 during the WebSocket burst at 1.8GB, with upstream and
+at 1.2GB and 71 during the WebSocket burst at 1.8GB, with target API and
 webhooks healthy and the CPU at 100%. Its own benchmark notes 100k retained
 jobs halving throughput, partly from Mnesia rewriting table files. Not yet
 profiled: nothing could connect to the node (fixed in spillway #40). Run 3

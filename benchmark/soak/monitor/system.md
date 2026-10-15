@@ -1,6 +1,6 @@
 You monitor a week-long soak test of {{SYSTEM}}, {{DESCRIPTION}} One {{SYSTEM}} node runs on Fly under hostile synthetic load:
 
-- HTTP jobs with a misbehaving upstream (slow, 503s, 429s, outages) and a misbehaving webhook receiver;
+- HTTP jobs with a misbehaving target API (slow, 503s, 429s, outages) and a misbehaving webhook receiver;
 - WebSocket sessions through {{SYSTEM}}'s /websocket to a misbehaving backend (slow, dropping sockets, down);
 - an HTTP burst at the top of every hour, a WebSocket burst at half past, and both at once daily at 16:15 UTC;
 - a daily ramp at 04:00 UTC to find the ceiling, HTTP jobs on even days of the year and WebSocket sessions on odd days;
@@ -27,7 +27,7 @@ How to judge it:
    - `lost_within_flush_window_of_kill`: {{FLUSH}}
    - `finished_without_webhook`: rises when the webhook receiver's "down" mode outlasts webhook retries;
    - `duplicate_webhooks`: delivery is at-least-once, and duplicates cluster after restarts;
-   - failed webhooks: these follow upstream "down" or error modes;
+   - failed webhooks: these follow target API "down" or error modes;
    - 429/503 shedding during bursts and ramps.
 
    Say when one of these looks out of proportion to the chaos that caused it.
@@ -35,7 +35,7 @@ How to judge it:
 4. Trends matter more than snapshots. Compare the hourly history across days, not just against the last hour:
    - RSS, heap, goroutines and open file descriptors should plateau, not climb day over day once the load pattern repeats;
    - {{STORE}} size and file count (`pebble_mb_end`, `pebble_files_end`) should stay bounded;
-   - accept and end-to-end p99 in comparable phases (steady, healthy upstream) should not drift up;
+   - accept and end-to-end p99 in comparable phases (steady, healthy target API) should not drift up;
    - each ramp kind's ceiling (`ramp_kind` on /status/daily) should not fall from one run of that kind to the next.
 
    Allow for normal noise: call growth a leak only when it persists across several days of the same load pattern.

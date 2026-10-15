@@ -110,7 +110,7 @@ func TestWebhookMaxRetriesUntilDelivered(t *testing.T) {
 	}
 }
 
-// webhook_max_retries must not change how often the upstream is tried.
+// webhook_max_retries must not change how often the target API is tried.
 func TestWebhookMaxRetriesLeavesUpstreamRetriesAlone(t *testing.T) {
 	withRetryBackoff(t, 0)
 	up, upstreamHits := failingUpstream(t, -1, http.StatusBadGateway)

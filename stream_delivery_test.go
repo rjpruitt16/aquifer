@@ -28,7 +28,7 @@ type streamDeliveryHarness struct {
 	webhookURL string
 }
 
-// newStreamDeliveryHarness runs real HTTP: Aquifer, an upstream that holds
+// newStreamDeliveryHarness runs real HTTP: Aquifer, a target API that holds
 // every request until release is closed, and a webhook sink.
 func newStreamDeliveryHarness(t *testing.T) *streamDeliveryHarness {
 	t.Helper()
@@ -228,7 +228,7 @@ func TestProxyCallerWhoDropsStillGetsWebhook(t *testing.T) {
 		}
 	}()
 	time.Sleep(300 * time.Millisecond)
-	cancel() // caller leaves before the upstream answers
+	cancel() // caller leaves before the target API answers
 	<-done
 	time.Sleep(200 * time.Millisecond)
 	close(h.release)

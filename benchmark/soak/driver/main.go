@@ -1,7 +1,7 @@
 // Copyright 2026 Rahmi Pruitt
 // SPDX-License-Identifier: Apache-2.0
 
-// driver: the soak test's load generator, misbehaving upstream and webhook
+// driver: the soak test's load generator, misbehaving target API and webhook
 // receiver, job ledger, chaos scheduler and observer, in one process. See
 // benchmark/soak/README.md.
 //

@@ -180,7 +180,7 @@ func (r *Runtime) RecoverQueuedJobs(dbPath string) {
 	log.Printf("recovering %d queued jobs from %s", len(queued), dbPath)
 	for _, job := range queued {
 		// No live HTTP request behind a recovered job, so no account-queue
-		// opinion — "" leaves each upstream's mode exactly as it was.
+		// opinion — "" leaves each target API's mode exactly as it was.
 		r.Registry.Enqueue(job, "")
 	}
 }

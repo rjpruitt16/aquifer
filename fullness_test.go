@@ -53,7 +53,7 @@ func TestFullnessIgnoresLimitsThatAreSwitchedOff(t *testing.T) {
 }
 
 // TestFullnessFollowsAnUpstreamsBacklogAgainstItsBudget fills a real
-// backlog: jobs aimed at an upstream that never answers pile up against a
+// backlog: jobs aimed at a target API that never answers pile up against a
 // backlog budget of 10, and every response says how full that makes the
 // instance.
 func TestFullnessFollowsAnUpstreamsBacklogAgainstItsBudget(t *testing.T) {

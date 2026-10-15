@@ -20,7 +20,7 @@ var (
 )
 
 // WebSocketEnvelope is the application and control protocol shared by the
-// client, Aquifer, and the upstream WebSocket server. Redis stream IDs provide
+// client, Aquifer, and the target API WebSocket server. Redis stream IDs provide
 // delivery order; message_id provides producer identity; caused_by expresses
 // causal relationships without assuming one request has exactly one response.
 type WebSocketEnvelope struct {

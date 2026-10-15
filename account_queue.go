@@ -175,7 +175,7 @@ func qLoad(activeQueues, backlog *atomic.Int64) (int, int64) {
 // Throttle pushes an external rate adjustment into the queue's dispatch
 // loop, reusing the same jobDoneMsg channel that header-driven pacing
 // already uses — the loop doesn't need to know whether a lower rate came
-// from the upstream's own response header or from the URLWorker capping
+// from the target API's own response header or from the URLWorker capping
 // this queue's share of a shared aggregate budget, it's the same signal
 // either way.
 func (q *AccountQueue) Throttle(rps float64) {
@@ -458,7 +458,7 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 			switch {
 			case msg.failed:
 				// Each retryable failure halves this queue's pace; successes
-				// creep it back up below, so a struggling upstream sees fewer
+				// creep it back up below, so a struggling target API sees fewer
 				// attempts per second from everyone sharing this queue. A rate
 				// advertised on the failed response can lower the pace further
 				// but never raise it: a proxy or framework that stamps a fixed
@@ -764,7 +764,7 @@ func failJob(job *Job, upstream, reason string, responseStatus int, body []byte,
 	}
 }
 
-// retryableStatus: the upstream is temporarily unable, not rejecting the
+// retryableStatus: the target API is temporarily unable, not rejecting the
 // request itself. Other 4xx responses are final.
 func retryableStatus(code int) bool {
 	return code >= 500 || code == http.StatusTooManyRequests || code == http.StatusRequestTimeout
@@ -809,7 +809,7 @@ var retryBackoffFunc atomic.Value
 
 // retryDelay grows exponentially with the attempts already made (1s, 2s,
 // 4s, ...) up to AQUIFER_RETRY_MAX_BACKOFF_SECONDS, with jitter. A
-// Retry-After header from the upstream is honored instead when present.
+// Retry-After header from the target API is honored instead when present.
 func retryDelay(attempts int, header http.Header) time.Duration {
 	if header != nil {
 		if secs, err := strconv.Atoi(header.Get("Retry-After")); err == nil && secs >= 0 {
@@ -896,7 +896,7 @@ func pacingHeader(headers http.Header, name string) string {
 func makeRequest(ctx context.Context, job *Job, dispatchURL string, totalJobs, queueDepth int64, flowRate float64, activeQueues int, upstreamBacklog int64, l8 *L8Registry) (*http.Response, error) {
 	// L8 signing and encryption prove Aquifer's identity to (and keep the
 	// payload private for) the *receiver* of a webhook — they have no meaning
-	// for forward dispatch to an arbitrary upstream API, so this only applies
+	// for forward dispatch to an arbitrary target API, so this only applies
 	// when the job being dispatched is itself a webhook delivery (see
 	// Job.isWebhookDeliveryJob).
 	body := []byte(job.Body)
@@ -963,12 +963,12 @@ func makeRequest(ctx context.Context, job *Job, dispatchURL string, totalJobs, q
 	return resp, err
 }
 
-// dispatchClient is shared by every upstream and webhook dispatch so
+// dispatchClient is shared by every target API and webhook dispatch so
 // connections are reused. A fresh client per request fell back to Go's
 // default transport, which keeps only 2 idle connections per host: at a few
-// hundred requests a second to one upstream, nearly every request opened
+// hundred requests a second to one target API, nearly every request opened
 // (and then closed) a new TCP connection, costing Aquifer CPU and the
-// upstream a connection per call.
+// target API a connection per call.
 var dispatchClient = &http.Client{
 	Timeout: 30 * time.Second,
 	Transport: func() *http.Transport {

@@ -53,7 +53,7 @@ type WebSocketAdmission struct {
 }
 
 // WebSocketScheduler is the per-Aquifer connection queue. It admits client
-// sockets, holds upstream connection attempts in FIFO order, and dispatches
+// sockets, holds target API connection attempts in FIFO order, and dispatches
 // those attempts at the configured, jittered connection-open rate.
 type WebSocketScheduler struct {
 	mu sync.Mutex
@@ -328,7 +328,7 @@ func (s *WebSocketScheduler) run() {
 }
 
 // grantReady grants at most one connection per call so the configured
-// connection-open rate applies even when many upstream slots are free.
+// connection-open rate applies even when many target API slots are free.
 func (s *WebSocketScheduler) grantReady() (time.Duration, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

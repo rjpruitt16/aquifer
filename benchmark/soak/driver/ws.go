@@ -15,7 +15,7 @@ package main
 //
 // The session keeps the stream_id of the last message it processed and
 // reconnects from it. aqueduct.v1 does not replay commands after an
-// ambiguous upstream failure, so unanswered commands are resent, with the
+// ambiguous target API failure, so unanswered commands are resent, with the
 // same message_id, exactly when one may have been lost: after the session
 // reconnects (once the replay is done), and when the target reports a new
 // backend connection (status "connected" after the first). A slow answer on
@@ -152,7 +152,7 @@ type wsWindow struct {
 	cmd                                          hist // first send to complete
 }
 
-// ---- backend (the target's upstream) ----
+// ---- backend (the target's target API) ----
 
 var wsUpgrader = websocket.Upgrader{
 	Subprotocols: []string{wsSubprotocol},
