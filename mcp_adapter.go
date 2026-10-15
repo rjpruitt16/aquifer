@@ -272,8 +272,8 @@ func mcpTools() []map[string]any {
 				"method":         stringSchema("HTTP method to use when dispatching the request."),
 				"headers":        map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}},
 				"body":           stringSchema("Optional raw request body."),
-				"webhook_url":    stringSchema("URL that receives the eventual job result."),
-			}, []string{"user_id", "idempotent_key", "method", "webhook_url"}),
+				"webhook_url":    stringSchema("Optional URL that receives the eventual job result."),
+			}, []string{"user_id", "idempotent_key", "method"}),
 		},
 		{
 			"name":        "aquifer_get_job",

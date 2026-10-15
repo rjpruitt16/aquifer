@@ -561,7 +561,7 @@ func (s *PebbleStore) GetQueuedJobs() []*Job {
 // reasons -- see the package doc comment), but this must never surface it:
 // the hash is recomputed the same way CheckOrInsert derives it, and only
 // the hash/job_id/status ever go into the returned LedgerEntry. Excludes
-// webhook-delivery jobs (WebhookURL == "", see Job.isWebhookDeliveryJob) --
+// webhook-delivery jobs (see Job.isWebhookDeliveryJob) --
 // those are internal delivery bookkeeping, not real user-submitted work, and
 // have no business appearing in a ledger meant for tenant-handoff dedup.
 func (s *PebbleStore) ListIdempotentKeys() []LedgerEntry {

@@ -17,6 +17,8 @@
 
 `execute_before` is optional Unix time in milliseconds. Aquifer checks it immediately before dispatch and before every retry. A job that has not started its next attempt by that time is never sent upstream; it becomes `failed` with reason `execution_deadline_exceeded`, remains available through the normal status/result retention window, and emits the normal failed SSE/webhook event.
 
+`webhook_url` is optional. Omit it when the caller only needs Aquifer to execute the job and will use `GET /jobs/{id}` or remote result storage if it needs the terminal result. When set, Aquifer delivers the normal completion webhook.
+
 **Do not expose Aquifer directly to untrusted callers.** `url` is dispatched as a real HTTP request — if an arbitrary or untrusted party can set it, Aquifer becomes an open relay/SSRF vector: it can be pointed at your internal network, cloud metadata endpoints (`169.254.169.254`), or anything else the machine Aquifer runs on can reach, using Aquifer's own network position and identity. The intended caller is **your own trusted backend or gateway code** dispatching to a destination it already knows about — not an agent, end user, or any other party choosing the destination itself. Run Aquifer on a private network, not bound to a public address, and put your own authorization and destination allow-listing in front if agents need to reach it indirectly.
 
 As a second, narrower layer on top of that — `AQUIFER_ALLOWED_URL_DOMAINS` (comma-separated hostnames, e.g. `api.openai.com,internal.yourapp.com`) restricts which domains `url` is allowed to target at all; a subdomain of an allowed entry is permitted (`api.example.com` matches an allowlisted `example.com`). Unset by default — unrestricted, unchanged behavior — this doesn't replace the network/authorization guidance above, it's what Aquifer itself can enforce regardless of who's calling it. Applies to `url`-routed jobs only; pool-routed jobs (`pool_id`) have no caller-supplied destination to check.
@@ -28,6 +30,21 @@ Idempotent — duplicate `idempotent_key` per `user_id` returns the existing job
 **Shared idempotency scope.** Set `"idempotency_scope": "shared"` to dedup on `idempotent_key` alone, across every `user_id`. Many agents asking for the same resource then coalesce onto one upstream call: the first request creates the job, later ones get `200 + "duplicate": true` with the same `job_id`. On `/proxy` they are streamed that job's result; with remote results enabled, `GET /results?idempotency_scope=shared&idempotent_key=...` serves the cached response to the whole pool. Followers do not get their own webhook. Requires `AQUIFER_SHARED_IDEMPOTENCY_ENABLED=true` (default `false`); otherwise `"shared"` is rejected with `400`. Anyone who knows a shared key can read its result, so use keys that name a public resource (`weather:sf:2026-10-05`), never one that carries a user's private data. In a cluster, shared requests are routed by the shared key instead of `user_id`, so every caller for that key reaches the same owner node and coalesces there; per-user requests keep routing by `user_id`. Independent instances that share only Valkey (not one cluster) can each run the job once before the first result lands; the last write to Valkey wins.
 
 **422** the upstream's L8 `request_schemas` rejects the body (see [Request schemas](#request-schemas-l8-02)).
+
+### Best practice: confirm batched webhook intake
+
+For high-throughput webhook intake, keep Pebble's default 100 ms batched flush and use Aquifer's idempotency as a confirmation retry:
+
+1. Verify the provider signature, use its event ID as `idempotent_key`, and keep the provider request open.
+2. Submit the event to Aquifer. Continue only after Aquifer returns **200** or **201**.
+3. Wait about four seconds with jitter, staying within the provider's timeout, then submit the exact same request again.
+4. A **200** response with `"duplicate": true` confirms that Aquifer still knows the accepted job. Return `2xx` to the provider.
+5. If the confirmation returns **201**, the earlier job was absent and this request created its replacement. Wait and confirm again before acknowledging the provider.
+6. If the intake process dies first, it never acknowledges the provider, so the provider's normal retry sends the event again.
+
+Both submissions must use the same `user_id` and `idempotent_key` and reach the same Aquifer owner. Aquifer's cluster routing provides that ownership for the same routing key; independent unclustered instances behind a random load balancer do not. Jitter prevents a burst of original webhooks from producing a second synchronized burst four seconds later.
+
+This adds one inexpensive idempotency lookup per event while preserving batched write throughput. It substantially narrows the default crash-loss window, but `duplicate:true` is not an fsync receipt. Set `AQUIFER_PEBBLE_FLUSH_INTERVAL_MS=0` when every accepted event requires a strict disk-sync guarantee, or when the provider timeout is too short to complete the confirmation.
 
 ### Retries
 

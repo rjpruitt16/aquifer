@@ -50,14 +50,10 @@ func (a *Adapter) Name() string {
 }
 
 // sinkPath is where Execute points JobRequest.WebhookURL when the caller
-// registered no real A2A push config. JobRequest.Validate requires a
-// non-empty WebhookURL unconditionally (job.go), but A2A's SendMessage
-// doesn't require a push config up front — most callers rely on the
-// streaming response or GetTask polling instead. This route exists purely
-// to satisfy that core validation; it accepts and discards the callback
-// Aquifer's own webhook delivery (webhook.go's deliverWebhook, with its
-// 4-retry backoff) sends here, since Execute already gets the same
-// completion/failure information directly off aquifer.SubscribeJob.
+// registered no real A2A push config. Aquifer permits callback-free jobs,
+// but this adapter keeps its local sink because A2A completion is bridged
+// through task events. It accepts and discards the redundant callback since
+// Execute already receives completion directly from aquifer.SubscribeJob.
 const sinkPath = "/internal/a2a-webhook-sink"
 
 // Start implements aquifer.FrameworkAdapter.

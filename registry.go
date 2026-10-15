@@ -493,6 +493,7 @@ func (r *Registry) EnqueueWebhook(originalJobID, userID, webhookURL string, maxR
 		Body:          string(body),
 		MaxRetries:    &maxRetries,
 	})
+	job.Kind = jobKindWebhookDelivery
 
 	if _, duplicate := r.store.CheckOrInsert(job); duplicate || r.stopping() {
 		return

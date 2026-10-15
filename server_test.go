@@ -33,6 +33,29 @@ func TestCreateJobSucceedsUnderNormalConditions(t *testing.T) {
 	}
 }
 
+func TestCreateJobAllowsOmittedWebhookURL(t *testing.T) {
+	app, store := testAquiferWithLimits(t, AdmissionLimits{})
+	srv := NewServer(app)
+	reqBody := sampleJobRequest("user-no-callback", "key-no-callback")
+	reqBody.WebhookURL = ""
+	body, _ := json.Marshal(reqBody)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/jobs", bytes.NewReader(body)))
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected callback-free job to return 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var result EnqueueResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	job := store.GetJob(result.JobID)
+	if job == nil || job.isWebhookDeliveryJob() {
+		t.Fatalf("callback-free user job was misclassified as internal: %+v", job)
+	}
+}
+
 func TestCreateJobDefaultRuntimeDoesNotEnableRemoteIdempotency(t *testing.T) {
 	t.Setenv("AQUIFER_REMOTE_IDEMPOTENCY_ENABLED", "")
 	t.Setenv("AQUIFER_DRAIN_SINK", "")

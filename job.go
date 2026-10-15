@@ -31,9 +31,12 @@ type Job struct {
 	Headers       map[string]string `json:"headers,omitempty"`
 	Body          string            `json:"body,omitempty"`
 	WebhookURL    string            `json:"webhook_url"`
-	Status        Status            `json:"status"`
-	CreatedAt     int64             `json:"created_at"`
-	ExecuteBefore int64             `json:"execute_before,omitempty"`
+	// Kind separates user jobs from Aquifer's own durable completion-webhook
+	// jobs. It is internal state, never accepted from JobRequest JSON.
+	Kind          string `json:"job_kind"`
+	Status        Status `json:"status"`
+	CreatedAt     int64  `json:"created_at"`
+	ExecuteBefore int64  `json:"execute_before,omitempty"`
 
 	IdempotencyScope string `json:"idempotency_scope,omitempty"`
 	// MaxRetries is resolved at creation: DefaultMaxRetries unless the caller
@@ -166,8 +169,6 @@ func (r *JobRequest) Validate() string {
 		return "url and pool_id are mutually exclusive — a job dispatches to one or the other"
 	case r.Method == "":
 		return "method is required"
-	case r.WebhookURL == "":
-		return "webhook_url is required"
 	case r.URL != "" && !domainAllowed(r.URL):
 		return "url domain is not in the configured allowlist (AQUIFER_ALLOWED_URL_DOMAINS)"
 	}
@@ -259,6 +260,7 @@ func NewJob(r *JobRequest) *Job {
 		Headers:           r.Headers,
 		Body:              r.Body,
 		WebhookURL:        r.WebhookURL,
+		Kind:              jobKindUser,
 		Status:            StatusQueued,
 		CreatedAt:         time.Now().UnixMilli(),
 		ExecuteBefore:     r.ExecuteBefore,
@@ -308,15 +310,21 @@ func (j *Job) ExecutionExpired(now time.Time) bool {
 // isWebhookDeliveryJob reports whether this job represents a webhook
 // delivery attempt itself (constructed by Registry.EnqueueWebhook to push
 // webhook delivery through the same account-queue pacing as forward
-// dispatch), as opposed to a regular user-submitted job. A regular job
-// always has a non-empty WebhookURL — JobRequest.Validate rejects an empty
-// one — so an empty WebhookURL is a safe, already-enforced signal rather
-// than a separate field: it's what execute() checks to avoid enqueueing a
-// webhook-about-a-webhook, and what makeRequest checks to decide whether to
-// L8-sign the outbound request.
+// dispatch), as opposed to a regular user-submitted job. This is explicit
+// because regular jobs may omit webhook_url and poll their stored result.
 func (j *Job) isWebhookDeliveryJob() bool {
+	if j.Kind != "" {
+		return j.Kind == jobKindWebhookDelivery
+	}
+	// Pebble records written before Kind existed used an empty webhook URL
+	// exclusively for internal webhook deliveries. User jobs could not omit it.
 	return j.WebhookURL == ""
 }
+
+const (
+	jobKindUser            = "user"
+	jobKindWebhookDelivery = "webhook_delivery"
+)
 
 func generateID() string {
 	b := make([]byte, 16)
