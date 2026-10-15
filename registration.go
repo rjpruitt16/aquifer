@@ -44,6 +44,12 @@ type RegistrationConfig struct {
 	// plane's call, same as everything else in this ping.
 	ReservedFor string
 	Role        string
+	// Pools (AQUIFER_REGISTRY_POOLS, comma-separated, e.g. "gpu,eu") are
+	// the pools this instance joins; a control plane like Canalis only
+	// sends it requests for those pools. None means the default pool.
+	// Every ping carries the current list, so changing it and restarting
+	// is how an instance joins or leaves a pool.
+	Pools []string
 }
 
 func (cfg RegistrationConfig) Enabled() bool {
@@ -63,7 +69,19 @@ func LoadRegistrationConfig() RegistrationConfig {
 		IntervalSeconds: envInt64("AQUIFER_REGISTRY_INTERVAL_SECONDS", defaultRegistrationIntervalSeconds),
 		ReservedFor:     strings.TrimSpace(os.Getenv("AQUIFER_REGISTRY_RESERVED_FOR")),
 		Role:            strings.ToLower(strings.TrimSpace(os.Getenv("AQUIFER_REGISTRY_ROLE"))),
+		Pools:           parsePools(os.Getenv("AQUIFER_REGISTRY_POOLS")),
 	}
+}
+
+// parsePools splits a comma-separated pool list, dropping blanks.
+func parsePools(raw string) []string {
+	var pools []string
+	for _, p := range strings.Split(raw, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			pools = append(pools, p)
+		}
+	}
+	return pools
 }
 
 // registrationLoop pings cfg.URL every IntervalSeconds with this instance's
@@ -114,6 +132,9 @@ func (r *Registry) registrationPayload(state LifecycleState) map[string]any {
 	}
 	if r.registrationCfg.Role != "" {
 		payload["role"] = r.registrationCfg.Role
+	}
+	if len(r.registrationCfg.Pools) > 0 {
+		payload["pools"] = r.registrationCfg.Pools
 	}
 	// Drain mode's own position, separate from "state": drain mode's
 	// "draining" means "finishing one tenant's burst", not "shutting down",

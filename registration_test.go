@@ -186,6 +186,22 @@ func TestRegistrationReportsReservedForAndRole(t *testing.T) {
 	}
 }
 
+// TestRegistrationReportsPools: the pools this instance joins, so a control
+// plane only sends it requests for those pools.
+func TestRegistrationReportsPools(t *testing.T) {
+	srv, bodies := pingBodies(t)
+	t.Setenv("AQUIFER_REGISTRY_URL", srv.URL)
+	t.Setenv("AQUIFER_REGISTRY_INTERVAL_SECONDS", "3600")
+	t.Setenv("AQUIFER_REGISTRY_POOLS", " gpu, ,eu ")
+	drainTestRegistry(t, NoopMetricsAdapter{})
+
+	body := nextPing(t, bodies)
+	pools, ok := body["pools"].([]any)
+	if !ok || len(pools) != 2 || pools[0] != "gpu" || pools[1] != "eu" {
+		t.Fatalf("expected pools [gpu eu], got %v", body["pools"])
+	}
+}
+
 // TestRegistrationOmitsOptionalFieldsByDefault keeps the ping exactly as it
 // was for anyone not using these features.
 func TestRegistrationOmitsOptionalFieldsByDefault(t *testing.T) {
@@ -194,10 +210,11 @@ func TestRegistrationOmitsOptionalFieldsByDefault(t *testing.T) {
 	t.Setenv("AQUIFER_REGISTRY_INTERVAL_SECONDS", "3600")
 	t.Setenv("AQUIFER_REGISTRY_RESERVED_FOR", "")
 	t.Setenv("AQUIFER_REGISTRY_ROLE", "")
+	t.Setenv("AQUIFER_REGISTRY_POOLS", "")
 	drainTestRegistry(t, NoopMetricsAdapter{})
 
 	body := nextPing(t, bodies)
-	for _, key := range []string{"reserved_for", "role", "drain_state"} {
+	for _, key := range []string{"reserved_for", "role", "drain_state", "pools"} {
 		if _, ok := body[key]; ok {
 			t.Fatalf("expected no %q in a default ping, got %v", key, body)
 		}
