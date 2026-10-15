@@ -155,6 +155,12 @@ jobs:
           repository: rjpruitt16/canalis-rs
           path: canalis-rs
 
+      - name: Checkout spillway
+        uses: actions/checkout@v4
+        with:
+          repository: rjpruitt16/spillway
+          path: spillway
+
       - name: Pick the aqueduct-runner branch
         id: runner
         env:
@@ -184,4 +190,25 @@ jobs:
           call: >-
             test-registration
             --aquifer-source=./aquifer
+            --canalis-source=./canalis-rs
+
+      - name: Contract test -- Aquifer and Canalis claim users with the same Lua
+        uses: dagger/dagger-for-github@v8.4.1
+        with:
+          version: "0.21.8"
+          module: ./aqueduct-runner
+          call: >-
+            test-claim-script
+            --aquifer-source=./aquifer
+            --canalis-source=./canalis-rs
+
+      - name: Contract test -- only allowlisted Aquifer and Spillway nodes can register with Canalis
+        uses: dagger/dagger-for-github@v8.4.1
+        with:
+          version: "0.21.8"
+          module: ./aqueduct-runner
+          call: >-
+            test-signed-registration
+            --aquifer-source=./aquifer
+            --spillway-source=./spillway
             --canalis-source=./canalis-rs

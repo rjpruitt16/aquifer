@@ -59,7 +59,7 @@ func main() {
 	cmdPath := flag.String("cmd", "/app/aquifer", "Aquifer binary")
 	dataDir := flag.String("data", "/data", "Aquifer data directory, measured for size and file count")
 	debugURL := flag.String("debug", "http://127.0.0.1:6060", "Aquifer's AQUIFER_DEBUG_ADDR, for goroutine and heap stats")
-	store := flag.String("store", "aquifer.db", "store directory under -data, reported as pebble_bytes/pebble_files (Spillway: mnesia)")
+	store := flag.String("store", "aquifer.db", "store directory under -data, reported as pebble_bytes/pebble_files (Spillway: store)")
 	flag.Parse()
 
 	s := &supervisor{cmdPath: *cmdPath, dataDir: *dataDir, debugURL: *debugURL, storeDir: filepath.Join(*dataDir, *store),

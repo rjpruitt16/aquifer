@@ -121,6 +121,14 @@ func (s *ValkeyClusterStateStore) Members(ctx context.Context) ([]ClusterMember,
 	return members, nil
 }
 
+// assignClusterScopeScript claims a user for an instance. Canalis runs this
+// same script against the same keys (canalis-rs src/assign.rs), and
+// aqueduct-runner's test-claim-script fails CI if the two copies drift.
+// One optional trailing argument after the candidate pairs, "1", makes it
+// strict: when no candidate is under capacity, return nothing rather than
+// the least-loaded one. Canalis passes it, because it has its own line to
+// queue a user in; Aquifer doesn't, because it has nowhere else to put the
+// work, so for Aquifer nothing changes.
 var assignClusterScopeScript = redis.NewScript(`
 local assignment = redis.call('GET', KEYS[1])
 local clock = redis.call('TIME')
@@ -172,7 +180,7 @@ for i = 1, count do
     end
   end
 end
-if selected == 0 then selected = least end
+if selected == 0 and ARGV[5 + count * 2] ~= '1' then selected = least end
 if selected == 0 then return '' end
 
 local id = ARGV[4 + (selected - 1) * 2 + 1]

@@ -10,13 +10,12 @@ kill_timeout = 30
   dockerfile = "Dockerfile.spillway-target"
 
 [env]
-  SOAK_DATA_DIR = "/data/run-3e"
-  MNESIA_DIR = "/data/run-3e/mnesia"
-  # Jobs, results and idempotency keys in RocksDB, not RAM. In runs 2 and 3
-  # the RAM store grew with retention until Spillway crash-looped (2GB) or
-  # its cleanup fell behind and admission refused every job (4GB). With
-  # RocksDB it runs on the same 2GB machine as Aquifer again.
-  SPILLWAY_STORAGE = "rocksdb"
+  SOAK_DATA_DIR = "/data/run-3g"
+  # Jobs, results, idempotency keys and WebSocket fallback transcripts in
+  # Spillway's own RocksDB store (no Mnesia since spillway#53). Run 3g
+  # starts fresh after spillway#57 (expiry fell hours behind in run 3f);
+  # earlier runs' directories stay on the volume.
+  SPILLWAY_STORE_DIR = "/data/run-3g/store"
   # WebSocket transcripts in a local Valkey, as on the Aquifer target.
   SOAK_VALKEY = "1"
   SOAK_VALKEY_MAXMEMORY = "600mb"
