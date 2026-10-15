@@ -76,7 +76,7 @@ func (p *perfApp) job(key string) JobRequest {
 
 // BenchmarkJobLatency sends one job at a time and splits its trip into:
 // accept (validated and durably stored, i.e. POST /jobs returns), queue
-// (accepted until the upstream receives it), and total.
+// (accepted until the target API receives it), and total.
 func BenchmarkJobLatency(b *testing.B) {
 	for _, backend := range []string{"sqlite", "pebble"} {
 		b.Run(backend, func(b *testing.B) {

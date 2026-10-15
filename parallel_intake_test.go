@@ -18,7 +18,7 @@ import (
 // the store and handing jobs to a queue. That must not lose a job that
 // arrives while its queue (or worker) is retiring after going idle: bursts
 // are timed to land around the 1s idle timeout, and every job must reach
-// the upstream.
+// the target API.
 func TestEnqueueRacingIdleRetirementLosesNothing(t *testing.T) {
 	t.Setenv("AQUIFER_IDLE_TIMEOUT_SECONDS", "1")
 	var hits atomic.Int64

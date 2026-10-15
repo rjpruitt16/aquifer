@@ -38,7 +38,7 @@ func TestIsOverloadSignal(t *testing.T) {
 		{"503 defaults to reroute", 503, nil, true, "reroute"},
 		// Deliberate narrowing from earlier behavior (every 5xx used to
 		// mean the same thing): 500/502/504 aren't in either default set,
-		// so they're not overload signals at all unless the upstream
+		// so they're not overload signals at all unless the target API
 		// configures them explicitly -- relayed to the caller as a
 		// normal, if unfortunate, direct response.
 		{"500 not overload by default", 500, nil, false, ""},

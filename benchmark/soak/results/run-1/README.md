@@ -61,7 +61,7 @@ A failed response that advertised a rate (`X-Aqueduct-Rps`) replaced the
 halved pace instead of capping it. The driver's misbehaving receiver stamps
 `X-Aqueduct-Rps: 100000` on every response, 503s included, so during outages
 the queue kept full speed and webhook deliveries used up their four default
-retries within seconds. The same bug made failed jobs climb during upstream
+retries within seconds. The same bug made failed jobs climb during target API
 `down` slots. Fixed in #46 (and spillway#36): a failed response can now only
 lower the pace. `webhook_max_retries`, also added in #46, lets a caller ask for
 retries until delivery.

@@ -1,8 +1,8 @@
 # Benchmarks
 
-Real runs against a live deployment, not simulated numbers. Target: `aquifer-bench.fly.dev`, a single `shared-cpu-1x`/512MB Fly.io machine in `iad`, `AQUIFER_MEMORY_LIMIT_MB=400`, default pacing (2 RPS/1 concurrent per upstream domain, no `CONFIG_PATH`). Load generated with [vegeta](https://github.com/tsenart/vegeta); scripts are in [`benchmark/`](benchmark/).
+Real runs against a live deployment, not simulated numbers. Target: `aquifer-bench.fly.dev`, a single `shared-cpu-1x`/512MB Fly.io machine in `iad`, `AQUIFER_MEMORY_LIMIT_MB=400`, default pacing (2 RPS/1 concurrent per target API domain, no `CONFIG_PATH`). Load generated with [vegeta](https://github.com/tsenart/vegeta); scripts are in [`benchmark/`](benchmark/).
 
-Scenarios 1-6 dispatch to a dummy upstream (`postman-echo.com`) at the default 2 req/s ceiling — intentional, since Aquifer protects upstreams that haven't told it otherwise. A large batch queues for a while before draining; that's the configured ceiling working as intended, not a bottleneck. Production sets real per-domain rates via `CONFIG_PATH`. Scenario 7 deliberately raises the ceiling so machine size, not the default rate limit, is what's measured.
+Scenarios 1-6 dispatch to a dummy target API (`postman-echo.com`) at the default 2 req/s ceiling — intentional, since Aquifer protects target APIs that haven't told it otherwise. A large batch queues for a while before draining; that's the configured ceiling working as intended, not a bottleneck. Production sets real per-domain rates via `CONFIG_PATH`. Scenario 7 deliberately raises the ceiling so machine size, not the default rate limit, is what's measured.
 
 ---
 
@@ -32,7 +32,7 @@ Phase: burst    (100/s, 30s) — 3000 req, 100% success, p99 166ms
 Phase: recovery (10/s, 15s)  — 150 req, 100% success, p99 189ms
 ```
 
-100% success through the entire 10x spike, no 5xx, no dropped connections. Recovery-phase latency matches baseline — the burst gets absorbed into the queue instead of hammering the upstream.
+100% success through the entire 10x spike, no 5xx, no dropped connections. Recovery-phase latency matches baseline — the burst gets absorbed into the queue instead of hammering the target API.
 
 ---
 
@@ -77,7 +77,7 @@ Every job persisted to SQLite before dispatch, so a kill mid-flight just means t
 
 ## 5. Multi-tenant fairness (`X-Aqueduct-Account-Queue`)
 
-Without isolation, every job hitting the same upstream domain shares one dispatch queue — a noisy tenant can starve everyone behind it. Isolation per `(user_id, api_key)` is on by default (`AQUIFER_ACCOUNT_QUEUE`); an upstream can switch it off for itself with `X-Aqueduct-Account-Queue: disabled`. `TestABrokenTenantDoesNotStallAHealthyOneOnTheSameHost` measures it: with a broken tenant retrying a 40-job burst, a healthy tenant on the same host finishes 20 jobs in ~0.2s with isolation and 0 of 20 in 5s without it.
+Without isolation, every job hitting the same target API domain shares one dispatch queue — a noisy tenant can starve everyone behind it. Isolation per `(user_id, api_key)` is on by default (`AQUIFER_ACCOUNT_QUEUE`); a target API can switch it off for itself with `X-Aqueduct-Account-Queue: disabled`. `TestABrokenTenantDoesNotStallAHealthyOneOnTheSameHost` measures it: with a broken tenant retrying a 40-job burst, a healthy tenant on the same host finishes 20 jobs in ~0.2s with isolation and 0 of 20 in 5s without it.
 
 **Surfaced a real bug during benchmarking:** the isolation mechanism existed, but the handler that turns it on was never actually wired into the HTTP request path — every job silently shared one queue regardless of the header. Filed and fixed as [issue #5](https://github.com/rjpruitt16/aquifer/issues/5), covered by `TestAccountQueueHeaderIsolatesTenants` and `TestAccountQueueHeaderOmittedSharesQueue`.
 
@@ -131,7 +131,7 @@ That fix surfaced a third issue: `CheckOrInsert` checked for duplicates via `INS
 - [ ] **Traffic sustains above ~200-300 req/s?** Re-run `benchmark/capacity_by_size.sh` against your own traffic shape first — verify the ceiling is actually hardware-bound, not code-level.
 - [ ] **Bursts followed by quiet periods?** A 500-job burst drains in ~75-79s at a 50 RPS dispatch pace, regardless of machine size — scale linearly against your own `CONFIG_PATH` rate.
 - [ ] **A ceiling looks identical no matter what you scale?** Treat it as a code-path question, not a bigger-machine question.
-- [ ] **Need per-tenant fairness under a shared upstream?** It's on by default; check nobody set `AQUIFER_ACCOUNT_QUEUE=off` and that the upstream doesn't answer `X-Aqueduct-Account-Queue: disabled`.
+- [ ] **Need per-tenant fairness under a shared target API?** It's on by default; check nobody set `AQUIFER_ACCOUNT_QUEUE=off` and that the target API doesn't answer `X-Aqueduct-Account-Queue: disabled`.
 
 ---
 
@@ -175,7 +175,7 @@ Pebble roughly doubles the point where Aquifer stops reliably completing request
 
 ## 9. GPU inference and the retry tax (RunPod/vLLM)
 
-Everything above dispatches to a dummy HTTP echo upstream. This one targets a real GPU: `Qwen/Qwen2.5-1.5B-Instruct` on a single RunPod RTX PRO 4500 Blackwell running vLLM (`--max-num-seqs 48`, KV cache deliberately capped at 512MB so a realistic burst can actually pressure it), pacing driven entirely by the ORCA fallback signal (see [README.md](README.md), "Dynamic pacing") — `kv_cache_usage_perc` on vLLM's own response headers, no `X-Aqueduct-*` config needed. Requests forced to `min_tokens=max_tokens=300` so each one holds GPU/KV-cache resources long enough to matter, not a one-token echo.
+Everything above dispatches to a dummy HTTP echo target API. This one targets a real GPU: `Qwen/Qwen2.5-1.5B-Instruct` on a single RunPod RTX PRO 4500 Blackwell running vLLM (`--max-num-seqs 48`, KV cache deliberately capped at 512MB so a realistic burst can actually pressure it), pacing driven entirely by the ORCA fallback signal (see [README.md](README.md), "Dynamic pacing") — `kv_cache_usage_perc` on vLLM's own response headers, no `X-Aqueduct-*` config needed. Requests forced to `min_tokens=max_tokens=300` so each one holds GPU/KV-cache resources long enough to matter, not a one-token echo.
 
 **Same offered load (40 req/s for 30s), direct-to-vLLM vs. through Aquifer:**
 
@@ -243,9 +243,9 @@ requiring it to be set by hand is filed as a follow-up: [rjpruitt16/aquifer#11](
 
 ## 11. Per-job overhead (`make perf`)
 
-`make perf` runs two Go benchmarks in-process against both storage backends, with a local upstream and webhook receiver that answer instantly and pacing set high enough never to wait. They measure Aquifer's own cost, so a change that slows the hot path shows up here before it shows up in production. Run it before and after a change on the same machine and compare.
+`make perf` runs two Go benchmarks in-process against both storage backends, with a local target API and webhook receiver that answer instantly and pacing set high enough never to wait. They measure Aquifer's own cost, so a change that slows the hot path shows up here before it shows up in production. Run it before and after a change on the same machine and compare.
 
-- **`BenchmarkJobLatency`** sends one job at a time and splits its trip into `accept_ms` (validate and durably store, i.e. `POST /jobs` returns), `queue_ms` (accepted until the upstream receives the request) and `total_ms`.
+- **`BenchmarkJobLatency`** sends one job at a time and splits its trip into `accept_ms` (validate and durably store, i.e. `POST /jobs` returns), `queue_ms` (accepted until the target API receives the request) and `total_ms`.
 - **`BenchmarkPipelineThroughput`** has 8 concurrent callers submit jobs and reports `jobs/s` that make it all the way through: accepted, dispatched, completed and their webhook delivered.
 
 Baseline, 2026-10-06, Apple M3 Max laptop (macOS, 200 jobs per run):
@@ -269,7 +269,7 @@ On Fly (performance-1x with a volume, every job also delivering a webhook), sync
 
 How many jobs per second one Aquifer machine sustains end to end, measured on Fly in `iad`:
 - **Target:** one Aquifer machine with a volume and Pebble.
-- **Load generator:** a separate machine running [`benchmark/loadgen`](benchmark/loadgen/main.go). It ramps `POST /jobs` open-loop across 50 users and also serves as the upstream and the webhook receiver, both answering instantly.
+- **Load generator:** a separate machine running [`benchmark/loadgen`](benchmark/loadgen/main.go). It ramps `POST /jobs` open-loop across 50 users and also serves as the target API and the webhook receiver, both answering instantly.
 - **Webhooks:** every job also delivers a webhook, so each job is one request in and two requests out.
 - **Config:** a high rate ceiling (`defaults: {rps: 100000, max_concurrent: 256}`) and the 100ms flush (`AQUIFER_PEBBLE_FLUSH_INTERVAL_MS`, the default).
 
@@ -294,7 +294,7 @@ Past the ceiling Aquifer sheds with `429` rather than falling over.
 | 4 | Remember webhook receivers without L8 for 5 minutes instead of probing `/.well-known/l8` before every webhook over a fresh connection (`connect()` was 65% of CPU on 2x) | 2x: ~1,000 → ~1,500; 4x: ~3,000 |
 
 **Caveats.**
-- **These are best-case numbers.** With an instant upstream they measure Aquifer's own cost per job. A slow upstream doesn't change that cost, but it does mean more requests in flight at once.
+- **These are best-case numbers.** With an instant target API they measure Aquifer's own cost per job. A slow target API doesn't change that cost, but it does mean more requests in flight at once.
 - **The 4x results vary.** Finished jobs are kept for 30 minutes, so back-to-back runs leave a larger store behind. A fresh store held 3,000/s cleanly; 4,000/s held on one run out of three.
 - **The load generator can be the limit.** On a performance-2x generator, 6,000/s produced client-side errors, so the 4x ceiling was probed with a performance-4x generator.
 
@@ -352,7 +352,7 @@ One 1-CPU Aquifer moves about **1,500–2,000 WebSocket round trips/s**. Past th
 
 **Bugs this benchmark found:**
 - **Aquifer #33:** sessions starved the Valkey connection pool past ~10 per CPU. Command confirmations took 3.1 s at p50 on one CPU with 200 sessions; 0.34 ms after the fix.
-- **Spillway #23:** WebSocket upstreams on IPv6-only hosts, including Fly `.internal`, never connected.
+- **Spillway #23:** WebSocket target APIs on IPv6-only hosts, including Fly `.internal`, never connected.
 
 ---
 

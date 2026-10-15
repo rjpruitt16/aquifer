@@ -23,12 +23,12 @@ import (
 const (
 	l8SchemaTTL         = 10 * time.Minute
 	l8SchemaNegativeTTL = time.Minute
-	// An upstream whose X-Aqueduct-Schema-Hash header disagrees with its own
+	// A target API whose X-Aqueduct-Schema-Hash header disagrees with its own
 	// /.well-known/l8 would otherwise force a metadata refetch per response.
 	l8SchemaMinRefetchAge = 10 * time.Second
 )
 
-// SchemaMismatchError means a job body failed the JSON Schema its upstream
+// SchemaMismatchError means a job body failed the JSON Schema its target API
 // advertises for that route. Surfaced to callers as 422.
 type SchemaMismatchError struct {
 	Route      string
@@ -66,9 +66,9 @@ func newL8SchemaCache() *l8SchemaCache {
 	}
 }
 
-// ValidateRequestBody checks body against the JSON Schema the upstream at
+// ValidateRequestBody checks body against the JSON Schema the target API at
 // rawURL advertises for method+path in its /.well-known/l8 request_schemas.
-// Returns nil when validation is disabled, the upstream advertises nothing,
+// Returns nil when validation is disabled, the target API advertises nothing,
 // or its metadata can't be fetched -- L8 stays opt-in and degrades open.
 func (r *L8Registry) ValidateRequestBody(rawURL, method, body string) error {
 	if r == nil || r.schemas == nil || !r.schemas.enabled {
@@ -104,8 +104,8 @@ func (r *L8Registry) ValidateRequestBody(rawURL, method, body string) error {
 	return nil
 }
 
-// ObserveSchemaHash reacts to an upstream's X-Aqueduct-Schema-Hash response
-// header. A hash that differs from the cached one means the upstream changed
+// ObserveSchemaHash reacts to a target API's X-Aqueduct-Schema-Hash response
+// header. A hash that differs from the cached one means the target API changed
 // its contract: drop the cached schemas and the L8 trust for that domain so
 // the next request refetches metadata and re-runs the handshake.
 func (r *L8Registry) ObserveSchemaHash(rawURL, hash string) {

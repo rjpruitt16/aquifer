@@ -18,9 +18,9 @@ const fullnessHeader = "X-Aqueduct-Fullness"
 
 // Fullness is how full this instance is, 0-100: the most-constrained of the
 // limits it already enforces -- memory against AQUIFER_MEMORY_LIMIT_MB, the
-// database against AQUIFER_DB_MAX_BYTES, and each upstream's backlog
+// database against AQUIFER_DB_MAX_BYTES, and each target API's backlog
 // against its backlog budget (AQUIFER_MAX_PENDING_PER_UPSTREAM, or the
-// upstream's own X-Aqueduct-Max-Backlog). The tightest one wins, because
+// target API's own X-Aqueduct-Max-Backlog). The tightest one wins, because
 // that's the one that will start turning work away first. Limits that are
 // switched off don't count.
 //
@@ -65,8 +65,8 @@ func (c *AdmissionController) fullnessRatio() float64 {
 	return ratio
 }
 
-// backlogFullnessRatio is the fullest upstream's backlog against its own
-// backlog budget. Per upstream, not summed: one upstream at its limit is
+// backlogFullnessRatio is the fullest target API's backlog against its own
+// backlog budget. Per target API, not summed: one target API at its limit is
 // already turning work away, however idle the others are.
 func (r *Registry) backlogFullnessRatio() float64 {
 	r.mu.Lock()

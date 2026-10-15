@@ -15,7 +15,7 @@ const (
 	fairAdmissionStart                 = 0.70
 )
 
-// QueueSnapshot is the per-upstream state used for fair admission and
+// QueueSnapshot is the per-target-API state used for fair admission and
 // returned to callers as response headers. Counts include the request being
 // evaluated, so an accepted response describes the queue after admission.
 type QueueSnapshot struct {

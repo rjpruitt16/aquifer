@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // loadgen: open-loop ramp of POST /jobs against one target, plus the instant
-// upstream (/work) and webhook receiver (/hook) the jobs point at. A step is
+// target API (/work) and webhook receiver (/hook) the jobs point at. A step is
 // sustained when the target accepts what is offered and completes (webhook
 // delivered) about as fast as it accepts, without the backlog growing.
 package main

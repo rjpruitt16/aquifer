@@ -15,7 +15,7 @@
 }
 ```
 
-`execute_before` is optional Unix time in milliseconds. Aquifer checks it immediately before dispatch and before every retry. A job that has not started its next attempt by that time is never sent upstream; it becomes `failed` with reason `execution_deadline_exceeded`, remains available through the normal status/result retention window, and emits the normal failed SSE/webhook event.
+`execute_before` is optional Unix time in milliseconds. Aquifer checks it immediately before dispatch and before every retry. A job that has not started its next attempt by that time is never sent target API; it becomes `failed` with reason `execution_deadline_exceeded`, remains available through the normal status/result retention window, and emits the normal failed SSE/webhook event.
 
 `webhook_url` is optional. Omit it when the caller only needs Aquifer to execute the job and will use `GET /jobs/{id}` or remote result storage if it needs the terminal result. When set, Aquifer delivers the normal completion webhook.
 
@@ -27,9 +27,9 @@ Idempotent — duplicate `idempotent_key` per `user_id` returns the existing job
 
 **201** new job queued · **200 + `"duplicate": true`** already exists
 
-**Shared idempotency scope.** Set `"idempotency_scope": "shared"` to dedup on `idempotent_key` alone, across every `user_id`. Many agents asking for the same resource then coalesce onto one upstream call: the first request creates the job, later ones get `200 + "duplicate": true` with the same `job_id`. On `/proxy` they are streamed that job's result; with remote results enabled, `GET /results?idempotency_scope=shared&idempotent_key=...` serves the cached response to the whole pool. Followers do not get their own webhook. Requires `AQUIFER_SHARED_IDEMPOTENCY_ENABLED=true` (default `false`); otherwise `"shared"` is rejected with `400`. Anyone who knows a shared key can read its result, so use keys that name a public resource (`weather:sf:2026-10-05`), never one that carries a user's private data. In a cluster, shared requests are routed by the shared key instead of `user_id`, so every caller for that key reaches the same owner node and coalesces there; per-user requests keep routing by `user_id`. Independent instances that share only Valkey (not one cluster) can each run the job once before the first result lands; the last write to Valkey wins.
+**Shared idempotency scope.** Set `"idempotency_scope": "shared"` to dedup on `idempotent_key` alone, across every `user_id`. Many agents asking for the same resource then coalesce onto one target API call: the first request creates the job, later ones get `200 + "duplicate": true` with the same `job_id`. On `/proxy` they are streamed that job's result; with remote results enabled, `GET /results?idempotency_scope=shared&idempotent_key=...` serves the cached response to the whole pool. Followers do not get their own webhook. Requires `AQUIFER_SHARED_IDEMPOTENCY_ENABLED=true` (default `false`); otherwise `"shared"` is rejected with `400`. Anyone who knows a shared key can read its result, so use keys that name a public resource (`weather:sf:2026-10-05`), never one that carries a user's private data. In a cluster, shared requests are routed by the shared key instead of `user_id`, so every caller for that key reaches the same owner node and coalesces there; per-user requests keep routing by `user_id`. Independent instances that share only Valkey (not one cluster) can each run the job once before the first result lands; the last write to Valkey wins.
 
-**422** the upstream's L8 `request_schemas` rejects the body (see [Request schemas](#request-schemas-l8-02)).
+**422** the target API's L8 `request_schemas` rejects the body (see [Request schemas](#request-schemas-l8-02)).
 
 ### Best practice: confirm batched webhook intake
 
@@ -69,7 +69,7 @@ How retries are paced:
 - **Per queue:** every retryable failure halves that account queue's dispatch rate (down to 0.5 rps); successes raise it again by 5% each. An `X-Aqueduct-Rps` on a successful response sets the rate directly; on a failed response it can only lower it, so a server that stamps the same rate on every response, `503`s included, still gets backed off while it's failing.
 - A job waiting out its backoff does not hold a concurrency slot, so other jobs in the same queue keep moving. The attempt count is persisted, so a restart doesn't reset it.
 
-**Webhook retries** are set separately, with `"webhook_max_retries"` in the body or the `X-Aqueduct-Webhook-Max-Retries` header (the header wins). It takes the same values as `max_retries`, applies only to delivering this job's webhook, and defaults to 4 retries. The two are separate because they go to different places: a non-idempotent upstream call can be tried once while its webhook keeps retrying through a receiver outage.
+**Webhook retries** are set separately, with `"webhook_max_retries"` in the body or the `X-Aqueduct-Webhook-Max-Retries` header (the header wins). It takes the same values as `max_retries`, applies only to delivering this job's webhook, and defaults to 4 retries. The two are separate because they go to different places: a non-idempotent target API call can be tried once while its webhook keeps retrying through a receiver outage.
 
 ```bash
 curl -X POST localhost:8080/jobs -H "X-Aqueduct-Max-Retries: 0" -H "X-Aqueduct-Webhook-Max-Retries: -1" -d '{ ... }'
@@ -81,9 +81,9 @@ Each retry emits a `retrying` SSE event (`attempt`, `max_retries`, `retry_at`, `
 
 ### Fair queue admission
 
-Each upstream has a soft shared backlog budget `B`, defaulting to `AQUIFER_MAX_PENDING_PER_UPSTREAM=10000`. The upstream may update it at runtime with `X-Aqueduct-Max-Backlog` (or `X-Aquifer-Max-Backlog`); `0` disables this count-based limit. Dynamic values are learned from direct proxy responses and queued dispatch responses.
+Each target API has a soft shared backlog budget `B`, defaulting to `AQUIFER_MAX_PENDING_PER_UPSTREAM=10000`. The target API may update it at runtime with `X-Aqueduct-Max-Backlog` (or `X-Aquifer-Max-Backlog`); `0` disables this count-based limit. Dynamic values are learned from direct proxy responses and queued dispatch responses.
 
-With AccountQueue mode enabled (the default, see the README's pacing reference for who can change it), Aquifer gives idle capacity to whoever can use it while protecting smaller queues once the upstream becomes congested. For a prospective request, let `q` be its queue's projected backlog, `Q` the projected upstream backlog, and `N` the projected number of active account queues:
+With AccountQueue mode enabled (the default, see the README's pacing reference for who can change it), Aquifer gives idle capacity to whoever can use it while protecting smaller queues once the target API becomes congested. For a prospective request, let `q` be its queue's projected backlog, `Q` the projected target API backlog, and `N` the projected number of active account queues:
 
 ```text
 F        = B / N
@@ -94,9 +94,9 @@ P(429)   = pressure * excess
 
 A lone queue is never fairness-rejected and may use the whole budget. A queue at or below `F` is not fairness-rejected. Above 70% total pressure, disproportionately large queues receive progressively more `429` responses; when competitors drain, their capacity becomes borrowable again. If admitting a request would put `Q` above `B`, it is rejected deterministically. Without AccountQueue mode, traffic remains one shared queue (`N=1`), so only the shared backlog ceiling applies. Duplicates, recovered work, and internal webhook deliveries bypass this admission decision; accepted jobs are never discarded by it.
 
-Accepted and fairness-rejected responses report `X-Aqueduct-Active-Queues`, `X-Aqueduct-Upstream-Backlog`, `X-Aqueduct-Queue-Backlog`, and `X-Aqueduct-Admission-Pressure` (with `X-Aquifer-*` aliases). Outbound dispatches report active queues and upstream backlog to the backend alongside the existing load headers. These values cover the relevant upstream on the serving node. `GET /health` reports node-wide local totals under `queues`; it is deliberately not presented as a fleet-wide count.
+Accepted and fairness-rejected responses report `X-Aqueduct-Active-Queues`, `X-Aqueduct-Upstream-Backlog`, `X-Aqueduct-Queue-Backlog`, and `X-Aqueduct-Admission-Pressure` (with `X-Aquifer-*` aliases). Outbound dispatches report active queues and target API backlog to the backend alongside the existing load headers. These values cover the relevant target API on the serving node. `GET /health` reports node-wide local totals under `queues`; it is deliberately not presented as a fleet-wide count.
 
-Every response also carries `X-Aqueduct-Fullness`: how full this instance is, `0`–`100`. It's the most-constrained of the limits the instance already enforces: memory against `AQUIFER_MEMORY_LIMIT_MB`, the database against `AQUIFER_DB_MAX_BYTES`, and the fullest upstream's backlog against its backlog budget (`AQUIFER_MAX_PENDING_PER_UPSTREAM` or the upstream's own `X-Aqueduct-Max-Backlog`). Limits that are switched off don't count. Unlike `X-Aqueduct-Admission-Pressure`, which stays at `0` until a backlog reaches fair admission's 70% starting point, fullness rises from the first queued job, so whatever sits in front of the instance (a gateway like Canalis, or a client) can see it filling up before it starts pushing back, and decide for itself when to stop sending it new work. The same number is in the registration ping as `fullness` ([REGISTRATION.md](REGISTRATION.md)). Sampled at most every 250ms.
+Every response also carries `X-Aqueduct-Fullness`: how full this instance is, `0`–`100`. It's the most-constrained of the limits the instance already enforces: memory against `AQUIFER_MEMORY_LIMIT_MB`, the database against `AQUIFER_DB_MAX_BYTES`, and the fullest target API's backlog against its backlog budget (`AQUIFER_MAX_PENDING_PER_UPSTREAM` or the target API's own `X-Aqueduct-Max-Backlog`). Limits that are switched off don't count. Unlike `X-Aqueduct-Admission-Pressure`, which stays at `0` until a backlog reaches fair admission's 70% starting point, fullness rises from the first queued job, so whatever sits in front of the instance (a gateway like Canalis, or a client) can see it filling up before it starts pushing back, and decide for itself when to stop sending it new work. The same number is in the registration ping as `fullness` ([REGISTRATION.md](REGISTRATION.md)). Sampled at most every 250ms.
 
 ### Webhook backlog admission
 
@@ -112,7 +112,7 @@ A user alone on the instance is never rejected for this, however large their bac
 
 ### Inbound pacing (`X-Aqueduct-Rps`)
 
-Off by default. With `AQUIFER_INBOUND_RPS_ENABLED=true`, Aquifer tells its own callers how fast to submit: every `/jobs` and `/proxy` response carries `X-Aqueduct-Rps` (alias `X-Aquifer-Rps`), the same header an upstream uses to pace Aquifer. An Aquifer calling another Aquifer, or any client that honors the header, slows down before the server has to start returning `429`s.
+Off by default. With `AQUIFER_INBOUND_RPS_ENABLED=true`, Aquifer tells its own callers how fast to submit: every `/jobs` and `/proxy` response carries `X-Aqueduct-Rps` (alias `X-Aquifer-Rps`), the same header a target API uses to pace Aquifer. An Aquifer calling another Aquifer, or any client that honors the header, slows down before the server has to start returning `429`s.
 
 | Env var | Default | Description |
 |---|---:|---|
@@ -144,7 +144,7 @@ The total is split evenly across active callers (any `user_id` seen in the last 
    }
    ```
 
-   `threshold_rps` settling well below `benchmark_rps` means the benchmark is optimistic; lower it so the ramp stops overshooting. Repeated `cut: backlog growing` means dispatch, not intake, is the bottleneck: more upstream capacity or more Aquifer instances (partition by `user_id`) helps; a faster disk alone won't. `hold: callers over advertised rate` means a caller is ignoring the header.
+   `threshold_rps` settling well below `benchmark_rps` means the benchmark is optimistic; lower it so the ramp stops overshooting. Repeated `cut: backlog growing` means dispatch, not intake, is the bottleneck: more target API capacity or more Aquifer instances (partition by `user_id`) helps; a faster disk alone won't. `hold: callers over advertised rate` means a caller is ignoring the header.
 4. **Pacing is per instance.** Each node advertises its own capacity. To scale intake, add nodes and spread callers across them; one node's knee doesn't move because another node is idle.
 
 ## Regional cluster routing
@@ -204,33 +204,33 @@ If Valkey exceeds the operation timeout or is unavailable, Aquifer keeps serving
 
 This is not a distributed database. Job idempotency, queue contents, and pacing state remain local. A reassignment can therefore move a `user_id` to a node that does not have the previous owner's local history.
 
-Membership changes can also temporarily create duplicate account queues for the same upstream URL on different nodes: old work may still be draining on the previous owner while new work moves to the new owner. That is expected during rebalance or a coordination outage and should be short-lived under normal TTL/drain cleanup. This availability-first mode does not provide a strict single-owner option.
+Membership changes can also temporarily create duplicate account queues for the same target API URL on different nodes: old work may still be draining on the previous owner while new work moves to the new owner. That is expected during rebalance or a coordination outage and should be short-lived under normal TTL/drain cleanup. This availability-first mode does not provide a strict single-owner option.
 
 ## POST /proxy
 
-Edge-gateway mode — see [Use cases](README.md#use-cases) for the deployment shape this is for. Same request body as `POST /jobs`, same idempotency/admission rules, but tries the upstream directly and synchronously first:
+Edge-gateway mode — see [Use cases](README.md#use-cases) for the deployment shape this is for. Same request body as `POST /jobs`, same idempotency/admission rules, but tries the target API directly and synchronously first:
 
-- **Succeeds directly** (2xx, or any status not classified as overload — see below): the real upstream's status, headers, and body are relayed back verbatim, on this same connection. The queue is never touched. A response the upstream didn't mark as overload (a plain `500`, a `404`, anything unclassified) is a **success** in this sense too — relayed directly, not queued, since nothing said it shouldn't be.
-- **Fails, or the upstream signals overload** (timeout, a classified status code, or an ORCA fallback threshold): falls back to the exact same durable-queue-and-delivery path `POST /jobs` uses — the connection seamlessly becomes the same SSE stream `GET /jobs/:id/stream` provides, rather than requiring a second call. The very first event on that stream is `event: proxy_fallback`, `data: {"job_id", "reason", "upstream_status"}` (status omitted when no real response was received — a skipped attempt or a timeout) — so a client with no server of its own to explain this any other way (a browser, an agent) sees explicitly why it's in the queue before the normal `queued`/`dispatching`/terminal sequence starts. `reason` is one of `upstream_overloaded`, `upstream_unreachable`, `domain_degraded` (breaker open or this domain's queue already has backlog), or `pool_routed`.
+- **Succeeds directly** (2xx, or any status not classified as overload — see below): the real target API's status, headers, and body are relayed back verbatim, on this same connection. The queue is never touched. A response the target API didn't mark as overload (a plain `500`, a `404`, anything unclassified) is a **success** in this sense too — relayed directly, not queued, since nothing said it shouldn't be.
+- **Fails, or the target API signals overload** (timeout, a classified status code, or an ORCA fallback threshold): falls back to the exact same durable-queue-and-delivery path `POST /jobs` uses — the connection seamlessly becomes the same SSE stream `GET /jobs/:id/stream` provides, rather than requiring a second call. The very first event on that stream is `event: proxy_fallback`, `data: {"job_id", "reason", "upstream_status"}` (status omitted when no real response was received — a skipped attempt or a timeout) — so a client with no server of its own to explain this any other way (a browser, an agent) sees explicitly why it's in the queue before the normal `queued`/`dispatching`/terminal sequence starts. `reason` is one of `upstream_overloaded`, `upstream_unreachable`, `domain_degraded` (breaker open or this domain's queue already has backlog), or `pool_routed`.
 
-**Which status codes count as overload is configurable, split into two kinds — queue locally, or also try cross-region redirect first (see below) — not lumped together the way "any 5xx" used to be.** Defaults are deliberately narrow: `429` → queue, `503` → reroute. Everything else (a plain `500`, `502`, `504`, `404`, anything not explicitly classified) is relayed to the caller as a normal, if unfortunate, direct response — not treated as overload at all. The reasoning: `429` is usually a *global* per-key/per-account rate limit, not a regional one — rerouting to a sibling region wouldn't help, since it hits the identical limit on the identical upstream, so it stays queue-only. `503` and an ORCA overload signal are reroute-eligible by default, since they more plausibly indicate *this* region/instance specifically is struggling.
+**Which status codes count as overload is configurable, split into two kinds — queue locally, or also try cross-region redirect first (see below) — not lumped together the way "any 5xx" used to be.** Defaults are deliberately narrow: `429` → queue, `503` → reroute. Everything else (a plain `500`, `502`, `504`, `404`, anything not explicitly classified) is relayed to the caller as a normal, if unfortunate, direct response — not treated as overload at all. The reasoning: `429` is usually a *global* per-key/per-account rate limit, not a regional one — rerouting to a sibling region wouldn't help, since it hits the identical limit on the identical target API, so it stays queue-only. `503` and an ORCA overload signal are reroute-eligible by default, since they more plausibly indicate *this* region/instance specifically is struggling.
 
-Your own upstream can configure its own sets via response headers, comma-separated, each entry either a literal code or an HTTP status class (`5xx` matches every `500`–`599`):
+Your own target API can configure its own sets via response headers, comma-separated, each entry either a literal code or an HTTP status class (`5xx` matches every `500`–`599`):
 
 | Header | Default | Effect |
 |---|---|---|
 | `X-Aqueduct-Queue-Codes` (or `X-Aquifer-Queue-Codes`) | `429` | Statuses that mean "queue this domain locally" |
 | `X-Aqueduct-Reroute-Codes` (or `X-Aquifer-Reroute-Codes`) | `503` | Statuses that mean "also try cross-region redirect first" |
 
-Due diligence is on you to say so if your upstream uses something nonstandard — e.g. `X-Aqueduct-Reroute-Codes: 502,503,504` to widen reroute eligibility, or `X-Aqueduct-Reroute-Codes: 5xx` to sweep in every 5xx the way earlier versions of this feature did unconditionally.
+Due diligence is on you to say so if your target API uses something nonstandard — e.g. `X-Aqueduct-Reroute-Codes: 502,503,504` to widen reroute eligibility, or `X-Aqueduct-Reroute-Codes: 5xx` to sweep in every 5xx the way earlier versions of this feature did unconditionally.
 
-A domain that trips an overload signal has its direct attempts skipped entirely — anchored to the upstream's own `Retry-After` header when it sends one (× a configurable safety multiplier, default 3) as the minimum cooldown, but direct attempts stay skipped for as long as the domain's queue actually has real backlog, even past that cooldown — a fixed timer alone doesn't know whether the traffic it caused has finished draining. Once both the cooldown has elapsed *and* the queue is genuinely empty, the next request is itself a real probe against the live upstream. Which kind (queue vs. reroute) tripped the breaker is remembered for the whole cooldown — a domain breaker-tripped by a `429` stays queue-only on every retry during that window, not reroute-eligible just because *some* overload happened.
+A domain that trips an overload signal has its direct attempts skipped entirely — anchored to the target API's own `Retry-After` header when it sends one (× a configurable safety multiplier, default 3) as the minimum cooldown, but direct attempts stay skipped for as long as the domain's queue actually has real backlog, even past that cooldown — a fixed timer alone doesn't know whether the traffic it caused has finished draining. Once both the cooldown has elapsed *and* the queue is genuinely empty, the next request is itself a real probe against the live target API. Which kind (queue vs. reroute) tripped the breaker is remembered for the whole cooldown — a domain breaker-tripped by a `429` stays queue-only on every retry during that window, not reroute-eligible just because *some* overload happened.
 
 **Routine local backlog — no breaker tripped at all, just a queue with real jobs in it — never triggers redirect on its own**, even with the feature configured. A domain paced at a low rps under a normal traffic burst has jobs sitting in queue as a matter of course; that's Aquifer working as designed, not a signal anything is regionally degraded. Redirect only ever gets tried alongside an actual tripped breaker or a failed/overloaded direct attempt.
 
-The upstream can also proactively request queueing itself, on an otherwise-healthy response: `X-Aqueduct-Queue-Active: true` (or the product alias `X-Aquifer-Queue-Active`) trips the same breaker (always queue-kind, never reroute — matching its own name) for future requests to that domain — without discarding the response that already came back. Useful for "I'm nearing capacity, stop firing directly at me" ahead of an actual overload status.
+The target API can also proactively request queueing itself, on an otherwise-healthy response: `X-Aqueduct-Queue-Active: true` (or the product alias `X-Aquifer-Queue-Active`) trips the same breaker (always queue-kind, never reroute — matching its own name) for future requests to that domain — without discarding the response that already came back. Useful for "I'm nearing capacity, stop firing directly at me" ahead of an actual overload status.
 
-Pool-routed jobs (`pool_id` instead of `url`) always fall straight to queue+stream — there's no single canonical upstream to try directly.
+Pool-routed jobs (`pool_id` instead of `url`) always fall straight to queue+stream — there's no single canonical target API to try directly.
 
 ```bash
 curl -N -X POST http://localhost:8080/proxy -d '{ ... same shape as POST /jobs ... }'
@@ -238,7 +238,7 @@ curl -N -X POST http://localhost:8080/proxy -d '{ ... same shape as POST /jobs .
 
 ## GET /websocket
 
-WebSocket proxying with an ordered Valkey transcript, cursor replay, paced upstream connection admission, and automatic upstream reconnect. Aquifer does **not** authenticate callers or choose their destination. Put it behind a trusted gateway that authenticates the request and injects the upstream URL.
+WebSocket proxying with an ordered Valkey transcript, cursor replay, paced target API connection admission, and automatic target API reconnect. Aquifer does **not** authenticate callers or choose their destination. Put it behind a trusted gateway that authenticates the request and injects the target API URL.
 
 The endpoint enables automatically when `AQUIFER_VALKEY_URL` is configured; there is no separate feature flag to turn on. `AQUIFER_WS_ENABLED=false` remains an operational kill switch. Without a configured Valkey URL, the WebSocket subsystem stays inactive so ordinary HTTP/MCP installations do not acquire an external dependency. Active WebSocket sessions fail closed when Valkey is unavailable because Aquifer cannot uphold record-before-forward and record-before-deliver without the stream.
 
@@ -255,7 +255,7 @@ X-Aqueduct-Upstream-URL: wss://backend.internal/socket
 
 `session_id` identifies the session's transcript. `after` is the last Valkey stream ID the client has processed and defaults to `0-0`. Aquifer replays backend messages after that cursor before following live events. A cursor older than retained history is rejected with **409** instead of silently skipping data.
 
-The trusted `X-Aqueduct-Upstream-URL` must be an absolute `ws://` or `wss://` URL and is subject to `AQUIFER_ALLOWED_URL_DOMAINS`. Aquifer forwards end-to-end gateway headers such as `Authorization`, strips hop-by-hop and internal `X-Aqueduct-*`/`X-Aquifer-*` headers, and injects `X-Aqueduct-Session-ID` upstream.
+The trusted `X-Aqueduct-Upstream-URL` must be an absolute `ws://` or `wss://` URL and is subject to `AQUIFER_ALLOWED_URL_DOMAINS`. Aquifer forwards end-to-end gateway headers such as `Authorization`, strips hop-by-hop and internal `X-Aqueduct-*`/`X-Aquifer-*` headers, and injects `X-Aqueduct-Session-ID` target API.
 
 ### Messages
 
@@ -281,7 +281,7 @@ Backend acknowledgement and events:
 {"type":"event","message_id":"event-44","caused_by":"command-42","payload":{"state":"complete"}}
 ```
 
-`caused_by` supports one command producing zero, one, or many events; it is not a one-request/one-response contract. Aquifer appends every backend `ack` and `event` before delivery, then adds its Valkey `stream_id` and upstream `generation` to the client-facing envelope.
+`caused_by` supports one command producing zero, one, or many events; it is not a one-request/one-response contract. Aquifer appends every backend `ack` and `event` before delivery, then adds its Valkey `stream_id` and target API `generation` to the client-facing envelope.
 
 Aquifer also sends non-durable control messages:
 
@@ -297,7 +297,7 @@ Aquifer also sends non-durable control messages:
 
 While a session waits, Aquifer emits another `waiting` status whenever its FIFO position changes (for example, `2` then `1`). These progress messages are live control state and are not appended to the durable transcript.
 
-On upstream loss, Aquifer keeps the client connection open and reconnects with jittered exponential backoff. Commands are durably recorded, but v1 does **not** automatically replay a command after an ambiguous upstream failure: Aquifer cannot know whether the backend acted before the connection disappeared. Clients may resend a command with the same `message_id`; backend actions must therefore be idempotent by `message_id`. Delivery of backend events is at least once when a client reconnects from its last acknowledged stream cursor.
+On target API loss, Aquifer keeps the client connection open and reconnects with jittered exponential backoff. Commands are durably recorded, but v1 does **not** automatically replay a command after an ambiguous target API failure: Aquifer cannot know whether the backend acted before the connection disappeared. Clients may resend a command with the same `message_id`; backend actions must therefore be idempotent by `message_id`. Delivery of backend events is at least once when a client reconnects from its last acknowledged stream cursor.
 
 Each session transcript retains approximately the newest `AQUIFER_WS_STREAM_MAX_EVENTS` entries and expires `AQUIFER_WS_STREAM_TTL_SECONDS` after its last recorded entry. Every append refreshes that TTL. Expired history is treated as a replay gap when a client supplies a nonzero cursor, so deletion cannot silently skip events.
 
@@ -321,16 +321,16 @@ Sessions don't hold Valkey connections of their own. Every recorded backend even
 
 Connection ceilings are local to one Aquifer process. `AQUIFER_WS_MAX_CLIENT_CONNECTIONS=1000` means that instance accepts at most 1,000 clients; it is not a fleet-wide semaphore. Ten identical instances can therefore admit up to 10,000 clients when the gateway distributes them.
 
-The upstream can lower this instance's upstream-connection ceiling or opening rate during a successful handshake:
+The target API can lower this instance's ceiling on connections to it, or its opening rate, during a successful handshake:
 
 ```http
 X-Aqueduct-WS-Max-Connections: 250
 X-Aqueduct-WS-Connect-Rps: 20
 ```
 
-It can update either value on an established socket with `{"type":"aqueduct.capacity","max_connections":250,"connect_rps":20}`. Dynamic signals can only lower operator-configured ceilings, never raise them. `Retry-After` on a rejected upstream handshake becomes the minimum reconnect delay.
+It can update either value on an established socket with `{"type":"aqueduct.capacity","max_connections":250,"connect_rps":20}`. Dynamic signals can only lower operator-configured ceilings, never raise them. `Retry-After` on a rejected target API handshake becomes the minimum reconnect delay.
 
-Opening starts at `AQUIFER_WS_SLOW_START_RPS` for each Aquifer process. Every successful upstream handshake doubles the current ramp rate until `AQUIFER_WS_CONNECT_RPS` is reached; a failed handshake resets the ramp. An established socket disconnecting does not penalize unrelated connections by resetting the process-wide ramp. Backend capacity signals can still lower the effective rate at any point. Set `AQUIFER_WS_SLOW_START_RPS` equal to `AQUIFER_WS_CONNECT_RPS` to disable ramping.
+Opening starts at `AQUIFER_WS_SLOW_START_RPS` for each Aquifer process. Every successful target API handshake doubles the current ramp rate until `AQUIFER_WS_CONNECT_RPS` is reached; a failed handshake resets the ramp. An established socket disconnecting does not penalize unrelated connections by resetting the process-wide ramp. Backend capacity signals can still lower the effective rate at any point. Set `AQUIFER_WS_SLOW_START_RPS` equal to `AQUIFER_WS_CONNECT_RPS` to disable ramping.
 
 | Env var | Default | Description |
 |---|---:|---|
@@ -343,18 +343,18 @@ Opening starts at `AQUIFER_WS_SLOW_START_RPS` for each Aquifer process. Every su
 | `AQUIFER_WS_READ_BLOCK_MS` | `1000` | Blocking-read interval for direct `ReadAfter` callers; live sessions are notified through pub/sub instead |
 | `AQUIFER_WS_READER_SHARDS` | `8` | Shared Valkey pub/sub connections per instance that tell live sessions when their stream has new events |
 | `AQUIFER_WS_MAX_MESSAGE_BYTES` | `1048576` | Maximum client or backend message size |
-| `AQUIFER_WS_HANDSHAKE_TIMEOUT_SECONDS` | `10` | Valkey check and upstream handshake timeout |
+| `AQUIFER_WS_HANDSHAKE_TIMEOUT_SECONDS` | `10` | Valkey check and target API handshake timeout |
 | `AQUIFER_WS_RECONNECT_MAX_SECONDS` | `30` | Maximum reconnect backoff before jitter |
 | `AQUIFER_WS_MAX_CLIENT_CONNECTIONS` | `1000` | Client socket ceiling for this Aquifer instance |
 | `AQUIFER_WS_MAX_UPSTREAM_CONNECTIONS` | `1000` | Active backend socket ceiling for this instance |
-| `AQUIFER_WS_MAX_WAITING_CONNECTIONS` | `1000` | Local queue ceiling for sessions waiting on an upstream slot |
-| `AQUIFER_WS_CONNECT_RPS` | `20` | Maximum upstream connection openings per second on this instance |
+| `AQUIFER_WS_MAX_WAITING_CONNECTIONS` | `1000` | Local queue ceiling for sessions waiting on a target API slot |
+| `AQUIFER_WS_CONNECT_RPS` | `20` | Maximum target API connection openings per second on this instance |
 | `AQUIFER_WS_SLOW_START_RPS` | `1` | Initial and post-failure connection-opening rate before successful handshakes ramp it up |
 | `AQUIFER_WS_DRAIN_GRACE_SECONDS` | `5` | Handoff window between `server_draining` and close code 1012 on `SIGTERM`; `0` closes immediately |
 
-Handshake errors are returned before upgrade: **400** for invalid protocol/session/upstream input, **409** for a replay gap, **429** for a local connection or waiting ceiling, and **503** when Valkey is unavailable or the node is draining. `GET /health` exposes this instance's client, waiting, active-upstream, configured, ramp, and effective limits under `websocket`.
+Handshake errors are returned before upgrade: **400** for invalid protocol/session/target API input, **409** for a replay gap, **429** for a local connection or waiting ceiling, and **503** when Valkey is unavailable or the node is draining. `GET /health` exposes this instance's client, waiting, active-upstream, configured, ramp, and effective limits under `websocket`.
 
-Measure a deployment with a controlled upstream before raising the defaults:
+Measure a deployment with a controlled target API before raising the defaults:
 
 ```bash
 go run ./cmd/aquifer-websocket-bench \
@@ -373,7 +373,7 @@ When it triggers: every known-live region is tried for a fast direct success fir
 
 A reroute is never silent to the caller — same principle as `proxy_fallback` above: a client with no server of its own to explain this (a browser, an agent) shouldn't have to wonder why its connection is still open or where the response actually came from.
 - **Direct success via redirect:** the response carries an `X-Aquifer-Served-By-Region` header naming which region actually served it, alongside the relayed status/headers/body — purely additive, doesn't change anything you're already parsing.
-- **Queued on another region:** before relaying that region's own stream, origin fires `event: rerouted`, `data: {"region"}` — so it arrives *before* that region's own `proxy_fallback`/`queued`/`dispatching` sequence, the same ordering `proxy_fallback` itself uses relative to `queued`.
+- **Queued on another region:** before relaying that region's own stream, the first region (the one the request arrived at) fires `event: rerouted`, `data: {"region"}` — so it arrives *before* that region's own `proxy_fallback`/`queued`/`dispatching` sequence, the same ordering `proxy_fallback` itself uses relative to `queued`.
 
 **A full queued-on-reroute sequence, start to finish** — this is what actually crosses the wire (Go's JSON encoder sorts map keys, so this is the literal byte-for-byte shape, not approximated). `position` fires every ~2s for as long as the job is genuinely still queued — real backpressure ticking down, not a fixed animation:
 
@@ -403,9 +403,9 @@ event: completed
 data: {"body":"...","job_id":"b7e2...","response_status":200}
 ```
 
-`job_id` throughout is **target's** ID, not origin's — origin deletes its own local row the instant redirect succeeds (`fallbackOutcome`), so there's no origin-side ID for the client to have seen and compare against. `proxy_fallback` has no `upstream_status` field here because `domain_degraded` always passes status `0`; that field only appears on an `upstream_overloaded`/`upstream_unreachable` fallback, where a real (or attempted) upstream response actually came back. Terminal event is `completed` on success or `failed` (`{"job_id","reason","response_status","body"}`) on failure — same shape `GET /jobs/:id/stream` uses, because this literally *is* that stream, just relayed from `target` through `origin`'s connection.
+`job_id` throughout is the **redirect region's** ID, not the first region's — the first region deletes its own local row the instant redirect succeeds (`fallbackOutcome`), so there's no first-region ID for the client to have seen and compare against. `proxy_fallback` has no `upstream_status` field here because `domain_degraded` always passes status `0`; that field only appears on an `upstream_overloaded`/`upstream_unreachable` fallback, where a real (or attempted) target API response actually came back. Terminal event is `completed` on success or `failed` (`{"job_id","reason","response_status","body"}`) on failure — same shape `GET /jobs/:id/stream` uses, because this literally *is* that stream, just relayed from `target` through `origin`'s connection.
 
-If the original request set `webhook_url`, a webhook fires too — but separately, from **target** (whichever region actually completed the job), as its own independently-paced, durably-queued POST, not inline in this stream:
+If the original request set `webhook_url`, a webhook fires too — but separately, from the **redirect region** (whichever region actually completed the job), as its own independently-paced, durably-queued POST, not inline in this stream:
 
 ```
 POST https://yourapp.com/webhooks/aquifer
@@ -498,7 +498,7 @@ The process termination grace configured by your orchestrator must exceed `AQUIF
 
 ## Request schemas (L8 0.2)
 
-An upstream that implements L8 0.2 can publish a JSON Schema (draft 2020-12) per route in its `GET /.well-known/l8`:
+A target API that implements L8 0.2 can publish a JSON Schema (draft 2020-12) per route in its `GET /.well-known/l8`:
 
 ```json
 {
@@ -513,7 +513,7 @@ An upstream that implements L8 0.2 can publish a JSON Schema (draft 2020-12) per
 }
 ```
 
-With `AQUIFER_L8_SCHEMA_VALIDATION=true`, Aquifer fetches this once per upstream domain, caches it for up to 10 minutes, and checks `url`-routed job bodies whose method and path match a route. A mismatch never reaches the upstream:
+With `AQUIFER_L8_SCHEMA_VALIDATION=true`, Aquifer fetches this once per target API domain, caches it for up to 10 minutes, and checks `url`-routed job bodies whose method and path match a route. A mismatch never reaches the target API:
 
 ```json
 {
@@ -524,7 +524,7 @@ With `AQUIFER_L8_SCHEMA_VALIDATION=true`, Aquifer fetches this once per upstream
 }
 ```
 
-When the upstream changes its contract it returns a new `X-Aqueduct-Schema-Hash` on any response. Aquifer then drops the cached schemas and the L8 trust for that domain, so the next request refetches metadata and re-runs the handshake. Routes without a schema, upstreams without L8, and metadata that fails to fetch or compile are all let through unchecked. External `$ref`s are never fetched.
+When the target API changes its contract it returns a new `X-Aqueduct-Schema-Hash` on any response. Aquifer then drops the cached schemas and the L8 trust for that domain, so the next request refetches metadata and re-runs the handshake. Routes without a schema, target APIs without L8, and metadata that fails to fetch or compile are all let through unchecked. External `$ref`s are never fetched.
 
 ### Webhooks are skipped for results you already received
 
@@ -560,7 +560,7 @@ A client that vanishes without closing its connection (a dropped network, a slee
 
 **Webhook delivery uses the same account-queue pacing as forward dispatch.** A webhook POST isn't fired immediately from the dispatch goroutine — it's enqueued as its own durable job, keyed by the webhook receiver's domain, and dispatched through the identical `AccountQueue`/`URLWorker` machinery described in the [Dynamic Pacing](README.md#dynamic-pacing) section of the README. Practically, this means:
 
-- A webhook receiver can slow Aquifer down with the same `X-Aqueduct-Rps` / `X-Aqueduct-Max-Concurrent` response headers a real upstream uses, instead of just getting hammered.
+- A webhook receiver can slow Aquifer down with the same `X-Aqueduct-Rps` / `X-Aqueduct-Max-Concurrent` response headers a real target API uses, instead of just getting hammered.
 - Delivery is crash-durable — a webhook still pending when the process restarts is recovered and retried, the same way a queued job is, rather than being lost with an in-memory retry loop.
 - Retries trigger on `5xx` responses (not every non-`2xx`), matching forward dispatch's own retry condition — up to 4 attempts, exponential backoff 1 s · 2 s · 4 s · 8 s.
 - L8 signing (see [README.md](README.md#l8-protocol--trustless-webhook-delivery)) still applies exactly as before — trust is established and delivery is signed the same way, just from inside the paced dispatch path instead of a separate one-shot retry loop.

@@ -43,7 +43,7 @@ type ProxyOutcome struct {
 	// client watching the stream (a browser, an agent with no server of
 	// its own to explain this some other way) knows it's in the queue
 	// because something specific happened, not just "queued" with no
-	// context. FallbackStatus is the upstream's real status code when one
+	// context. FallbackStatus is the target API's real status code when one
 	// was actually received (0 for a skipped or timed-out attempt).
 	FallbackReason string
 	FallbackStatus int
@@ -78,7 +78,7 @@ type ProxyOutcome struct {
 // see the PoolID check below — try dispatching it directly and
 // synchronously before ever touching the durable queue. A direct attempt
 // is skipped entirely if this job's target already has its circuit breaker
-// open (see URLWorker.BreakerOpen), so a known-bad upstream doesn't cost
+// open (see URLWorker.BreakerOpen), so a known-bad target API doesn't cost
 // every subsequent request the latency of a doomed attempt.
 func (a *Aquifer) AttemptDirect(ctx context.Context, req JobRequest, timeout time.Duration) ProxyOutcome {
 	job, duplicate, err := a.PrepareJob(req)
@@ -92,9 +92,9 @@ func (a *Aquifer) AttemptDirect(ctx context.Context, req JobRequest, timeout tim
 		return ProxyOutcome{Job: job, FallbackReason: "execution_deadline_exceeded"}
 	}
 
-	// Pool-routed jobs have no single canonical upstream to try directly —
+	// Pool-routed jobs have no single canonical target API to try directly —
 	// pool routing's whole premise (spread across members, one might be
-	// unhealthy) is in tension with "there's one upstream, try it". Fall
+	// unhealthy) is in tension with "there's one target API, try it". Fall
 	// straight back to queue+stream, same as any other job the caller
 	// couldn't attempt directly.
 	if job.PoolID != "" {
@@ -144,7 +144,7 @@ func (a *Aquifer) AttemptDirect(ctx context.Context, req JobRequest, timeout tim
 		return a.fallbackOutcome(ctx, req, job, "upstream_overloaded", resp.StatusCode, timeout, kind == "reroute")
 	}
 
-	// The upstream can proactively ask to be routed through the durable
+	// The target API can proactively ask to be routed through the durable
 	// queue going forward — X-Aqueduct-Queue-Active: true — even on an
 	// otherwise-healthy response, e.g. "I'm nearing capacity, stop firing
 	// directly at me." Unlike isOverloadSignal, this response is still a
@@ -230,7 +230,7 @@ func (a *Aquifer) fallbackOutcome(ctx context.Context, req JobRequest, job *Job,
 // >=500-only retry classification (account_queue.go): a direct attempt has
 // no retry loop of its own, so either kind means fall back, not retry
 // inline. When true, the second return value is how long to trip this
-// upstream's circuit breaker for — anchored to the upstream's own
+// target API's circuit breaker for — anchored to the target API's own
 // Retry-After header when it sends one (times a configurable safety
 // multiplier), falling back to a fixed configured default otherwise, since
 // 5xx/timeout/ORCA signals don't carry that header.
@@ -250,13 +250,13 @@ func isOverloadSignal(resp *http.Response) (cooldown time.Duration, kind string,
 // that plausibly ARE regional (503 by default). A status matching neither
 // configured set isn't treated as overload at all — relayed to the caller
 // as a normal, if unfortunate, direct response, exactly like any other
-// non-2xx status an upstream might legitimately return.
+// non-2xx status a target API might legitimately return.
 //
 // AQUIFER_QUEUE_CODES / AQUIFER_REROUTE_CODES (as X-Aqueduct-Queue-Codes /
 // X-Aqueduct-Reroute-Codes response headers, same dual-namespace lookup as
-// every other Aqueduct header) let the upstream configure its own sets,
+// every other Aqueduct header) let the target API configure its own sets,
 // comma-separated, each entry either a literal code ("502") or an HTTP
-// status class ("5xx") — due diligence is on the upstream to say so if it
+// status class ("5xx") — due diligence is on the target API to say so if it
 // uses something nonstandard; defaults are deliberately narrow
 // (429 → queue, 503 → reroute) rather than sweeping in every 5xx.
 //

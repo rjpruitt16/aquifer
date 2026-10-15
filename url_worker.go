@@ -37,7 +37,7 @@ type URLWorker struct {
 	// onDestinationMode lets the registry remember the destination's choice
 	// across this worker being retired and recreated.
 	onDestinationMode func(bool)
-	slowStart         bool // set by an upstream's X-Aqueduct-Slow-Start response header; applies to the *next* new queue created for this domain, not retroactively
+	slowStart         bool // set by a target API's X-Aqueduct-Slow-Start response header; applies to the *next* new queue created for this domain, not retroactively
 	maxBacklog        atomic.Int64
 	activeQueues      atomic.Int64
 	backlog           atomic.Int64
@@ -85,7 +85,7 @@ func (w *URLWorker) BreakerKind() string {
 // signal caused it (see BreakerKind). No separate half-open state is
 // needed: once breakerUntil passes, BreakerOpen naturally returns false
 // again, so the next request after the cooldown is itself a real probe
-// against the live upstream — success leaves the breaker closed, a repeat
+// against the live target API — success leaves the breaker closed, a repeat
 // overload signal re-trips it via another TripBreaker call.
 func (w *URLWorker) TripBreaker(cooldown time.Duration, kind string) {
 	w.mu.Lock()
@@ -106,7 +106,7 @@ func (w *URLWorker) HandleMaxBacklogHeader(value string) {
 // has real backlog (queued or in-flight work). Distinct from BreakerOpen: a
 // breaker cooldown is a fixed clock that can expire while a real backlog is
 // still draining, letting proxy mode resume direct dispatch against an
-// upstream that's still catching up from the very overload that tripped the
+// target API that's still catching up from the very overload that tripped the
 // breaker. QueueActive self-corrects instead — it stays true for exactly as
 // long as there's real work in flight, independent of any timer, and goes
 // false the instant the backlog is actually empty.
@@ -174,7 +174,7 @@ func (w *URLWorker) signalStop() {
 // each queue proportionally. Without this, account-queue mode isolates
 // tenants from each other but doesn't bound them collectively — N
 // simultaneously active tenant queues could each independently believe
-// they own the full ceiling, multiplying real load on the upstream by N.
+// they own the full ceiling, multiplying real load on the target API by N.
 func (w *URLWorker) enforceAggregateBudget() {
 	defer close(w.done)
 

@@ -50,7 +50,7 @@ performance-2x) runs everything else:
     healthy: HTTP jobs from 500 to 3,000/s on even days of the year,
     WebSocket sessions from 200 to 2,500 on odd days, in one-minute steps.
     The highest step the target sustains is that day's ceiling.
-- **Misbehaving upstream (`/work`):** every 10 minutes it picks one mode:
+- **Misbehaving target API (`/work`):** every 10 minutes it picks one mode:
 
   | Mode | Share of slots | Behavior |
   |---|---|---|

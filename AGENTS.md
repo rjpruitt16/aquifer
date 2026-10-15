@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Aquifer is a Go load balancer for agentic workloads: durable per-tenant queues, dynamic pacing driven by `X-Aqueduct-*` headers from the upstream, `POST /proxy` direct-then-fallback, cluster routing, drain mode, Valkey-backed remote idempotency, and L8 signed (and optionally encrypted) webhooks.
+Aquifer is a Go load balancer for agentic workloads: durable per-tenant queues, dynamic pacing driven by `X-Aqueduct-*` headers from the target API, `POST /proxy` direct-then-fallback, cluster routing, drain mode, Valkey-backed remote idempotency, and L8 signed (and optionally encrypted) webhooks.
 
 ## Related repos
 
@@ -24,7 +24,7 @@ Shared contracts that must stay identical across Aquifer and Spillway: `X-Aquedu
 
 ## Where things live
 
-- `aquifer.go` (`PrepareJob`, `Enqueue`), `server.go` (HTTP routes), `proxy.go` (`/proxy`), `account_queue.go` (`execute`, `makeRequest`: the single upstream dispatch path).
+- `aquifer.go` (`PrepareJob`, `Enqueue`), `server.go` (HTTP routes), `proxy.go` (`/proxy`), `account_queue.go` (`execute`, `makeRequest`: the single target API dispatch path).
 - `job.go`: `JobRequest`, `Job`, validation, `dedupHash` (the only place idempotency hashes are derived).
 - `store.go` (SQLite), `pebble_store.go`, `remote_idempotency.go` (Valkey), `cluster.go` (`clusterRoutingKey`).
 - `l8.go`, `l8_encrypt.go`, `l8_schema.go`: L8 handshake, signing, payload encryption, request-schema validation.

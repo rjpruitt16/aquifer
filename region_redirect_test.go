@@ -163,12 +163,12 @@ func buildRedirectTestPair(t *testing.T) (origin *Aquifer, originSrv *httptest.S
 func TestRedirectSucceedsDirectlyOnTargetRegion(t *testing.T) {
 	origin, originHTTP, target := buildRedirectTestPair(t)
 
-	// A single, real, always-healthy upstream both origin and target would
+	// A single, real, always-healthy target API both origin and target would
 	// dispatch the SAME job.URL to. To make origin fail locally while
 	// target succeeds against that identical URL, pre-trip origin's own
 	// per-domain breaker for it directly -- origin's AttemptDirect then
 	// takes the domain_degraded fallback path without ever calling the
-	// upstream at all, exactly as it would for a real recently-overloaded
+	// target API at all, exactly as it would for a real recently-overloaded
 	// domain. target has never seen this URL, so its own breaker is
 	// closed and its real attempt succeeds.
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -223,7 +223,7 @@ func TestRedirectFallsBackToTargetsQueueWhenNoRegionCanDispatchDirectly(t *testi
 
 	origin, originHTTP, target := buildRedirectTestPair(t)
 
-	// This upstream fails everywhere -- neither origin nor target can
+	// This target API fails everywhere -- neither origin nor target can
 	// dispatch it directly, so the phase-2 committing hop should land on
 	// target's own durable queue, and origin should relay that live SSE
 	// stream back to the caller.
@@ -401,7 +401,7 @@ func TestRedirectExhaustionReturnsHardErrorNotLocalQueue(t *testing.T) {
 	originHTTP := httptest.NewServer(originServer.Routes())
 	t.Cleanup(originHTTP.Close)
 
-	// origin's own local upstream is also broken, so AttemptDirect takes
+	// origin's own local target API is also broken, so AttemptDirect takes
 	// the domain_degraded fallback path and attemptRedirect actually runs
 	// -- exactly the real-world trigger, not a synthetic direct call.
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

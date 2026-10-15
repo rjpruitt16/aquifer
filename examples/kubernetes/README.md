@@ -13,7 +13,7 @@ Pin your own cluster to a specific release rather than "latest" — both project
 
 This is not a simplification to loosen later. Aquifer's durable queue is a local SQLite file per
 instance, and pool membership plus the SSE broker's subscriber map are in-process only. Scaling is by
-**partitioning** — running one instance per upstream domain or tenant — not by adding replicas behind
+**partitioning** — running one instance per target API domain or tenant — not by adding replicas behind
 one Service. Multiple replicas sharing this manifest's `Service` would risk double-dispatch on
 retries and would make pool members registered on one replica invisible to another. If you need more
 capacity, deploy a second, separately partitioned copy of this example (different namespace, own PVC,

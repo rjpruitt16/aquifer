@@ -146,7 +146,7 @@ func TestWebhookDeliveryIsDeduped(t *testing.T) {
 // TestWebhookDeliveryIsPacedByAccountQueue is the direct proof of the
 // actual feature: a webhook receiver's own X-Aqueduct-Rps response header
 // throttles subsequent webhook deliveries to it, exactly the way it
-// already throttles forward dispatch to a real upstream -- because webhook
+// already throttles forward dispatch to a real target API -- because webhook
 // delivery now goes through the same domain-keyed AccountQueue instead of
 // firing immediately with a fixed retry schedule.
 func TestWebhookDeliveryIsPacedByAccountQueue(t *testing.T) {
@@ -259,8 +259,8 @@ func TestWebhookDeliveryIsL8Signed(t *testing.T) {
 
 // TestForwardDispatchIsNotL8Signed is the negative-space guard: L8 proves
 // Aquifer's identity to a webhook *receiver* and has no meaning for forward
-// dispatch to an arbitrary upstream API -- a regular job's dispatch request
-// must never carry X-L8-* headers, even when the upstream happens to also
+// dispatch to an arbitrary target API -- a regular job's dispatch request
+// must never carry X-L8-* headers, even when the target API happens to also
 // speak the L8 protocol (i.e. this isn't just "trust never got established").
 func TestForwardDispatchIsNotL8Signed(t *testing.T) {
 	receiver, captured := testL8Receiver(t)

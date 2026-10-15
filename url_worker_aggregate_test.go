@@ -12,7 +12,7 @@ import (
 // TestAggregateBudgetThrottlesSiblingQueues proves the fix for the gap
 // found this session: NewAccountQueue always received the URLWorker's
 // full configured RPS regardless of how many sibling queues already
-// existed for the same upstream, so N simultaneously active tenants could
+// existed for the same target API, so N simultaneously active tenants could
 // each independently dispatch at the full ceiling — real aggregate load
 // up to N times the intended rate. checkAndThrottle should bring the sum
 // back down to the worker's actual budget.

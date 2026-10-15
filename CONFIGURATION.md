@@ -18,4 +18,4 @@ This exists so that clients retrying into a sustained overload spread out over t
 
 ## Fair queue admission
 
-`AQUIFER_MAX_PENDING_PER_UPSTREAM` defaults to 10,000 queued plus in-flight jobs per upstream. It is a shared safety budget, not a fixed per-user reservation: a lone active account queue may use all of it. Once total backlog exceeds 70%, an above-share queue receives probabilistic `429` responses according to the formula in [API.md](API.md#fair-queue-admission). The upstream can change the budget dynamically with `X-Aqueduct-Max-Backlog`; set either control to `0` to disable count-based fair admission.
+`AQUIFER_MAX_PENDING_PER_UPSTREAM` defaults to 10,000 queued plus in-flight jobs per target API. It is a shared safety budget, not a fixed per-user reservation: a lone active account queue may use all of it. Once total backlog exceeds 70%, an above-share queue receives probabilistic `429` responses according to the formula in [API.md](API.md#fair-queue-admission). The target API can change the budget dynamically with `X-Aqueduct-Max-Backlog`; set either control to `0` to disable count-based fair admission.

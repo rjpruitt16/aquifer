@@ -48,7 +48,7 @@ func jobFor(userID, apiKey string) *Job {
 // set to "enabled" must land in a queue keyed per-tenant (jobQueueKey), not
 // the single shared queue every job used before handleAccountQueueHeader had
 // a caller. Without this, a noisy tenant's flood starves every other tenant
-// hitting the same upstream domain.
+// hitting the same target API domain.
 func TestAccountQueueHeaderIsolatesTenants(t *testing.T) {
 	r := testRegistry(t)
 
@@ -123,7 +123,7 @@ func TestAccountQueueHeaderOmittedSharesQueue(t *testing.T) {
 }
 
 // TestSlowStartHeaderAppliesToNextNewQueueOnly proves the persistence and
-// timing this feature depends on: an upstream's X-Aqueduct-Slow-Start
+// timing this feature depends on: a target API's X-Aqueduct-Slow-Start
 // response header updates the domain's URLWorker, and that update applies
 // to the *next* queue created for that domain -- not the queue whose
 // response actually carried the header (which is already running, past the
