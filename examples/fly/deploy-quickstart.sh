@@ -5,7 +5,22 @@ ROOT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 APP_NAME=${APP_NAME:-aquifer-$(date +%s)}
 FLY_REGION=${FLY_REGION:-iad}
 VOLUME_SIZE_GB=${VOLUME_SIZE_GB:-1}
+VM_MEMORY_MB=${VM_MEMORY_MB:-512}
 REQUESTED_VERSION=${AQUIFER_VERSION:-latest}
+SOURCE_BUILD=false
+
+if ! [[ "$VM_MEMORY_MB" =~ ^[0-9]+$ ]] || [ "$VM_MEMORY_MB" -lt 256 ]; then
+  echo "VM_MEMORY_MB must be an integer of at least 256" >&2
+  exit 1
+fi
+
+if [ -z "${AQUIFER_MEMORY_LIMIT_MB:-}" ]; then
+  if [ "$VM_MEMORY_MB" -eq 512 ]; then
+    AQUIFER_MEMORY_LIMIT_MB=400
+  else
+    AQUIFER_MEMORY_LIMIT_MB=$((VM_MEMORY_MB * 3 / 4))
+  fi
+fi
 
 for command_name in flyctl curl; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
@@ -16,7 +31,10 @@ done
 
 flyctl auth whoami >/dev/null
 
-if [ "$REQUESTED_VERSION" = "latest" ]; then
+if [ "$REQUESTED_VERSION" = "source" ]; then
+  SOURCE_BUILD=true
+  AQUIFER_VERSION=source
+elif [ "$REQUESTED_VERSION" = "latest" ]; then
   RELEASE_URL=$(curl --fail --silent --show-error --location --head \
     --output /dev/null --write-out '%{url_effective}' \
     https://github.com/rjpruitt16/aquifer/releases/latest)
@@ -44,20 +62,33 @@ if ! flyctl volumes list --app "$APP_NAME" | grep -Eq '(^|[[:space:]])aquifer_da
     --size "$VOLUME_SIZE_GB" \
     --vm-cpu-kind shared \
     --vm-cpus 1 \
-    --vm-memory 512 \
+    --vm-memory "$VM_MEMORY_MB" \
     --yes
 fi
 
-flyctl deploy "$ROOT_DIR" \
-  --app "$APP_NAME" \
-  --config "$ROOT_DIR/fly.toml" \
-  --dockerfile "$ROOT_DIR/deploy/Dockerfile.release" \
-  --primary-region "$FLY_REGION" \
-  --build-arg "AQUIFER_VERSION=$AQUIFER_VERSION" \
-  --flycast \
-  --no-public-ips \
-  --ha=false \
+DEPLOY_ARGS=(
+  "$ROOT_DIR"
+  --app "$APP_NAME"
+  --config "$ROOT_DIR/fly.toml"
+  --primary-region "$FLY_REGION"
+  --env "AQUIFER_MEMORY_LIMIT_MB=$AQUIFER_MEMORY_LIMIT_MB"
+  --vm-cpu-kind shared
+  --vm-cpus 1
+  --vm-memory "$VM_MEMORY_MB"
+  --flycast
+  --no-public-ips
+  --ha=false
   --yes
+)
+if [ "$SOURCE_BUILD" = true ]; then
+  DEPLOY_ARGS+=(--dockerfile "$ROOT_DIR/Dockerfile")
+else
+  DEPLOY_ARGS+=(
+    --dockerfile "$ROOT_DIR/deploy/Dockerfile.release"
+    --build-arg "AQUIFER_VERSION=$AQUIFER_VERSION"
+  )
+fi
+flyctl deploy "${DEPLOY_ARGS[@]}"
 
 flyctl status --app "$APP_NAME"
 printf '\nAquifer %s is private on Fly.io. Connect with:\n' "$AQUIFER_VERSION"
