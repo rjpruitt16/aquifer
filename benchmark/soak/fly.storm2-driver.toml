@@ -1,0 +1,42 @@
+# Driver for the one-hop storm test: the same schedule, endpoints and kill
+# as fly.storm-driver.toml, but jobs carry no webhook_url, the way a merchant
+# would put Aquifer in front of inbound Shopify webhooks. A job is delivered
+# when its endpoint first answers 2xx; jobs to dead endpoints finish when
+# Aquifer reports them failed. Status pages on 8081.
+app = "aquifer-storm2-driver"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile.driver"
+
+[env]
+  SOAK_NAME = "Aquifer storm, one hop"
+  SOAK_TARGET = "http://aquifer-storm2.internal:8080"
+  SOAK_SUPERVISOR = "http://aquifer-storm2.internal:9090"
+  SOAK_SELF = "http://aquifer-storm2-driver.internal:8080"
+  SOAK_DATA = "/data/storm-2"
+  SOAK_WS = "false"
+
+# Arguments to the image's /driver entrypoint.
+[processes]
+  app = "-phases=15m@500,2h@1500,45m@300 -receivers=200 -body-kb=4 -ramp-hour=-1 -peak-hour=-1 -reboot-every=0 -kill-min=75m -kill-max=75m -no-webhook"
+
+[http_service]
+  internal_port = 8081
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = false
+  min_machines_running = 1
+  processes = ["app"]
+
+[[mounts]]
+  source = "storm2_driver_data"
+  destination = "/data"
+  initial_size = "3gb"
+
+[[restart]]
+  policy = "always"
+
+[[vm]]
+  size = "performance-2x"
+  memory = "4gb"

@@ -204,6 +204,14 @@ The driver flags behind it are off unless set, so the soak is unchanged:
   flaky (30% 503), 3 are slow (1-8 s) and 14 are healthy. Results still
   come back on the driver's own `/hook`, which stays healthy in a storm.
 - `-body-kb=4` sends a random 0-4KB body with each job.
+- `-no-webhook` (with `-receivers`) leaves out `webhook_url`. That's the
+  one-hop case: a merchant puts Aquifer in front of inbound webhooks
+  (Shopify, payment or AI providers) and only needs each one forwarded to
+  its own service. A job counts as delivered when its endpoint first answers
+  2xx. A job to a dead endpoint is finished once Aquifer reports it failed.
+  `finished_without_webhook` then means Aquifer called the job completed
+  but its endpoint never saw it. `fly.storm2-*.toml` run this variant as
+  `aquifer-storm2` and `aquifer-storm2-driver`.
 
 `/status` gains a `storm` section: the schedule, the current phase, and per
 phase and endpoint class the requests the endpoints saw, jobs completed and

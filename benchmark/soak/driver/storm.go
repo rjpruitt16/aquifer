@@ -163,6 +163,14 @@ func (s *storm) recordHook(seq uint64, status string, e2e time.Duration, hasE2E,
 	}
 }
 
+// recordFailed counts a job Aquifer gave up on (found by the straggler
+// check) against its receiver's class, in the phase it's found in.
+func (s *storm) recordFailed(seq uint64) {
+	if c := s.classOfSeq(seq); c >= 0 {
+		s.stats[s.phaseIndex()][c].failed.Add(1)
+	}
+}
+
 // runPhases steps through the schedule, then stops offering load. The
 // generator keeps running, so the driver keeps observing the drain.
 func (d *driver) runPhases(stop <-chan struct{}) {
@@ -196,6 +204,7 @@ func (d *driver) serveReceivers() {
 			io.Copy(io.Discard, r.Body)
 			st := &d.storm.stats[d.storm.phaseIndex()][class]
 			st.hits.Add(1)
+			seq, seqErr := strconv.ParseUint(r.URL.Query().Get("s"), 10, 64)
 			switch class {
 			case classDead:
 				st.errs.Add(1)
@@ -209,6 +218,19 @@ func (d *driver) serveReceivers() {
 				}
 			case classSlow:
 				time.Sleep(time.Second + time.Duration(rand.Int64N(int64(7*time.Second))))
+			}
+			// With no webhook, the first 2xx a receiver sends is the delivery.
+			if d.cfg.NoWebhook && seqErr == nil {
+				e2e, hasE2E, dup := d.ledger.webhook(seq, "completed", time.Now())
+				if dup {
+					d.win.dups.Add(1)
+				} else {
+					d.win.completed.Add(1)
+				}
+				if hasE2E {
+					d.win.e2e.add(e2e)
+				}
+				d.storm.recordHook(seq, "completed", e2e, hasE2E, dup)
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.Write([]byte(`{"ok":true}`))

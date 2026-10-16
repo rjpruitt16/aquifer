@@ -60,3 +60,26 @@ func TestJobsSpreadOverReceiverPorts(t *testing.T) {
 		t.Fatal("without a storm there's no body and no status")
 	}
 }
+
+func TestNoWebhookFailedJobIsFinished(t *testing.T) {
+	l := openLedger(t.TempDir())
+	l.failedIsTerminal = true
+	seq := l.nextSeq()
+	l.accepted(seq, "job-1", time.Now().Add(-10*time.Minute))
+
+	if got := l.resolve(seq, "failed", time.Now()); got != "failed" {
+		t.Fatalf("resolve returned %q", got)
+	}
+	v := l.view()
+	if v.Counters.Failed != 1 || v.Outstanding != 0 || v.Counters.Lost != 0 {
+		t.Fatalf("counters %+v, outstanding %d", v.Counters, v.Outstanding)
+	}
+
+	// The soak's rule is unchanged: a failed job still waits for its webhook.
+	soak := openLedger(t.TempDir())
+	s2 := soak.nextSeq()
+	soak.accepted(s2, "job-2", time.Now().Add(-10*time.Minute))
+	if got := soak.resolve(s2, "failed", time.Now()); got != "" || soak.view().Outstanding != 1 {
+		t.Fatalf("soak closed a failed job without its webhook (%q)", got)
+	}
+}
