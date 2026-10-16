@@ -117,6 +117,14 @@ flyctl volumes create aquifer_data --size 1 --region iad
 flyctl deploy
 ```
 
+**AWS test node**
+```bash
+export AWS_REGION=us-east-2
+./examples/aws/deploy-quickstart.sh
+```
+
+The [AWS quick start](examples/aws/README.md) deploys the latest release to a CIDR-restricted one-vCPU EC2 instance with encrypted local storage. It is intended for evaluation, not production.
+
 Cross-platform release binaries (linux/darwin, amd64/arm64) are attached to every [GitHub Release](https://github.com/rjpruitt16/aquifer/releases); no Go toolchain required if you'd rather grab one directly.
 
 ---

@@ -1,0 +1,282 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Single-node Aquifer test deployment - installs a verified GitHub release on a
+  small EC2 instance with encrypted local storage and CIDR-restricted access
+
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+  com.aws.cloudformation.Context:
+    arch: One public EC2 node for short-lived Aquifer evaluation; no LB, TLS, or HA
+    must:
+      - Port 8080 ingress stays restricted to AllowedCidr
+      - Do not treat this test stack as a production topology
+    ref:
+      - at: examples/aws/README.md
+        has: deployment, access, upgrade, and production-boundary guidance
+        scope: quick start
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC for the test instance
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Public subnet with a route to an internet gateway
+  AllowedCidr:
+    Type: String
+    Description: IPv4 CIDR allowed to call Aquifer on port 8080, normally your public IP/32
+    AllowedPattern: "^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}/(?:[0-9]|[12][0-9]|3[0-2])$"
+    ConstraintDescription: Must be an IPv4 CIDR such as 203.0.113.10/32
+  InstanceType:
+    Type: String
+    Default: t2.micro
+    Description: EC2 type; t2.micro provides one vCPU and 1 GiB RAM for testing
+    AllowedValues: [t2.micro, t3.micro, t3.small]
+  RootVolumeGiB:
+    Type: Number
+    Default: 8
+    MinValue: 8
+    MaxValue: 100
+    Description: Encrypted gp3 root volume containing the Aquifer Pebble store
+  AquiferVersion:
+    Type: String
+    Default: latest
+    Description: GitHub release tag such as v0.14.0, or latest to resolve at first boot
+    AllowedPattern: "^(latest|v?[0-9]+\\.[0-9]+\\.[0-9]+)$"
+  DefaultRps:
+    Type: Number
+    Default: 5
+    MinValue: 1
+    Description: Initial per-upstream request rate for this test node
+  DefaultMaxConcurrent:
+    Type: Number
+    Default: 2
+    MinValue: 1
+    Description: Initial per-upstream concurrency for this test node
+  AllowedUrlDomains:
+    Type: String
+    Default: ""
+    Description: Optional comma-separated destination host allowlist for URL-routed jobs
+    AllowedPattern: "^$|^[A-Za-z0-9.-]+(,[A-Za-z0-9.-]+)*$"
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: Amazon Linux 2023 x86_64 AMI resolved by Systems Manager
+
+Resources:
+  AquiferSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Exposes the test HTTP listener only to an explicit operator-controlled CIDR
+        must:
+          - Never widen port 8080 to 0.0.0.0/0
+        mutable: change-with-constraints
+    Properties:
+      GroupDescription: !Sub "${AWS::StackName} Aquifer test access"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - Description: Aquifer HTTP from the explicitly allowed test network
+          IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: !Ref AllowedCidr
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-aquifer"
+
+  AquiferInstanceRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Enables audited Session Manager access without SSH keys or port 22
+        must:
+          - Do not attach application credentials; Aquifer needs none for this stack
+        mutable: review-required
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-aquifer"
+
+  AquiferInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref AquiferInstanceRole
+
+  AquiferInstance:
+    Type: AWS::EC2::Instance
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: >-
+          Keeps the evaluation path cheap and inspectable; systemd runs the verified
+          release and Pebble stores jobs on encrypted EBS across process or host reboots
+        must:
+          - Public endpoint is test-only HTTP and depends on narrow security-group ingress
+          - Stack deletion removes the test data volume
+        mutable: review-required
+        mutability:
+          InstanceType: free-to-tune
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref AquiferInstanceProfile
+      MetadataOptions:
+        HttpEndpoint: enabled
+        HttpTokens: required
+        HttpPutResponseHopLimit: 1
+        InstanceMetadataTags: disabled
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeleteOnTermination: true
+          DeviceIndex: "0"
+          GroupSet:
+            - !Ref AquiferSecurityGroup
+          SubnetId: !Ref SubnetId
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: true
+            VolumeSize: !Ref RootVolumeGiB
+            VolumeType: gp3
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-aquifer"
+        - Key: aquifer:purpose
+          Value: test
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          exec > >(tee /var/log/aquifer-install.log | logger -t aquifer-install -s 2>/dev/console) 2>&1
+
+          dnf install -y curl gzip tar
+
+          if ! id aquifer >/dev/null 2>&1; then
+            useradd --system --create-home --home-dir /var/lib/aquifer --shell /sbin/nologin aquifer
+          fi
+          install -d -m 0750 -o aquifer -g aquifer /var/lib/aquifer/data
+          install -d -m 0755 /etc/aquifer /tmp/aquifer-install
+
+          cd /tmp/aquifer-install
+          REQUESTED_VERSION='${AquiferVersion}'
+          if [ "$REQUESTED_VERSION" = "latest" ]; then
+            RELEASE_URL=$(curl --fail --silent --show-error --location --head \
+              --output /dev/null --write-out '%{url_effective}' \
+              https://github.com/rjpruitt16/aquifer/releases/latest)
+            VERSION=$(basename "$RELEASE_URL")
+          else
+            VERSION="$REQUESTED_VERSION"
+            case "$VERSION" in
+              v*) ;;
+              *) VERSION="v$VERSION" ;;
+            esac
+          fi
+
+          RELEASE_NUMBER=$(printf '%s' "$VERSION" | sed 's/^v//')
+          case "$(uname -m)" in
+            x86_64) RELEASE_ARCH=amd64 ;;
+            aarch64|arm64) RELEASE_ARCH=arm64 ;;
+            *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+
+          ASSET="aquifer_"$RELEASE_NUMBER"_linux_"$RELEASE_ARCH".tar.gz"
+          RELEASE_BASE="https://github.com/rjpruitt16/aquifer/releases/download/$VERSION"
+          curl --fail --silent --show-error --location --retry 5 --retry-all-errors \
+            --output "$ASSET" "$RELEASE_BASE/$ASSET"
+          curl --fail --silent --show-error --location --retry 5 --retry-all-errors \
+            --output checksums.txt "$RELEASE_BASE/checksums.txt"
+          awk -v asset="$ASSET" '$2 == asset { print }' checksums.txt > "$ASSET.sha256"
+          test -s "$ASSET.sha256"
+          sha256sum --check "$ASSET.sha256"
+          tar --extract --gzip --file "$ASSET"
+          install -m 0755 aquifer /usr/local/bin/aquifer
+          printf '%s\n' "$VERSION" > /etc/aquifer/release
+
+          cat > /etc/aquifer/aquifer.yml <<'AQUIFER_CONFIG'
+          defaults:
+            rps: ${DefaultRps}
+            max_concurrent: ${DefaultMaxConcurrent}
+          AQUIFER_CONFIG
+
+          cat > /etc/systemd/system/aquifer.service <<'SYSTEMD_UNIT'
+          [Unit]
+          Description=Aquifer durable request coordinator
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User=aquifer
+          Group=aquifer
+          Environment=AQUIFER_ADAPTER=http
+          Environment=PORT=8080
+          Environment=DB_PATH=/var/lib/aquifer/data
+          Environment=CONFIG_PATH=/etc/aquifer/aquifer.yml
+          Environment=AQUIFER_MEMORY_LIMIT_MB=768
+          ExecStart=/usr/local/bin/aquifer
+          Restart=on-failure
+          RestartSec=5
+          TimeoutStopSec=60
+          NoNewPrivileges=true
+          PrivateTmp=true
+          PrivateDevices=true
+          ProtectHome=true
+          ProtectSystem=strict
+          ProtectKernelTunables=true
+          ProtectControlGroups=true
+          ReadWritePaths=/var/lib/aquifer
+          RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+          CapabilityBoundingSet=
+          AmbientCapabilities=
+          LimitNOFILE=65536
+
+          [Install]
+          WantedBy=multi-user.target
+          SYSTEMD_UNIT
+
+          ALLOWED_DOMAINS='${AllowedUrlDomains}'
+          if [ -n "$ALLOWED_DOMAINS" ]; then
+            sed -i "/Environment=PORT=8080/a Environment=AQUIFER_ALLOWED_URL_DOMAINS=$ALLOWED_DOMAINS" \
+              /etc/systemd/system/aquifer.service
+          fi
+
+          systemctl daemon-reload
+          systemctl enable --now aquifer
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8080/health >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          systemctl status aquifer --no-pager || true
+          journalctl -u aquifer --no-pager -n 100 || true
+          exit 1
+
+Outputs:
+  InstanceId:
+    Description: EC2 instance running Aquifer
+    Value: !Ref AquiferInstance
+  PublicAquiferUrl:
+    Description: Test-only HTTP URL, reachable solely from AllowedCidr
+    Value: !Sub "http://${AquiferInstance.PublicIp}:8080"
+  PrivateAquiferUrl:
+    Description: Private VPC URL for callers with network access to this subnet
+    Value: !Sub "http://${AquiferInstance.PrivateIp}:8080"
+  SessionManagerCommand:
+    Description: Open an SSH-less shell after the SSM agent registers
+    Value: !Sub "aws ssm start-session --target ${AquiferInstance} --region ${AWS::Region}"
+  ServiceLogCommand:
+    Description: Run inside a Session Manager shell to inspect Aquifer
+    Value: sudo journalctl -u aquifer -f
