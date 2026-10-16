@@ -511,6 +511,7 @@ func (o *observer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"webhook_mode":  o.d.webhook.modeName(),
 		"ledger":        v,
 		"websocket":     o.wsStatus(),
+		"storm":         o.d.storm.status(),
 		"last_minute":   last,
 		"last_hour":     lastHour,
 		"daily":         days,
