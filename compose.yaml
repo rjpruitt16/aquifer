@@ -1,0 +1,36 @@
+name: aquifer
+
+services:
+  aquifer:
+    image: aquifer:${AQUIFER_VERSION:-latest}
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.release
+      args:
+        AQUIFER_VERSION: ${AQUIFER_VERSION:-latest}
+    environment:
+      AQUIFER_ADAPTER: http
+      PORT: "8080"
+      DB_PATH: /data/aquifer
+      L8_KEY_PATH: /data/.l8-key
+      AQUIFER_ALLOWED_URL_DOMAINS: ${AQUIFER_ALLOWED_URL_DOMAINS:-}
+      AQUIFER_MEMORY_LIMIT_MB: ${AQUIFER_MEMORY_LIMIT_MB:-768}
+    ports:
+      - "${AQUIFER_HOST_ADDRESS:-127.0.0.1}:${AQUIFER_HOST_PORT:-8080}:8080"
+    volumes:
+      - aquifer_data:/data
+    restart: unless-stopped
+    stop_grace_period: 60s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--output-document=-", "http://127.0.0.1:8080/ready"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  aquifer_data:

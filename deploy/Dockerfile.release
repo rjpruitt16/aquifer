@@ -1,0 +1,43 @@
+FROM alpine:3.22 AS release
+
+RUN apk add --no-cache ca-certificates curl tar
+
+ARG AQUIFER_VERSION=latest
+ARG TARGETARCH
+
+WORKDIR /download
+RUN set -eux; \
+    version="$AQUIFER_VERSION"; \
+    if [ "$version" = "latest" ]; then \
+      release_url=$(curl --fail --silent --show-error --location --head \
+        --output /dev/null --write-out '%{url_effective}' \
+        https://github.com/rjpruitt16/aquifer/releases/latest); \
+      version=$(basename "$release_url"); \
+    fi; \
+    case "$version" in v*) ;; *) version="v$version" ;; esac; \
+    release_number=$(printf '%s' "$version" | sed 's/^v//'); \
+    case "$TARGETARCH" in amd64|arm64) ;; *) echo "Unsupported architecture: $TARGETARCH" >&2; exit 1 ;; esac; \
+    asset="aquifer_${release_number}_linux_${TARGETARCH}.tar.gz"; \
+    release_base="https://github.com/rjpruitt16/aquifer/releases/download/$version"; \
+    curl --fail --silent --show-error --location --retry 5 --retry-all-errors \
+      --output "$asset" "$release_base/$asset"; \
+    curl --fail --silent --show-error --location --retry 5 --retry-all-errors \
+      --output checksums.txt "$release_base/checksums.txt"; \
+    awk -v asset="$asset" '$2 == asset { print }' checksums.txt > "$asset.sha256"; \
+    test -s "$asset.sha256"; \
+    sha256sum -c "$asset.sha256"; \
+    tar --extract --gzip --file "$asset" aquifer; \
+    ./aquifer --version
+
+FROM alpine:3.22
+
+RUN apk add --no-cache ca-certificates
+WORKDIR /app
+COPY --from=release /download/aquifer /usr/local/bin/aquifer
+
+EXPOSE 8080
+ENV AQUIFER_ADAPTER=http \
+    PORT=8080 \
+    DB_PATH=/data/aquifer
+
+ENTRYPOINT ["/usr/local/bin/aquifer"]

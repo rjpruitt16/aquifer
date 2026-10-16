@@ -100,22 +100,21 @@ go install github.com/rjpruitt16/aquifer/cmd/aquifer@latest
 aquifer
 ```
 
-**Docker**
+**Docker Compose**
 ```bash
-docker run -p 8080:8080 -v $(pwd)/data:/data \
-  -e AQUIFER_ADAPTER=http \
-  -e DB_PATH=/data/aquifer.db \
-  ghcr.io/rjpruitt16/aquifer
+docker compose build --pull --no-cache
+docker compose up --detach
+curl http://127.0.0.1:8080/ready
 ```
+
+Compose installs the latest checksum-verified release, persists `/data`, and listens only on loopback by default. See the [Docker Compose guide](examples/docker-compose/README.md) for version pinning and destination allowlisting.
 
 **Fly.io**
 ```bash
-git clone https://github.com/rjpruitt16/aquifer
-cd aquifer
-flyctl launch --name my-aquifer --no-deploy
-flyctl volumes create aquifer_data --size 1 --region iad
-flyctl deploy
+./examples/fly/deploy-quickstart.sh
 ```
+
+The [Fly.io quick start](examples/fly/README.md) deploys the latest checksum-verified release to a private one-CPU Machine with an encrypted persistent volume. Use `fly proxy` for local evaluation; Aquifer is not exposed publicly by default.
 
 **AWS test node**
 ```bash
