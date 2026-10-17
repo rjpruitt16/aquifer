@@ -10,14 +10,15 @@ kill_timeout = 30
   dockerfile = "Dockerfile.spillway-target"
 
 [env]
-  SOAK_DATA_DIR = "/data/run-3j"
+  SOAK_DATA_DIR = "/data/run-3l"
   # Jobs, results, idempotency keys and WebSocket fallback transcripts in
-  # Spillway's own RocksDB store (no Mnesia since spillway#53). Run 3j is
-  # run 3i's build (spillway d554e64) on two CPUs instead of one: in 3i a
-  # 2,000-entry cleanup read took 5 seconds waiting for the one CPU, and
-  # whole minutes went by with no completions. Same memory limit, so only
-  # the CPU count changes.
-  SPILLWAY_STORE_DIR = "/data/run-3j/store"
+  # Spillway's own RocksDB store (no Mnesia since spillway#53). Run 3l is
+  # the week-long run on two CPUs, which run 3j showed Spillway needs: on
+  # one CPU, cleanup fell behind. 3l adds spillway#65 (memory ceiling
+  # default, sync-lag admission) and #69 (webhooks default to 10 retries,
+  # about 13 minutes, instead of 4, about 15 seconds). Run 3k ran #68's
+  # unlimited default for its first hour and was replaced by this run.
+  SPILLWAY_STORE_DIR = "/data/run-3l/store"
   # WebSocket transcripts in a local Valkey, as on the Aquifer target.
   SOAK_VALKEY = "1"
   SOAK_VALKEY_MAXMEMORY = "600mb"
@@ -26,7 +27,7 @@ kill_timeout = 30
   # Admission compares this with resident memory. Leaves room for Valkey's
   # 600MB ceiling on the 2GB machine.
   SPILLWAY_MEMORY_LIMIT_MB = "1200"
-  # The volume has about 5GB free (earlier runs' directories remain);
+  # The volume has about 8GB free (run 3j and 3k directories remain);
   # refuse new jobs well before it fills.
   SPILLWAY_DB_MAX_BYTES = "3500000000"
   SPILLWAY_WS_STREAM_MAX_EVENTS = "500"
