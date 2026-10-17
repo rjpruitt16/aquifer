@@ -10,12 +10,13 @@ kill_timeout = 30
   dockerfile = "Dockerfile.spillway-target"
 
 [env]
-  SOAK_DATA_DIR = "/data/run-3h"
+  SOAK_DATA_DIR = "/data/run-3i"
   # Jobs, results, idempotency keys and WebSocket fallback transcripts in
-  # Spillway's own RocksDB store (no Mnesia since spillway#53). Run 3h
-  # starts fresh after spillway#60 (expiry still fell behind in run 3g;
-  # see spillway#59). Runs 3e and 3f were deleted to free the volume.
-  SPILLWAY_STORE_DIR = "/data/run-3h/store"
+  # Spillway's own RocksDB store (no Mnesia since spillway#53). Run 3i
+  # starts fresh after spillway#62 (admission refuses intake while expiry
+  # is more than 5 minutes behind; run 3h fell 3.5 hours behind) and #63
+  # (WebSocket client slots freed when their holder exits).
+  SPILLWAY_STORE_DIR = "/data/run-3i/store"
   # WebSocket transcripts in a local Valkey, as on the Aquifer target.
   SOAK_VALKEY = "1"
   SOAK_VALKEY_MAXMEMORY = "600mb"
