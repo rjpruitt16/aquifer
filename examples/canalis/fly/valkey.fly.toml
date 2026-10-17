@@ -1,0 +1,15 @@
+primary_region = "iad"
+kill_signal = "SIGTERM"
+kill_timeout = "30s"
+
+[processes]
+  app = "valkey-server --appendonly yes --appendfsync everysec --dir /data"
+
+[[mounts]]
+  source = "valkey_data"
+  destination = "/data"
+
+[[vm]]
+  memory = "256mb"
+  cpu_kind = "shared"
+  cpus = 1

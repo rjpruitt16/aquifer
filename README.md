@@ -124,6 +124,13 @@ export AWS_REGION=us-east-2
 
 The [AWS quick start](examples/aws/README.md) deploys the latest release to a CIDR-restricted one-vCPU EC2 instance with encrypted local storage. It is intended for evaluation, not production.
 
+**Canalis fleet**
+```bash
+docker compose -f examples/canalis/compose.yaml up --detach --build
+```
+
+The [Canalis + Aquifer quick start](examples/canalis/README.md) runs two independently persisted Aquifer nodes behind Canalis. The same guide includes tested two-host AWS and private Fly.io deployment paths.
+
 Cross-platform release binaries (linux/darwin, amd64/arm64) are attached to every [GitHub Release](https://github.com/rjpruitt16/aquifer/releases); no Go toolchain required if you'd rather grab one directly.
 
 ---

@@ -1,0 +1,347 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Two-host Canalis and Aquifer evaluation fleet - Docker Compose runs one
+  Aquifer node per encrypted EC2 host while only Canalis is operator-accessible
+
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+  com.aws.cloudformation.Context:
+    arch: Host A runs Valkey + Canalis + Aquifer A; Host B runs Aquifer B; Canalis is the only operator-facing port
+    must:
+      - Port 8080 on Host A stays restricted to AllowedCidr and Host B registration traffic
+      - Port 8080 on Host B accepts traffic only from Host A
+      - This is a short-lived evaluation stack, not a HA production topology
+    ref:
+      - at: examples/canalis/aws/README.md
+        has: deployment, verification, security boundaries, and cleanup
+        scope: quick start
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC for both test hosts
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Public subnet with outbound internet access for release downloads
+  AllowedCidr:
+    Type: String
+    Description: IPv4 CIDR allowed to call Canalis, normally the operator public IP/32
+    AllowedPattern: "^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}/(?:[0-9]|[12][0-9]|3[0-2])$"
+    ConstraintDescription: Must be an IPv4 CIDR such as 203.0.113.10/32
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    Description: Small x86 EC2 type used for both evaluation hosts
+    AllowedValues: [t2.micro, t3.micro, t3.small]
+  RootVolumeGiB:
+    Type: Number
+    Default: 8
+    MinValue: 8
+    MaxValue: 100
+    Description: Encrypted gp3 root volume size for each host
+  AquiferVersion:
+    Type: String
+    Default: latest
+    Description: Aquifer GitHub release tag such as v0.14.0, or latest
+    AllowedPattern: "^(latest|v?[0-9]+\\.[0-9]+\\.[0-9]+)$"
+  CanalisVersion:
+    Type: String
+    Default: "0.2"
+    Description: Published ghcr.io/rjpruitt16/canalis-rs image tag
+    AllowedPattern: "^(latest|[0-9]+\\.[0-9]+(?:\\.[0-9]+)?)$"
+  QuickStartRef:
+    Type: String
+    Default: main
+    Description: Aquifer Git ref containing the Compose quick start
+    AllowedPattern: "^[A-Za-z0-9._/-]+$"
+  ComposeVersion:
+    Type: String
+    Default: v2.40.2
+    Description: Docker Compose release installed as a verified CLI plugin
+    AllowedPattern: "^v[0-9]+\\.[0-9]+\\.[0-9]+$"
+  AllowedUrlDomains:
+    Type: String
+    Default: postman-echo.com
+    Description: Comma-separated destination allowlist for quick-start jobs
+    AllowedPattern: "^[A-Za-z0-9.-]+(,[A-Za-z0-9.-]+)*$"
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: Amazon Linux 2023 x86_64 AMI resolved by Systems Manager
+
+Resources:
+  CanalisSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Makes Canalis the sole operator-facing service while leaving Valkey and local Aquifer unpublished
+        must:
+          - Never widen port 8080 beyond an explicit operator CIDR
+        mutable: change-with-constraints
+    Properties:
+      GroupDescription: !Sub "${AWS::StackName} Canalis test access"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - Description: Canalis HTTP from the explicitly allowed test network
+          IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: !Ref AllowedCidr
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-canalis"
+
+  AquiferWorkerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Allows Canalis on Host A to dispatch only to Aquifer B on Host B
+        must:
+          - Aquifer B must not accept public ingress
+        mutable: change-with-constraints
+    Properties:
+      GroupDescription: !Sub "${AWS::StackName} remote Aquifer access"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - Description: Aquifer HTTP only from the Canalis host security group
+          IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref CanalisSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-aquifer-worker"
+
+  CanalisRegistrationFromWorker:
+    Type: AWS::EC2::SecurityGroupIngress
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Lets Aquifer B register and heartbeat to Canalis without exposing any additional source
+        must:
+          - Source remains the worker security group
+        mutable: change-with-constraints
+    Properties:
+      Description: Aquifer B registration and heartbeat traffic
+      GroupId: !Ref CanalisSecurityGroup
+      IpProtocol: tcp
+      FromPort: 8080
+      ToPort: 8080
+      SourceSecurityGroupId: !Ref AquiferWorkerSecurityGroup
+
+  HostRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Enables audited Session Manager access without SSH keys or port 22
+        must:
+          - Do not attach application credentials; the quick start needs none
+        mutable: review-required
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-hosts"
+
+  HostInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref HostRole
+
+  CanalisHost:
+    Type: AWS::EC2::Instance
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Co-locates the evaluation control plane, assignment store, and first Aquifer node to keep the two-host demo small
+        must:
+          - Canalis is the only container port published outside the host
+          - Root EBS deletion intentionally removes all test data with the stack
+        mutable: review-required
+        mutability:
+          InstanceType: free-to-tune
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref HostInstanceProfile
+      MetadataOptions:
+        HttpEndpoint: enabled
+        HttpTokens: required
+        HttpPutResponseHopLimit: 2
+        InstanceMetadataTags: disabled
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeleteOnTermination: true
+          DeviceIndex: "0"
+          GroupSet:
+            - !Ref CanalisSecurityGroup
+          SubnetId: !Ref SubnetId
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: true
+            VolumeSize: !Ref RootVolumeGiB
+            VolumeType: gp3
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-canalis"
+        - Key: aquifer:purpose
+          Value: test
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          exec > >(tee /var/log/canalis-aquifer-install.log | logger -t canalis-aquifer-install -s 2>/dev/console) 2>&1
+
+          dnf install -y docker git curl
+          systemctl enable --now docker
+
+          install -d -m 0755 /usr/local/lib/docker/cli-plugins /tmp/compose-install
+          cd /tmp/compose-install
+          COMPOSE_ASSET=docker-compose-linux-x86_64
+          COMPOSE_BASE=https://github.com/docker/compose/releases/download/${ComposeVersion}
+          curl --fail --silent --show-error --location --retry 5 --retry-all-errors --output "$COMPOSE_ASSET" "$COMPOSE_BASE/$COMPOSE_ASSET"
+          curl --fail --silent --show-error --location --retry 5 --retry-all-errors --output checksums.txt "$COMPOSE_BASE/checksums.txt"
+          grep " $COMPOSE_ASSET$" checksums.txt > "$COMPOSE_ASSET.sha256"
+          test -s "$COMPOSE_ASSET.sha256"
+          sha256sum --check "$COMPOSE_ASSET.sha256"
+          install -m 0755 "$COMPOSE_ASSET" /usr/local/lib/docker/cli-plugins/docker-compose
+          docker compose version
+
+          git clone --depth 1 --branch '${QuickStartRef}' https://github.com/rjpruitt16/aquifer.git /opt/aquifer
+          cd /opt/aquifer/examples/canalis
+          cat > .env <<'QUICKSTART_ENV'
+          AQUIFER_VERSION=${AquiferVersion}
+          CANALIS_VERSION=${CanalisVersion}
+          AQUIFER_ALLOWED_URL_DOMAINS=${AllowedUrlDomains}
+          AQUIFER_MEMORY_LIMIT_MB=256
+          CANALIS_HOST_ADDRESS=0.0.0.0
+          QUICKSTART_ENV
+
+          docker compose up --detach --build valkey canalis aquifer-a
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:8080/health | grep --quiet '"total":1'; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose ps
+          docker compose logs --no-color --tail 200
+          exit 1
+
+  AquiferWorkerHost:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - CanalisRegistrationFromWorker
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Places the second independently persisted Aquifer node on a separate EC2 failure domain
+        must:
+          - Port 8080 is reachable only from the Canalis host security group
+          - Root EBS deletion intentionally removes this node's test queue with the stack
+        mutable: review-required
+        mutability:
+          InstanceType: free-to-tune
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref HostInstanceProfile
+      MetadataOptions:
+        HttpEndpoint: enabled
+        HttpTokens: required
+        HttpPutResponseHopLimit: 2
+        InstanceMetadataTags: disabled
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeleteOnTermination: true
+          DeviceIndex: "0"
+          GroupSet:
+            - !Ref AquiferWorkerSecurityGroup
+          SubnetId: !Ref SubnetId
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: true
+            VolumeSize: !Ref RootVolumeGiB
+            VolumeType: gp3
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-aquifer-worker"
+        - Key: aquifer:purpose
+          Value: test
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          exec > >(tee /var/log/canalis-aquifer-install.log | logger -t canalis-aquifer-install -s 2>/dev/console) 2>&1
+
+          dnf install -y docker git curl
+          systemctl enable --now docker
+
+          install -d -m 0755 /usr/local/lib/docker/cli-plugins /tmp/compose-install
+          cd /tmp/compose-install
+          COMPOSE_ASSET=docker-compose-linux-x86_64
+          COMPOSE_BASE=https://github.com/docker/compose/releases/download/${ComposeVersion}
+          curl --fail --silent --show-error --location --retry 5 --retry-all-errors --output "$COMPOSE_ASSET" "$COMPOSE_BASE/$COMPOSE_ASSET"
+          curl --fail --silent --show-error --location --retry 5 --retry-all-errors --output checksums.txt "$COMPOSE_BASE/checksums.txt"
+          grep " $COMPOSE_ASSET$" checksums.txt > "$COMPOSE_ASSET.sha256"
+          test -s "$COMPOSE_ASSET.sha256"
+          sha256sum --check "$COMPOSE_ASSET.sha256"
+          install -m 0755 "$COMPOSE_ASSET" /usr/local/lib/docker/cli-plugins/docker-compose
+          docker compose version
+
+          git clone --depth 1 --branch '${QuickStartRef}' https://github.com/rjpruitt16/aquifer.git /opt/aquifer
+          cd /opt/aquifer/examples/canalis
+          cat > .env <<'QUICKSTART_ENV'
+          AQUIFER_VERSION=${AquiferVersion}
+          AQUIFER_ALLOWED_URL_DOMAINS=${AllowedUrlDomains}
+          AQUIFER_MEMORY_LIMIT_MB=512
+          AQUIFER_B_REGISTRY_URL=http://${CanalisHost.PrivateIp}:8080/register
+          QUICKSTART_ENV
+          cat > worker.compose.yaml <<'WORKER_COMPOSE'
+          services:
+            aquifer-b:
+              ports:
+                - "8080:8080"
+          WORKER_COMPOSE
+
+          docker compose -f compose.yaml -f worker.compose.yaml up --detach --build --no-deps aquifer-b
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:8080/ready >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose -f compose.yaml -f worker.compose.yaml ps
+          docker compose -f compose.yaml -f worker.compose.yaml logs --no-color --tail 200
+          exit 1
+
+Outputs:
+  CanalisUrl:
+    Description: Test-only Canalis HTTP URL, reachable solely from AllowedCidr
+    Value: !Sub "http://${CanalisHost.PublicIp}:8080"
+  CanalisHostId:
+    Description: EC2 instance running Valkey, Canalis, and Aquifer A
+    Value: !Ref CanalisHost
+  AquiferWorkerHostId:
+    Description: EC2 instance running Aquifer B
+    Value: !Ref AquiferWorkerHost
+  CanalisPrivateUrl:
+    Description: Private VPC URL used by Aquifer B for registration
+    Value: !Sub "http://${CanalisHost.PrivateIp}:8080"
+  CanalisSessionManagerCommand:
+    Description: Open a shell on the Canalis host without SSH
+    Value: !Sub "aws ssm start-session --target ${CanalisHost} --region ${AWS::Region}"
+  AquiferWorkerSessionManagerCommand:
+    Description: Open a shell on the Aquifer worker without SSH
+    Value: !Sub "aws ssm start-session --target ${AquiferWorkerHost} --region ${AWS::Region}"
