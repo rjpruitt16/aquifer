@@ -8,7 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"runtime"
+	"runtime/metrics"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -121,10 +121,10 @@ type AdmissionController struct {
 	rejectStreak atomic.Int64
 
 	// Memory and DB size are sampled at most once per admissionSampleTTL.
-	// Check runs on every submission, and both readings are expensive:
-	// ReadMemStats stops the world, and a Pebble store's size means
-	// stat-ing every file in its directory. Under load that was about 9%
-	// of CPU, for numbers that barely move in a few hundred milliseconds.
+	// Check runs on every submission, and a Pebble store's size means
+	// stat-ing every file in its directory. Under load that (with the
+	// stop-the-world ReadMemStats memory used to come from) was about 9% of
+	// CPU, for numbers that barely move in a few hundred milliseconds.
 	memSample sampledInt64
 	dbSample  sampledInt64
 }
@@ -147,10 +147,32 @@ func (s *sampledInt64) get(read func() int64) int64 {
 	return s.value
 }
 
+// processMemoryMB is the memory the Go runtime is holding: everything it
+// has mapped from the OS, less what it has already handed back. It used to
+// be MemStats.Sys, which counts what was handed back too and so never comes
+// down. In storm test 2 one spike past the 1,400MB limit left Sys at
+// 1,417MB for good while resident memory sat near 750MB, and admission
+// refused every job from then on. runtime/metrics reads this without
+// stopping the world, unlike ReadMemStats.
 func processMemoryMB() int64 {
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-	return int64(m.Sys / (1024 * 1024))
+	total, released := goMemoryBytes()
+	return int64((total - released) / (1024 * 1024))
+}
+
+// reservedMemoryMB is everything the runtime has mapped, released or not
+// (what MemStats.Sys reports). /health shows it beside processMemoryMB.
+func reservedMemoryMB() int64 {
+	total, _ := goMemoryBytes()
+	return int64(total / (1024 * 1024))
+}
+
+func goMemoryBytes() (total, released uint64) {
+	samples := []metrics.Sample{
+		{Name: "/memory/classes/total:bytes"},
+		{Name: "/memory/classes/heap/released:bytes"},
+	}
+	metrics.Read(samples)
+	return samples[0].Value.Uint64(), samples[1].Value.Uint64()
 }
 
 func NewAdmissionController(limits AdmissionLimits, dbPath string) *AdmissionController {
@@ -205,9 +227,7 @@ func (c *AdmissionController) Check() AdmissionDecision {
 // Snapshot reports current admission pressure for /health, independent of
 // whether any request is currently being rejected.
 func (c *AdmissionController) Snapshot() map[string]any {
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-	currentMB := int64(m.Sys / (1024 * 1024))
+	currentMB := processMemoryMB()
 
 	var dbBytes int64
 	if c.dbPath != "" {
@@ -216,6 +236,7 @@ func (c *AdmissionController) Snapshot() map[string]any {
 
 	return map[string]any{
 		"memory_mb":           currentMB,
+		"memory_reserved_mb":  reservedMemoryMB(),
 		"memory_limit_mb":     c.limits.MemoryLimitMB,
 		"db_bytes":            dbBytes,
 		"db_max_bytes":        c.limits.DBMaxBytes,

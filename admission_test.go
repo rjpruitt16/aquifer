@@ -7,6 +7,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"testing"
 )
 
@@ -295,5 +297,42 @@ func TestRetryAfterDefaultsWhenUnconfigured(t *testing.T) {
 
 	if got := c.RetryAfterSeconds(); got != 5 {
 		t.Fatalf("expected default base Retry-After=5 with no rejections yet, got %d", got)
+	}
+}
+
+// Storm test 2: one spike past the limit left MemStats.Sys above it for
+// good, and admission refused every job from then on. The measure admission
+// uses now has to come back down once the runtime returns the memory.
+func TestAdmissionMemoryComesBackDownAfterASpike(t *testing.T) {
+	debug.FreeOSMemory()
+	before := processMemoryMB()
+
+	spike := make([][]byte, 0, 256)
+	for i := 0; i < 256; i++ {
+		b := make([]byte, 1<<20)
+		for j := range b {
+			b[j] = byte(j)
+		}
+		spike = append(spike, b)
+	}
+	during := processMemoryMB()
+	if during < before+200 {
+		t.Fatalf("a 256MB spike should show: before %dMB, during %dMB", before, during)
+	}
+	runtime.KeepAlive(spike)
+	spike = nil
+
+	debug.FreeOSMemory()
+	after := processMemoryMB()
+	if after > before+64 {
+		t.Fatalf("memory in use stayed up after the spike was freed: before %dMB, during %dMB, after %dMB", before, during, after)
+	}
+	if reserved := reservedMemoryMB(); reserved < during {
+		t.Fatalf("reserved memory (the old measure) should still count the spike: %dMB < %dMB", reserved, during)
+	}
+
+	c := NewAdmissionController(AdmissionLimits{MemoryLimitMB: during - 64}, "")
+	if d := c.Check(); !d.Allowed {
+		t.Fatalf("after the spike, admission still refuses: %+v", d)
 	}
 }
