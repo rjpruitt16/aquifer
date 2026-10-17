@@ -185,8 +185,8 @@ func (c *cluster) targetFor(owner string) string {
 func (d *driver) clusterPost(body string) (status int, owner string, rb []byte, err error) {
 	c := d.cluster
 	node := c.pick()
-	failedOver := false
-	for attempt := 0; ; attempt++ {
+	failedOver, retried := false, false
+	for {
 		var resp *http.Response
 		resp, err = d.client.Post(node.Target+"/jobs", "application/json", strings.NewReader(body))
 		if err != nil {
@@ -201,7 +201,8 @@ func (d *driver) clusterPost(body string) (status int, owner string, rb []byte, 
 		rb, _ = io.ReadAll(resp.Body)
 		resp.Body.Close()
 		status, owner = resp.StatusCode, resp.Header.Get("X-Aquifer-Cluster-Owner")
-		if status == http.StatusGatewayTimeout && attempt == 0 {
+		if status == http.StatusGatewayTimeout && !retried {
+			retried = true
 			c.retried504.Add(1)
 			time.Sleep(time.Second)
 			continue
