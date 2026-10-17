@@ -11,8 +11,8 @@ kill_timeout = 30
   dockerfile = "Dockerfile.target"
 
 [env]
-  SOAK_DATA_DIR = "/data/storm-1"
-  DB_PATH = "/data/storm-1/aquifer.db"
+  SOAK_DATA_DIR = "/data/storm-3"
+  DB_PATH = "/data/storm-3/aquifer.db"
 
 [[mounts]]
   source = "aquifer_storm_data"

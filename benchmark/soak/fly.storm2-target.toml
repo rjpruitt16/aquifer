@@ -11,8 +11,8 @@ kill_timeout = 30
   dockerfile = "Dockerfile.target"
 
 [env]
-  SOAK_DATA_DIR = "/data/storm-2b"
-  DB_PATH = "/data/storm-2b/aquifer.db"
+  SOAK_DATA_DIR = "/data/storm-4"
+  DB_PATH = "/data/storm-4/aquifer.db"
   # Admission's memory ceiling. Unset (the default), storm 1 grew to 1.8GB
   # at 1,500/s on this 2GB machine and was OOM-killed twice without
   # refusing a request. 1,400MB leaves room for the page cache.

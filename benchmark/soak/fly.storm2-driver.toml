@@ -14,7 +14,7 @@ primary_region = "iad"
   SOAK_TARGET = "http://aquifer-storm2.internal:8080"
   SOAK_SUPERVISOR = "http://aquifer-storm2.internal:9090"
   SOAK_SELF = "http://aquifer-storm2-driver.internal:8080"
-  SOAK_DATA = "/data/storm-2b"
+  SOAK_DATA = "/data/storm-4"
   SOAK_WS = "false"
 
 # Arguments to the image's /driver entrypoint.
