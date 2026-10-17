@@ -32,6 +32,15 @@ Exposed through pluggable adapters (an MCP server for agent tool-calling, a plai
 
 **Terms used in these docs:** the **origin** is whoever sends a job to Aquifer: your app, an agent, a gateway, or Inlet. The **target API** is the service Aquifer sends it on to, whose capacity it protects. Some names in the code, config and headers still say "upstream" for the target API, such as `AQUIFER_MAX_PENDING_PER_UPSTREAM` and `X-Aqueduct-Upstream-URL`. They mean the same thing and keep working.
 
+**Aquifer is not an API gateway.** It does not provide general end-user authentication, authorization policy, WAF rules, CORS policy, or arbitrary public routing. Keep it on a private network behind a trusted front door that decides who the caller is and which target is allowed. Aquifer durably queues the accepted work and controls how quickly it reaches that target.
+
+```
+API / agent callers  →  API gateway or Canalis  →  Aquifer  →  target API
+webhook providers    →  Inlet                   →  Aquifer  →  webhook handlers
+```
+
+Use **[Canalis](https://github.com/rjpruitt16/canalis-rs)** as the trusted front door for API or agent traffic when you need JWT verification, sticky tenant placement, and fleet-wide capacity coordination; it can also sit behind an existing gateway. Use **[Inlet](https://github.com/rjpruitt16/inlet)** for provider webhooks: it verifies provider signatures and queues accepted deliveries into Aquifer. Aquifer is the capacity-aware load balancer behind either one: it persists jobs, enforces fairness, and paces dispatch to the target API.
+
 ---
 
 ## Use cases
@@ -60,11 +69,11 @@ your app  →  POST /jobs to Aquifer  →  database / CI runner / OpenAI / Strip
 ```
 Calling something with its own capacity limit (a database read replica, a CI runner, a third-party API)? Aquifer queues the calls durably and dispatches them at your configured rate, so a burst from your own side never becomes the thing that takes the target API down. Works especially well closed-loop: if the target API already speaks `X-Aqueduct-*` headers, it can tell Aquifer to back off in real time instead of you guessing a static rate.
 
-**Edge load balancer → gateway — pace and route at the edge**
+**Capacity-aware reverse proxy — pace and route behind your gateway**
 ```
-your users  →  POST /proxy to Aquifer  →  your resources (paced, routed, at the speed you can handle)
+your users  →  trusted gateway  →  POST /proxy to Aquifer  →  your resources
 ```
-Point Aquifer at your resources like a normal reverse proxy, close to the caller. It tries the request directly first (a healthy resource sees no queue at all) and only falls back to durable queuing when something's actually overloaded, on the same connection, staying in queue mode until that domain's backlog is genuinely drained (not just until a cooldown timer expires). See [`POST /proxy`](API.md#post-proxy) for the details, including the header a target API can use to request queuing proactively.
+Point your trusted gateway at Aquifer, then point Aquifer at your resources. Aquifer tries the request directly first (a healthy resource sees no queue at all) and only falls back to durable queuing when something's actually overloaded, on the same connection, staying in queue mode until that domain's backlog is genuinely drained (not just until a cooldown timer expires). See [`POST /proxy`](API.md#post-proxy) for the details, including the header a target API can use to request queuing proactively.
 
 **WebSocket proxy — durable replay and paced reconnects**
 ```
@@ -285,7 +294,7 @@ POST /jobs
 
 **Do not expose Aquifer directly to untrusted callers.** `url` is dispatched as a real HTTP request. If an arbitrary or untrusted party can set it, Aquifer becomes an open relay/SSRF vector, using Aquifer's own network position and identity to reach anything the machine can reach. The intended caller is **your own trusted backend or gateway code** dispatching to a destination it already knows about, not an agent, end user, or any other party choosing the destination itself.
 
-**[API.md](API.md)** has the full reference: `GET /jobs/:id`, the SSE stream, `POST /proxy` (edge-gateway mode, see [Use cases](#use-cases)), health/readiness and graceful shutdown, webhook payload shapes, and the autoscaling headers.
+**[API.md](API.md)** has the full reference: `GET /jobs/:id`, the SSE stream, `POST /proxy` (capacity-aware reverse-proxy mode, see [Use cases](#use-cases)), health/readiness and graceful shutdown, webhook payload shapes, and the autoscaling headers.
 
 ---
 
