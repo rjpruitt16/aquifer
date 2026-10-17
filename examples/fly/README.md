@@ -2,7 +2,7 @@
 
 This quick start deploys the latest checksum-verified Aquifer release to one `shared-cpu-1x` Fly Machine with 512 MB of memory and a 1 GB encrypted Fly Volume. It uses the repository's root [`fly.toml`](../../fly.toml).
 
-The app is private by default. Aquifer does not authenticate callers, so the script allocates Flycast networking without allocating public IP addresses. Evaluate it through `fly proxy`, or let an authenticated gateway in the same Fly private network call it through Fly Proxy at `http://APP_NAME.flycast`.
+The app is private by default. Aquifer does not authenticate callers, so the script allocates Flycast networking without allocating public IP addresses. Evaluate it through `fly proxy`, or let a trusted service in the same Fly private network call it through Fly Proxy at `http://APP_NAME.flycast`. The private service keeps HTTP enabled because Flycast terminates this route inside Fly's private network; do not add public IPs to this configuration.
 
 ## Deploy
 
@@ -21,10 +21,13 @@ APP_NAME=my-aquifer \
 FLY_REGION=ord \
 AQUIFER_VERSION=v0.14.0 \
 VOLUME_SIZE_GB=2 \
+VM_MEMORY_MB=512 \
 ./examples/fly/deploy-quickstart.sh
 ```
 
-Set `FLY_ORG` when the app should be created outside your personal organization.
+Set `FLY_ORG` when the app should be created outside your personal organization. `VM_MEMORY_MB` defaults to `512` and must be at least `256`; the script derives `AQUIFER_MEMORY_LIMIT_MB` from it unless that limit is set explicitly. Treat 256 MB as a small evaluation size and benchmark before using it for real traffic.
+
+Contributors can set `AQUIFER_VERSION=source` to build the current checkout instead of a published release. The default remains the latest checksum-verified release.
 
 ## Connect
 
