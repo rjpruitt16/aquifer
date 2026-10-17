@@ -202,7 +202,7 @@ Resources:
           set -euxo pipefail
           exec > >(tee /var/log/canalis-aquifer-install.log | logger -t canalis-aquifer-install -s 2>/dev/console) 2>&1
 
-          dnf install -y docker git curl
+          dnf install -y docker git
           systemctl enable --now docker
 
           install -d -m 0755 /usr/local/lib/docker/cli-plugins /tmp/compose-install
@@ -285,7 +285,7 @@ Resources:
           set -euxo pipefail
           exec > >(tee /var/log/canalis-aquifer-install.log | logger -t canalis-aquifer-install -s 2>/dev/console) 2>&1
 
-          dnf install -y docker git curl
+          dnf install -y docker git
           systemctl enable --now docker
 
           install -d -m 0755 /usr/local/lib/docker/cli-plugins /tmp/compose-install
