@@ -56,7 +56,12 @@ type AdmissionLimits struct {
 	MaxBodyBytes      int64 // AQUIFER_MAX_BODY_BYTES
 	DBMaxBytes        int64 // AQUIFER_DB_MAX_BYTES
 	RetryAfterSeconds int   // AQUIFER_RETRY_AFTER_SECONDS
+	MaxSyncLagMS      int64 // AQUIFER_MAX_SYNC_LAG_MS
 }
+
+// defaultMaxSyncLagMS: refuse new jobs once accepted ones may have gone a
+// second without reaching disk, ten times the default flush interval.
+const defaultMaxSyncLagMS = 1000
 
 // LoadAdmissionLimits reads the AQUIFER_* admission env vars. Body size and
 // DB size fall back to sane, non-zero defaults when unset (see the
@@ -77,6 +82,7 @@ func LoadAdmissionLimits() AdmissionLimits {
 		MaxBodyBytes:      envInt64("AQUIFER_MAX_BODY_BYTES", defaultMaxBodyBytes),
 		DBMaxBytes:        envInt64("AQUIFER_DB_MAX_BYTES", autoDBMaxBytes),
 		RetryAfterSeconds: int(envInt64("AQUIFER_RETRY_AFTER_SECONDS", 5)),
+		MaxSyncLagMS:      envInt64("AQUIFER_MAX_SYNC_LAG_MS", defaultMaxSyncLagMS),
 	}
 	switch {
 	case limits.MemoryLimitMB == autoMemoryLimitMB:
@@ -157,7 +163,7 @@ func envInt64(key string, def int64) int64 {
 // AdmissionDecision is the result of an admission check on a new (non-duplicate) job.
 type AdmissionDecision struct {
 	Allowed bool
-	Reason  string // "memory", "db_size", "upstream_queue", or "queue_fair_share"
+	Reason  string // "memory", "db_size", "sync_lag", "upstream_queue", or "queue_fair_share"
 	Limit   int64
 	Current int64
 	Queue   *QueueSnapshot
@@ -194,6 +200,32 @@ type AdmissionController struct {
 	// CPU, for numbers that barely move in a few hundred milliseconds.
 	memSample sampledInt64
 	dbSample  sampledInt64
+
+	// syncLag reports how long accepted jobs may have gone unsynced (the
+	// Pebble store's SyncLag); nil when the store syncs every write.
+	syncLag func() time.Duration
+}
+
+// syncLagReporter is a store whose acknowledged writes can sit in memory
+// before a background sync (PebbleStore with a flush interval).
+type syncLagReporter interface{ SyncLag() time.Duration }
+
+// WatchSyncLag makes Check refuse new jobs while store's acknowledged
+// writes have gone longer than AQUIFER_MAX_SYNC_LAG_MS without a sync.
+func (c *AdmissionController) WatchSyncLag(store any) {
+	if c == nil {
+		return
+	}
+	if r, ok := store.(syncLagReporter); ok {
+		c.syncLag = r.SyncLag
+	}
+}
+
+func (c *AdmissionController) syncLagMS() int64 {
+	if c.syncLag == nil {
+		return 0
+	}
+	return c.syncLag().Milliseconds()
 }
 
 const admissionSampleTTL = 250 * time.Millisecond
@@ -287,6 +319,17 @@ func (c *AdmissionController) Check() AdmissionDecision {
 		}
 	}
 
+	// Accepting a job tells the sender it's safe. While syncs are this far
+	// behind, a crash loses everything accepted since the last one, so say
+	// "later" instead; fewer writes also lets the sync catch up.
+	if c.limits.MaxSyncLagMS > 0 {
+		if lag := c.syncLagMS(); lag > c.limits.MaxSyncLagMS {
+			log.Printf("admission: rejecting job — last WAL sync %dms ago exceeds limit %dms", lag, c.limits.MaxSyncLagMS)
+			c.rejectStreak.Add(1)
+			return AdmissionDecision{Allowed: false, Reason: "sync_lag", Limit: c.limits.MaxSyncLagMS, Current: lag}
+		}
+	}
+
 	c.rejectStreak.Store(0)
 	return AdmissionDecision{Allowed: true}
 }
@@ -308,6 +351,8 @@ func (c *AdmissionController) Snapshot() map[string]any {
 		"db_bytes":            dbBytes,
 		"db_max_bytes":        c.limits.DBMaxBytes,
 		"max_body_bytes":      c.limits.MaxBodyBytes,
+		"sync_lag_ms":         c.syncLagMS(),
+		"max_sync_lag_ms":     c.limits.MaxSyncLagMS,
 		"retry_after_seconds": c.RetryAfterSeconds(),
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"testing"
+	"time"
 )
 
 func testAquiferWithLimits(t *testing.T, limits AdmissionLimits) (*Aquifer, *Store) {
@@ -381,5 +382,58 @@ func TestExplicitMemoryLimitZeroStaysOff(t *testing.T) {
 	t.Setenv("AQUIFER_MEMORY_LIMIT_MB", "900")
 	if got := LoadAdmissionLimits().MemoryLimitMB; got != 900 {
 		t.Fatalf("AQUIFER_MEMORY_LIMIT_MB=900: got %d", got)
+	}
+}
+
+type fixedSyncLag time.Duration
+
+func (f fixedSyncLag) SyncLag() time.Duration { return time.Duration(f) }
+
+// Storm test 1: under memory pressure the WAL sync fell 30 to 50 seconds
+// behind, and an OOM kill lost 1,440 jobs that had already been accepted.
+// Admission now says "later" instead of accepting while syncs are behind.
+func TestAdmissionRefusesWhileWALSyncIsBehind(t *testing.T) {
+	c := NewAdmissionController(AdmissionLimits{MaxSyncLagMS: 1000}, "")
+	c.WatchSyncLag(fixedSyncLag(1500 * time.Millisecond))
+	d := c.Check()
+	if d.Allowed || d.Reason != "sync_lag" || d.Limit != 1000 || d.Current != 1500 {
+		t.Fatalf("1.5s behind a 1s limit: %+v", d)
+	}
+	if got := c.fullnessRatio(); got < 1 {
+		t.Fatalf("fullness should be full while refusing: %v", got)
+	}
+
+	c.WatchSyncLag(fixedSyncLag(120 * time.Millisecond))
+	if d := c.Check(); !d.Allowed {
+		t.Fatalf("a normal 120ms lag must be allowed: %+v", d)
+	}
+
+	off := NewAdmissionController(AdmissionLimits{MaxSyncLagMS: 0}, "")
+	off.WatchSyncLag(fixedSyncLag(time.Minute))
+	if d := off.Check(); !d.Allowed {
+		t.Fatalf("AQUIFER_MAX_SYNC_LAG_MS=0 disables the check: %+v", d)
+	}
+
+	// A store that syncs every write never reports a lag.
+	plain := NewAdmissionController(AdmissionLimits{MaxSyncLagMS: 1000}, "")
+	plain.WatchSyncLag(struct{}{})
+	if d := plain.Check(); !d.Allowed {
+		t.Fatalf("no sync lag reporter: %+v", d)
+	}
+}
+
+func TestPebbleSyncLagStaysNearTheFlushInterval(t *testing.T) {
+	s := NewPebbleStore(filepath.Join(t.TempDir(), "aquifer.db"))
+	defer s.Close()
+	time.Sleep(350 * time.Millisecond)
+	if lag := s.SyncLag(); lag <= 0 || lag > 300*time.Millisecond {
+		t.Fatalf("with the default 100ms flush, lag should stay small: %v", lag)
+	}
+
+	t.Setenv("AQUIFER_PEBBLE_FLUSH_INTERVAL_MS", "0")
+	synced := NewPebbleStore(filepath.Join(t.TempDir(), "aquifer.db"))
+	defer synced.Close()
+	if lag := synced.SyncLag(); lag != 0 {
+		t.Fatalf("syncing every write: lag %v, want 0", lag)
 	}
 }
