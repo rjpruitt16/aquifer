@@ -11,6 +11,11 @@ CANALIS_VERSION=${CANALIS_VERSION:-0.2}
 AQUIFER_ALLOWED_URL_DOMAINS=${AQUIFER_ALLOWED_URL_DOMAINS:-postman-echo.com}
 CANALIS_LOCAL_PORT=${CANALIS_LOCAL_PORT:-18080}
 
+if [[ -z "${FLY_ORG:-}" ]]; then
+  echo "Set FLY_ORG to the target organization slug from: flyctl orgs list" >&2
+  exit 1
+fi
+
 VALKEY_APP="$APP_PREFIX-valkey"
 CANALIS_APP="$APP_PREFIX-canalis"
 AQUIFER_A_APP="$APP_PREFIX-aquifer-a"
@@ -30,11 +35,7 @@ create_app() {
   if flyctl status --app "$app_name" >/dev/null 2>&1; then
     return
   fi
-  local args=("$app_name" --yes)
-  if [[ -n "${FLY_ORG:-}" ]]; then
-    args+=(--org "$FLY_ORG")
-  fi
-  flyctl apps create "${args[@]}"
+  flyctl apps create "$app_name" --org "$FLY_ORG" --yes
 }
 
 create_volume() {

@@ -10,13 +10,13 @@ The apps communicate over Fly's private `.internal` network. Canalis receives a 
 
 ## Deploy
 
-Install `flyctl`, sign in, and run from the Aquifer repository:
+Install `flyctl`, sign in, choose an organization slug from `flyctl orgs list`, and run from the Aquifer repository:
 
 ```bash
-./examples/canalis/fly/deploy-quickstart.sh
+FLY_ORG=my-org ./examples/canalis/fly/deploy-quickstart.sh
 ```
 
-The script creates a unique prefix, deploys all four apps, and waits for Canalis to report both Aquifer nodes. Keep the printed `APP_PREFIX`; cleanup uses it. Set `FLY_ORG` when the apps should be created outside your personal organization.
+The script creates a unique prefix, deploys all four apps, and waits for Canalis to report both Aquifer nodes. Keep the printed `APP_PREFIX`; cleanup uses it. `FLY_ORG` is required so a noninteractive deployment never guesses which organization should own billable resources.
 
 Useful overrides:
 
