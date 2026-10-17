@@ -109,6 +109,7 @@ func NewRuntime(opts RuntimeOptions) *Runtime {
 	}
 	registry.SetDrainRemote(remote)
 	admission := NewAdmissionController(*admissionLimits, dbPath)
+	admission.WatchSyncLag(store)
 	app := NewAquifer(store, registry, broker, l8, admission, pools)
 	if remote != nil {
 		app.SetRemoteIdempotency(remote)
