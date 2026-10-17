@@ -223,6 +223,60 @@ expected above capacity. A pass means:
 - memory and disk stay bounded;
 - healthy endpoints' latency holds while dead ones retry.
 
+## Cluster failure test
+
+About 3 hours on three Aquifer nodes running cluster routing
+(`AQUIFER_CLUSTER_PROVIDER=valkey`, remote idempotency on), to check the
+failure semantics [API.md](../../API.md#regional-cluster-routing) promises
+under load:
+- an unreachable owner is skipped;
+- a slow owner gets a 504, not a second copy of the job;
+- a Valkey outage falls back to a cached view.
+
+Apps:
+- `aquifer-cluster-a`, `-b` and `-c` (`fly.cluster-*.toml`), the same
+  machine size as the soak target;
+- `aquifer-cluster-driver` (`fly.cluster-driver.toml`,
+  `Dockerfile.cluster-driver`), which also runs the nodes' Valkey.
+
+Driver flags, off unless set:
+
+- `-nodes=id=target|supervisor,...` spreads submissions over the nodes at
+  random, the way a load balancer would.
+  - A refused connection is retried once on another node.
+  - A 504 is retried once with the same idempotency key, the retry
+    Aquifer says is safe.
+  - Each job's owner (`X-Aquifer-Cluster-Owner`) is recorded, and the
+    straggler check asks that node. Another node would answer 404.
+- `-scenarios=after:action[:nodes][:for],...` runs failures in order.
+  - `kill` sends SIGKILL.
+  - `hold` sends SIGKILL and keeps the node down.
+  - `freeze` sends SIGSTOP, then SIGCONT.
+  - `drain` sends SIGTERM.
+  - `valkey` stops the nodes' Valkey.
+  - `end` stops the load.
+  - `a+b` targets two nodes at once.
+- `-valkey` runs `valkey-server` on the driver so `valkey` can stop it.
+  It has no persistence, so an outage loses every assignment.
+
+The supervisor gains `POST /hold?for=`, `/freeze?for=` and `/drain`.
+
+`/status` gains a `cluster` section: per-node accepts as owner, 504
+retries, failovers, gateway errors, and for each scenario what the ledger
+counted until the next one. Lost and duplicate jobs are counted when
+they're found, so a window can include a few from just before it. The
+schedule in `fly.cluster-driver.toml`:
+
+| At | Failure |
+|---|---|
+| 30m | kill node a |
+| 55m | hold node b down for 5 min |
+| 80m | freeze node c for 20 s |
+| 105m | Valkey down for 5 min |
+| 130m | hold nodes a and b down for 5 min |
+| 155m | drain node c |
+| 175m | stop the load |
+
 ## Running it locally
 
 At a light rate, for checking the harness itself:

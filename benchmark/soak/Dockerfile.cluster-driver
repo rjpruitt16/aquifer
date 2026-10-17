@@ -1,0 +1,15 @@
+# Driver for the cluster failure test: the soak driver plus the Valkey the
+# Aquifer nodes coordinate through, so a scenario can take Valkey down.
+# Build from the repository root:
+#   fly deploy -c benchmark/soak/fly.cluster-driver.toml --dockerfile benchmark/soak/Dockerfile.cluster-driver
+FROM golang:1.25-alpine AS builder
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN go build -o driver ./benchmark/soak/driver
+
+FROM alpine:3.22
+RUN apk add --no-cache ca-certificates valkey
+COPY --from=builder /app/driver /driver
+ENTRYPOINT ["/driver"]
