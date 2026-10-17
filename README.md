@@ -32,13 +32,14 @@ Exposed through pluggable adapters (an MCP server for agent tool-calling, a plai
 
 **Terms used in these docs:** the **origin** is whoever sends a job to Aquifer: your app, an agent, a gateway, or Inlet. The **target API** is the service Aquifer sends it on to, whose capacity it protects. Some names in the code, config and headers still say "upstream" for the target API, such as `AQUIFER_MAX_PENDING_PER_UPSTREAM` and `X-Aqueduct-Upstream-URL`. They mean the same thing and keep working.
 
-**Aquifer is not an API gateway.** It does not provide general end-user authentication, authorization policy, WAF rules, CORS policy, or arbitrary public routing. Keep it on a private network behind your existing gateway or authentication edge. That trusted layer decides who the caller is and which target is allowed; Aquifer durably queues the accepted work and controls how quickly it reaches that target.
+**Aquifer is not an API gateway.** It does not provide general end-user authentication, authorization policy, WAF rules, CORS policy, or arbitrary public routing. Keep it on a private network behind a trusted front door that decides who the caller is and which target is allowed. Aquifer durably queues the accepted work and controls how quickly it reaches that target.
 
 ```
-untrusted callers  →  API gateway / auth edge  →  Canalis (optional)  →  Aquifer  →  target API
+API / agent callers  →  API gateway or Canalis  →  Aquifer  →  target API
+webhook providers    →  Inlet                   →  Aquifer  →  webhook handlers
 ```
 
-Aquifer and **[Canalis](https://github.com/rjpruitt16/canalis-rs)** solve different layers. Canalis is the optional fleet coordinator: it keeps tenants sticky and selects an Aquifer or Spillway instance with room. Aquifer is the capacity-aware load balancer on the selected node: it persists jobs, enforces fairness, and paces dispatch to the target API. Canalis can verify JWTs itself when configured, but Aquifer is never the authentication boundary.
+Use **[Canalis](https://github.com/rjpruitt16/canalis-rs)** as the trusted front door for API or agent traffic when you need JWT verification, sticky tenant placement, and fleet-wide capacity coordination; it can also sit behind an existing gateway. Use **[Inlet](https://github.com/rjpruitt16/inlet)** for provider webhooks: it verifies provider signatures and queues accepted deliveries into Aquifer. Aquifer is the capacity-aware load balancer behind either one: it persists jobs, enforces fairness, and paces dispatch to the target API.
 
 ---
 
