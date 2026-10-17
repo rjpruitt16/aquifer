@@ -5,16 +5,18 @@ package aquifer
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
-	"net"
-	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 )
 
 const (
@@ -23,6 +25,11 @@ const (
 	defaultRemoteIdempotencyPrefix     = "aqueduct:idempotency:"
 	defaultRemoteResultPrefix          = "aqueduct:result:"
 	defaultRemoteResultMaxBytes        = 64 * 1024
+	// A pooled connection is dialed once and reused, so the dial gets more
+	// room than the per-lookup timeout; a cold dial inside 25ms is what made
+	// lookups fail under load when every lookup opened its own connection.
+	remoteIdempotencyDialTimeout = time.Second
+	remoteIdempotencyMinIdle     = 2
 )
 
 type RemoteIdempotencyEntry struct {
@@ -103,7 +110,8 @@ func LoadRemoteIdempotencyConfig() RemoteIdempotencyConfig {
 }
 
 type ValkeyRemoteIdempotency struct {
-	cfg RemoteIdempotencyConfig
+	cfg    RemoteIdempotencyConfig
+	client *redis.Client
 }
 
 func NewValkeyRemoteIdempotency(cfg RemoteIdempotencyConfig) RemoteIdempotency {
@@ -126,7 +134,36 @@ func NewValkeyRemoteIdempotency(cfg RemoteIdempotencyConfig) RemoteIdempotency {
 	if cfg.TTLSeconds <= 0 {
 		cfg.TTLSeconds = defaultRemoteIdempotencyTTLSeconds
 	}
-	return &ValkeyRemoteIdempotency{cfg: cfg}
+	client, err := newRemoteIdempotencyClient(cfg)
+	if err != nil {
+		log.Printf("remote idempotency: %v", err)
+		return nil
+	}
+	return &ValkeyRemoteIdempotency{cfg: cfg, client: client}
+}
+
+// newRemoteIdempotencyClient builds one pooled client for the life of the
+// process. Each lookup used to dial, authenticate and close its own TCP
+// connection; at a few hundred jobs per second that filled the kernel's
+// TIME_WAIT table and pushed DNS plus dial past the lookup timeout, so the
+// cross-node check silently fell back to local-only exactly when load was
+// highest.
+func newRemoteIdempotencyClient(cfg RemoteIdempotencyConfig) (*redis.Client, error) {
+	normalized, err := normalizeClusterValkeyURL(cfg.URL)
+	if err != nil {
+		return nil, err
+	}
+	opts, err := redis.ParseURL(normalized)
+	if err != nil {
+		return nil, fmt.Errorf("parse Valkey URL: %w", err)
+	}
+	opts.DialTimeout = remoteIdempotencyDialTimeout
+	opts.ReadTimeout = cfg.Timeout
+	opts.WriteTimeout = cfg.Timeout
+	opts.MinIdleConns = remoteIdempotencyMinIdle
+	opts.MaxRetries = 0
+	opts.DisableIdentity = true
+	return redis.NewClient(opts), nil
 }
 
 func (v *ValkeyRemoteIdempotency) Lookup(hash string) (RemoteIdempotencyEntry, bool) {
@@ -228,51 +265,27 @@ func truncateStringBytes(s string, maxBytes int64) (string, bool) {
 }
 
 func (v *ValkeyRemoteIdempotency) command(args ...string) (string, error) {
-	parsed, err := url.Parse(v.cfg.URL)
+	ctx, cancel := context.WithTimeout(context.Background(), v.cfg.Timeout)
+	defer cancel()
+	cmdArgs := make([]any, len(args))
+	for i, arg := range args {
+		cmdArgs[i] = arg
+	}
+	reply, err := v.client.Do(ctx, cmdArgs...).Result()
+	if errors.Is(err, redis.Nil) {
+		return "", nil
+	}
 	if err != nil {
 		return "", err
 	}
-	if parsed.Scheme != "redis" && parsed.Scheme != "valkey" {
-		return "", fmt.Errorf("unsupported Valkey URL scheme %q", parsed.Scheme)
+	switch value := reply.(type) {
+	case string:
+		return value, nil
+	case int64:
+		return strconv.FormatInt(value, 10), nil
+	default:
+		return fmt.Sprint(value), nil
 	}
-	host := parsed.Host
-	if !strings.Contains(host, ":") {
-		host += ":6379"
-	}
-
-	conn, err := net.DialTimeout("tcp", host, v.cfg.Timeout)
-	if err != nil {
-		return "", err
-	}
-	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(v.cfg.Timeout))
-
-	reader := bufio.NewReader(conn)
-	if password, ok := parsed.User.Password(); ok {
-		if username := parsed.User.Username(); username != "" {
-			if err := writeRESPCommand(conn, "AUTH", username, password); err != nil {
-				return "", err
-			}
-		} else if err := writeRESPCommand(conn, "AUTH", password); err != nil {
-			return "", err
-		}
-		if _, err := readRESP(reader); err != nil {
-			return "", err
-		}
-	}
-	if db := strings.Trim(parsed.Path, "/"); db != "" {
-		if err := writeRESPCommand(conn, "SELECT", db); err != nil {
-			return "", err
-		}
-		if _, err := readRESP(reader); err != nil {
-			return "", err
-		}
-	}
-
-	if err := writeRESPCommand(conn, args...); err != nil {
-		return "", err
-	}
-	return readRESP(reader)
 }
 
 func writeRESPCommand(w io.Writer, args ...string) error {
