@@ -23,10 +23,16 @@ type Server struct {
 	aquifer *Aquifer
 }
 
+// clusterForwardResponseTimeout is how long a forwarding node waits for the
+// owner's answer before returning 504. The same value is sent to the owner as
+// a deadline, so an owner that only gets to the request after its sender gave
+// up refuses it instead of running a job the caller is about to retry.
+var clusterForwardResponseTimeout = 10 * time.Second
+
 var clusterForwardClient = func() *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DialContext = (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext
-	transport.ResponseHeaderTimeout = 10 * time.Second
+	transport.ResponseHeaderTimeout = clusterForwardResponseTimeout
 	return &http.Client{Transport: transport}
 }()
 
@@ -616,7 +622,18 @@ func (s *Server) streamExistingJob(w http.ResponseWriter, r *http.Request, job *
 }
 
 func (s *Server) forwardClusterRequest(w http.ResponseWriter, r *http.Request, path string, req JobRequest) bool {
-	if s.aquifer == nil || s.aquifer.clusterRouter == nil || hasClusterForwardedHeader(r) {
+	if hasClusterForwardedHeader(r) {
+		if clusterForwardExpired(r, time.Now()) {
+			// The sender already answered its caller with 504, and that caller
+			// is retrying, possibly on a new owner if this node stalled past the
+			// instance TTL. Accepting now would run the job twice.
+			w.Header().Set("Retry-After", "1")
+			jsonError(w, "forwarded request arrived after its sender's deadline; nothing was accepted. Retry with the same idempotent_key", http.StatusServiceUnavailable)
+			return true
+		}
+		return false
+	}
+	if s.aquifer == nil || s.aquifer.clusterRouter == nil {
 		return false
 	}
 
@@ -660,6 +677,7 @@ func (s *Server) forwardClusterRequest(w http.ResponseWriter, r *http.Request, p
 		}
 		outbound.Header.Set("Content-Type", "application/json")
 		outbound.Header.Set(clusterForwardedHeader, "true")
+		outbound.Header.Set(clusterForwardDeadlineHeader, strconv.FormatInt(time.Now().Add(clusterForwardResponseTimeout).UnixMilli(), 10))
 		if accountQueue := pacingHeader(r.Header, "Account-Queue"); accountQueue != "" {
 			setLoadHeader(outbound.Header, "Account-Queue", accountQueue)
 		}
