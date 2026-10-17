@@ -211,7 +211,7 @@ Resources:
           COMPOSE_BASE=https://github.com/docker/compose/releases/download/${ComposeVersion}
           curl --fail --silent --show-error --location --retry 5 --retry-all-errors --output "$COMPOSE_ASSET" "$COMPOSE_BASE/$COMPOSE_ASSET"
           curl --fail --silent --show-error --location --retry 5 --retry-all-errors --output checksums.txt "$COMPOSE_BASE/checksums.txt"
-          grep " $COMPOSE_ASSET$" checksums.txt > "$COMPOSE_ASSET.sha256"
+          awk -v asset="$COMPOSE_ASSET" '$2 == "*" asset || $2 == asset { print }' checksums.txt > "$COMPOSE_ASSET.sha256"
           test -s "$COMPOSE_ASSET.sha256"
           sha256sum --check "$COMPOSE_ASSET.sha256"
           install -m 0755 "$COMPOSE_ASSET" /usr/local/lib/docker/cli-plugins/docker-compose
@@ -294,7 +294,7 @@ Resources:
           COMPOSE_BASE=https://github.com/docker/compose/releases/download/${ComposeVersion}
           curl --fail --silent --show-error --location --retry 5 --retry-all-errors --output "$COMPOSE_ASSET" "$COMPOSE_BASE/$COMPOSE_ASSET"
           curl --fail --silent --show-error --location --retry 5 --retry-all-errors --output checksums.txt "$COMPOSE_BASE/checksums.txt"
-          grep " $COMPOSE_ASSET$" checksums.txt > "$COMPOSE_ASSET.sha256"
+          awk -v asset="$COMPOSE_ASSET" '$2 == "*" asset || $2 == asset { print }' checksums.txt > "$COMPOSE_ASSET.sha256"
           test -s "$COMPOSE_ASSET.sha256"
           sha256sum --check "$COMPOSE_ASSET.sha256"
           install -m 0755 "$COMPOSE_ASSET" /usr/local/lib/docker/cli-plugins/docker-compose
