@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,6 +25,7 @@ const (
 	defaultClusterMaxActiveUsers        = 100
 	defaultClusterValkeyPrefix          = "aqueduct:"
 	clusterForwardedHeader              = "X-Aquifer-Cluster-Forwarded"
+	clusterForwardDeadlineHeader        = "X-Aquifer-Cluster-Forward-Deadline"
 	clusterProviderStatic               = "static"
 	clusterProviderValkey               = "valkey"
 )
@@ -600,4 +602,20 @@ func clusterRoutingKey(req JobRequest) string {
 
 func hasClusterForwardedHeader(r *http.Request) bool {
 	return r.Header.Get(clusterForwardedHeader) == "true"
+}
+
+// clusterForwardExpired reports whether a forwarded request's sender has
+// already given up on it. The deadline is Unix milliseconds on the sender's
+// clock; a missing or unreadable deadline (a peer on an older version) is
+// never expired.
+func clusterForwardExpired(r *http.Request, now time.Time) bool {
+	raw := r.Header.Get(clusterForwardDeadlineHeader)
+	if raw == "" {
+		return false
+	}
+	deadline, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return false
+	}
+	return now.UnixMilli() > deadline
 }

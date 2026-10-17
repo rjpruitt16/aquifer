@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -477,5 +478,87 @@ func TestClusterForwardTimeoutAfterDeliveryDoesNotFailOver(t *testing.T) {
 	}
 	if peerStore.Counts().TotalJobs != 0 {
 		t.Fatalf("expected no local job on the forwarding node, got %+v", peerStore.Counts())
+	}
+}
+
+// An owner that only gets to a forwarded request after its sender gave up
+// (it was frozen or stalled) must not accept it: the sender already answered
+// 504, and the caller's retry may be accepted by a new owner if this node's
+// instance TTL ran out meanwhile. Accepting both would run the job twice.
+func TestClusterOwnerRefusesForwardedRequestPastItsDeadline(t *testing.T) {
+	app, store := testClusterAquifer(t)
+	routes := NewServer(app).Routes()
+	send := func(key string, deadline string) *httptest.ResponseRecorder {
+		body, _ := json.Marshal(JobRequest{UserID: "u1", IdempotentKey: key,
+			URL: "http://upstream.invalid", Method: "POST", WebhookURL: "http://hook.invalid"})
+		req := httptest.NewRequest(http.MethodPost, "/jobs", bytes.NewReader(body))
+		req.Header.Set(clusterForwardedHeader, "true")
+		if deadline != "" {
+			req.Header.Set(clusterForwardDeadlineHeader, deadline)
+		}
+		rec := httptest.NewRecorder()
+		routes.ServeHTTP(rec, req)
+		return rec
+	}
+	ms := func(d time.Duration) string { return strconv.FormatInt(time.Now().Add(d).UnixMilli(), 10) }
+
+	late := send("late", ms(-time.Second))
+	if late.Code != http.StatusServiceUnavailable || late.Header().Get("Retry-After") != "1" {
+		t.Fatalf("expected 503 with Retry-After for a forward past its deadline, got %d %v: %s", late.Code, late.Header(), late.Body.String())
+	}
+	if total := store.Counts().TotalJobs; total != 0 {
+		t.Fatalf("expected nothing stored for a late forward, got %d jobs", total)
+	}
+
+	if rec := send("on-time", ms(10*time.Second)); rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for a forward inside its deadline, got %d: %s", rec.Code, rec.Body.String())
+	}
+	// A peer on an older version sends no deadline; keep accepting it during
+	// a rolling deploy.
+	if rec := send("no-deadline", ""); rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for a forward without a deadline, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := send("garbled", "soon"); rec.Code != http.StatusCreated {
+		t.Fatalf("expected an unreadable deadline to be ignored, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestClusterForwardSendsItsDeadline(t *testing.T) {
+	var got atomic.Value
+	owner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got.Store(r.Header.Get(clusterForwardDeadlineHeader))
+		io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	t.Cleanup(owner.Close)
+
+	originalTimeout := clusterForwardResponseTimeout
+	clusterForwardResponseTimeout = 3 * time.Second
+	t.Cleanup(func() { clusterForwardResponseTimeout = originalTimeout })
+
+	peerApp, _ := testClusterAquifer(t)
+	ownerMember := ClusterMember{ID: "owner", Address: owner.URL}
+	peer := ClusterMember{ID: "peer", Address: "http://peer.invalid"}
+	router := testClusterRouter(peer, ownerMember, peer)
+	userID := keyRankedBy(t, router, ownerMember.ID, peer.ID)
+	peerApp.SetClusterRouter(router)
+
+	body, _ := json.Marshal(JobRequest{UserID: userID, IdempotentKey: "deadline-key",
+		URL: "http://upstream.invalid", Method: "POST", WebhookURL: "http://hook.invalid"})
+	before := time.Now()
+	rec := httptest.NewRecorder()
+	NewServer(peerApp).Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/jobs", bytes.NewReader(body)))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected the owner's 201 relayed, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	raw, _ := got.Load().(string)
+	deadline, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		t.Fatalf("expected a numeric deadline header, got %q", raw)
+	}
+	want := before.Add(3 * time.Second).UnixMilli()
+	if deadline < want || deadline > want+1000 {
+		t.Fatalf("expected the deadline about 3s after sending (%d), got %d", want, deadline)
 	}
 }
