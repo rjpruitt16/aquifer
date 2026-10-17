@@ -67,6 +67,9 @@ type PebbleStore struct {
 	// background loop syncs the WAL this often (AQUIFER_PEBBLE_FLUSH_INTERVAL_MS).
 	flushInterval time.Duration
 	flushDone     chan struct{}
+	// lastSyncStart is when the newest completed WAL sync began (unix ns).
+	// Every write acknowledged before then is on disk; see SyncLag.
+	lastSyncStart atomic.Int64
 
 	// skipDrainEvents: see Store.skipDrainEvents. Recording an event costs
 	// two reads and a write under drainMu, a global lock, so with drain
@@ -165,6 +168,7 @@ func NewPebbleStore(path string) *PebbleStore {
 	s.seedCounts()
 	go s.cleanupLoop()
 	if s.flushInterval > 0 {
+		s.lastSyncStart.Store(time.Now().UnixNano())
 		go s.flushLoop()
 	} else {
 		close(s.flushDone)
@@ -190,9 +194,26 @@ func (s *PebbleStore) flushLoop() {
 }
 
 func (s *PebbleStore) syncWAL() {
+	start := time.Now()
 	if err := s.db.LogData(nil, pebble.Sync); err != nil {
 		log.Printf("[pebble] WAL sync failed: %v", err)
+		return
 	}
+	s.lastSyncStart.Store(start.UnixNano())
+}
+
+// SyncLag is how long writes may have been acknowledged without reaching
+// disk: the age of the newest completed WAL sync's start. With the default
+// 100ms flush interval it's normally under ~150ms. A killed process loses
+// what was written within it (NoSync writes don't leave the process; see
+// defaultWALSyncIntervalMS). In storm test 1, under memory pressure, jobs
+// accepted 30 to 50 seconds before an OOM kill were lost, so the window had
+// grown that far. Zero when every write waits for its own sync.
+func (s *PebbleStore) SyncLag() time.Duration {
+	if s.flushInterval <= 0 {
+		return 0
+	}
+	return time.Since(time.Unix(0, s.lastSyncStart.Load()))
 }
 
 func (s *PebbleStore) seedCounts() {

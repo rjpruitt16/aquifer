@@ -48,8 +48,8 @@ func fullnessPercent(ratio float64) int64 {
 	return int64(math.Round(clampFloat(ratio, 0, 1) * 100))
 }
 
-// fullnessRatio is the higher of memory and database use against their
-// configured limits, reusing the same samples Check uses.
+// fullnessRatio is the highest of memory use, database size and WAL sync
+// lag against their configured limits, reusing the same samples Check uses.
 func (c *AdmissionController) fullnessRatio() float64 {
 	if c == nil {
 		return 0
@@ -61,6 +61,9 @@ func (c *AdmissionController) fullnessRatio() float64 {
 	if c.limits.DBMaxBytes > 0 && c.dbPath != "" {
 		size := c.dbSample.get(func() int64 { return dbSizeBytes(c.dbPath) })
 		ratio = math.Max(ratio, float64(size)/float64(c.limits.DBMaxBytes))
+	}
+	if c.limits.MaxSyncLagMS > 0 {
+		ratio = math.Max(ratio, float64(c.syncLagMS())/float64(c.limits.MaxSyncLagMS))
 	}
 	return ratio
 }
