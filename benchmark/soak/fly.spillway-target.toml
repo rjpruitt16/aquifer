@@ -10,13 +10,14 @@ kill_timeout = 30
   dockerfile = "Dockerfile.spillway-target"
 
 [env]
-  SOAK_DATA_DIR = "/data/run-3i"
+  SOAK_DATA_DIR = "/data/run-3j"
   # Jobs, results, idempotency keys and WebSocket fallback transcripts in
-  # Spillway's own RocksDB store (no Mnesia since spillway#53). Run 3i
-  # starts fresh after spillway#62 (admission refuses intake while expiry
-  # is more than 5 minutes behind; run 3h fell 3.5 hours behind) and #63
-  # (WebSocket client slots freed when their holder exits).
-  SPILLWAY_STORE_DIR = "/data/run-3i/store"
+  # Spillway's own RocksDB store (no Mnesia since spillway#53). Run 3j is
+  # run 3i's build (spillway d554e64) on two CPUs instead of one: in 3i a
+  # 2,000-entry cleanup read took 5 seconds waiting for the one CPU, and
+  # whole minutes went by with no completions. Same memory limit, so only
+  # the CPU count changes.
+  SPILLWAY_STORE_DIR = "/data/run-3j/store"
   # WebSocket transcripts in a local Valkey, as on the Aquifer target.
   SOAK_VALKEY = "1"
   SOAK_VALKEY_MAXMEMORY = "600mb"
@@ -44,6 +45,8 @@ kill_timeout = 30
 [[restart]]
   policy = "always"
 
+# Two dedicated CPUs (Fly's smallest performance-2x has 4GB; admission still
+# stops at 1,200MB). Aquifer's soak target stays on performance-1x.
 [[vm]]
-  size = "performance-1x"
-  memory = "2gb"
+  size = "performance-2x"
+  memory = "4gb"
