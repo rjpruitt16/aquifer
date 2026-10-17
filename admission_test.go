@@ -7,6 +7,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"testing"
 )
 
@@ -295,5 +297,89 @@ func TestRetryAfterDefaultsWhenUnconfigured(t *testing.T) {
 
 	if got := c.RetryAfterSeconds(); got != 5 {
 		t.Fatalf("expected default base Retry-After=5 with no rejections yet, got %d", got)
+	}
+}
+
+// Storm test 2: one spike past the limit left MemStats.Sys above it for
+// good, and admission refused every job from then on. The measure admission
+// uses now has to come back down once the runtime returns the memory.
+func TestAdmissionMemoryComesBackDownAfterASpike(t *testing.T) {
+	debug.FreeOSMemory()
+	before := processMemoryMB()
+
+	spike := make([][]byte, 0, 256)
+	for i := 0; i < 256; i++ {
+		b := make([]byte, 1<<20)
+		for j := range b {
+			b[j] = byte(j)
+		}
+		spike = append(spike, b)
+	}
+	during := processMemoryMB()
+	if during < before+200 {
+		t.Fatalf("a 256MB spike should show: before %dMB, during %dMB", before, during)
+	}
+	runtime.KeepAlive(spike)
+	spike = nil
+
+	debug.FreeOSMemory()
+	after := processMemoryMB()
+	if after > before+64 {
+		t.Fatalf("memory in use stayed up after the spike was freed: before %dMB, during %dMB, after %dMB", before, during, after)
+	}
+	if reserved := reservedMemoryMB(); reserved < during {
+		t.Fatalf("reserved memory (the old measure) should still count the spike: %dMB < %dMB", reserved, during)
+	}
+
+	c := NewAdmissionController(AdmissionLimits{MemoryLimitMB: during - 64}, "")
+	if d := c.Check(); !d.Allowed {
+		t.Fatalf("after the spike, admission still refuses: %+v", d)
+	}
+}
+
+func TestDefaultMemoryLimitFollowsTheMachine(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	missing := filepath.Join(dir, "missing")
+	meminfo := write("meminfo", "MemTotal:        2048000 kB\nMemFree:          100000 kB\n")
+
+	// A container limit wins over the machine's memory.
+	v2 := write("memory.max", "1073741824\n") // 1GiB
+	if got := deriveMemoryLimitMB(memorySources{cgroupV2: v2, cgroupV1: missing, meminfo: meminfo}); got != 716 {
+		t.Fatalf("cgroup v2 1GiB: got %dMB, want 716 (70%%)", got)
+	}
+
+	// No limit ("max" in v2, a huge number in v1): fall back to MemTotal.
+	unlimited := write("memory.max.unlimited", "max\n")
+	v1huge := write("limit_in_bytes", "9223372036854771712\n")
+	if got := deriveMemoryLimitMB(memorySources{cgroupV2: unlimited, cgroupV1: v1huge, meminfo: meminfo}); got != 1400 {
+		t.Fatalf("2,048,000kB machine: got %dMB, want 1400", got)
+	}
+
+	v1 := write("limit_in_bytes.512m", "536870912\n")
+	if got := deriveMemoryLimitMB(memorySources{cgroupV2: missing, cgroupV1: v1, meminfo: meminfo}); got != 358 {
+		t.Fatalf("cgroup v1 512MiB: got %dMB, want 358", got)
+	}
+
+	// Nothing readable (macOS): unbounded, as before.
+	if got := deriveMemoryLimitMB(memorySources{cgroupV2: missing, cgroupV1: missing, meminfo: missing}); got != 0 {
+		t.Fatalf("nothing to read: got %dMB, want 0", got)
+	}
+}
+
+func TestExplicitMemoryLimitZeroStaysOff(t *testing.T) {
+	t.Setenv("AQUIFER_MEMORY_LIMIT_MB", "0")
+	if got := LoadAdmissionLimits().MemoryLimitMB; got != 0 {
+		t.Fatalf("AQUIFER_MEMORY_LIMIT_MB=0: got %d", got)
+	}
+	t.Setenv("AQUIFER_MEMORY_LIMIT_MB", "900")
+	if got := LoadAdmissionLimits().MemoryLimitMB; got != 900 {
+		t.Fatalf("AQUIFER_MEMORY_LIMIT_MB=900: got %d", got)
 	}
 }

@@ -8,8 +8,9 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"runtime"
+	"runtime/metrics"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -39,12 +40,17 @@ const (
 const (
 	autoDBMaxBytes int64 = -1
 	dbShareOfDisk        = 0.8
+
+	// autoMemoryLimitMB (AQUIFER_MEMORY_LIMIT_MB unset) sizes the memory
+	// ceiling from what the process may use: memoryShareOfMachine of the
+	// container's limit, or of the machine's memory without one.
+	autoMemoryLimitMB    int64 = -1
+	memoryShareOfMachine       = 0.7
 )
 
 // AdmissionLimits are operator-configured ceilings that protect Aquifer itself
 // from the traffic it's meant to be absorbing. A zero value disables that
-// particular check. Memory is opt-in (LoadAdmissionLimits defaults it to
-// disabled); body size and DB size default on — see LoadAdmissionLimits.
+// particular check. All three default on; see LoadAdmissionLimits.
 type AdmissionLimits struct {
 	MemoryLimitMB     int64 // AQUIFER_MEMORY_LIMIT_MB
 	MaxBodyBytes      int64 // AQUIFER_MAX_BODY_BYTES
@@ -57,21 +63,82 @@ type AdmissionLimits struct {
 // default* constants above) rather than being disabled — Aquifer's whole
 // purpose is protecting the process from the traffic it absorbs, so it
 // protects itself by default rather than requiring that to be opted into.
-// An explicit "0" still disables a given check. Memory has no safe
-// one-size-fits-all default (it depends on the deployment's own memory
-// budget, not Aquifer's benchmarked disk usage), so it stays disabled
-// unless set explicitly — LoadAdmissionLimits logs a warning when it is.
+// An explicit "0" still disables a given check.
+//
+// Memory defaults to 70% of what the process may use (deriveMemoryLimitMB).
+// It used to default to off. In storm test 1 (2GB machine, 1,500 jobs/s for
+// two hours) Aquifer never refused a request, the kernel OOM-killed it 25
+// times, and 1,440 accepted jobs were lost. The derived value is a guess
+// about the machine, not about what else runs on it, so it's logged with a
+// warning to set it explicitly.
 func LoadAdmissionLimits() AdmissionLimits {
 	limits := AdmissionLimits{
-		MemoryLimitMB:     envInt64("AQUIFER_MEMORY_LIMIT_MB", 0),
+		MemoryLimitMB:     envInt64("AQUIFER_MEMORY_LIMIT_MB", autoMemoryLimitMB),
 		MaxBodyBytes:      envInt64("AQUIFER_MAX_BODY_BYTES", defaultMaxBodyBytes),
 		DBMaxBytes:        envInt64("AQUIFER_DB_MAX_BYTES", autoDBMaxBytes),
 		RetryAfterSeconds: int(envInt64("AQUIFER_RETRY_AFTER_SECONDS", 5)),
 	}
-	if limits.MemoryLimitMB == 0 {
-		log.Printf("admission: AQUIFER_MEMORY_LIMIT_MB is not set — process memory is unbounded. Benchmarked safe at 400MB on a 512MB instance; set it to protect against OOM under burst load.")
+	switch {
+	case limits.MemoryLimitMB == autoMemoryLimitMB:
+		limits.MemoryLimitMB = deriveMemoryLimitMB(memoryLimitSources)
+	case limits.MemoryLimitMB == 0:
+		log.Printf("admission: AQUIFER_MEMORY_LIMIT_MB=0, so memory is unbounded and nothing is refused before the kernel's OOM killer acts")
 	}
 	return limits
+}
+
+// Where the memory available to this process is read from, most specific
+// first. Tests point these at temporary files.
+var memoryLimitSources = memorySources{
+	cgroupV2: "/sys/fs/cgroup/memory.max",
+	cgroupV1: "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+	meminfo:  "/proc/meminfo",
+}
+
+type memorySources struct{ cgroupV2, cgroupV1, meminfo string }
+
+// deriveMemoryLimitMB returns memoryShareOfMachine of the container's
+// memory limit, or of the machine's memory when there is no limit, or 0
+// (disabled) when neither can be read, e.g. on macOS.
+func deriveMemoryLimitMB(src memorySources) int64 {
+	bytes, from := availableMemoryBytes(src)
+	if bytes <= 0 {
+		log.Printf("admission: AQUIFER_MEMORY_LIMIT_MB is not set and this machine's memory can't be read; memory is unbounded. Set it to about 70%% of the memory Aquifer may use.")
+		return 0
+	}
+	limit := int64(float64(bytes)*memoryShareOfMachine) / (1024 * 1024)
+	log.Printf("admission: AQUIFER_MEMORY_LIMIT_MB not set; refusing new jobs above %dMB (%.0f%% of %dMB, %s). If anything else runs on this machine (Valkey, a sidecar), or it is resized, set AQUIFER_MEMORY_LIMIT_MB for it.",
+		limit, memoryShareOfMachine*100, bytes/(1024*1024), from)
+	return limit
+}
+
+func availableMemoryBytes(src memorySources) (int64, string) {
+	// cgroup v2 says "max" without a limit; v1 reports a huge number.
+	if n, ok := readIntFile(src.cgroupV2); ok && n > 0 && n < 1<<60 {
+		return n, "the container's memory limit"
+	}
+	if n, ok := readIntFile(src.cgroupV1); ok && n > 0 && n < 1<<60 {
+		return n, "the container's memory limit"
+	}
+	if data, err := os.ReadFile(src.meminfo); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			if f := strings.Fields(line); len(f) >= 2 && f[0] == "MemTotal:" {
+				if kb, err := strconv.ParseInt(f[1], 10, 64); err == nil && kb > 0 {
+					return kb * 1024, "the machine's memory"
+				}
+			}
+		}
+	}
+	return 0, ""
+}
+
+func readIntFile(path string) (int64, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
+	return n, err == nil
 }
 
 func envInt64(key string, def int64) int64 {
@@ -121,10 +188,10 @@ type AdmissionController struct {
 	rejectStreak atomic.Int64
 
 	// Memory and DB size are sampled at most once per admissionSampleTTL.
-	// Check runs on every submission, and both readings are expensive:
-	// ReadMemStats stops the world, and a Pebble store's size means
-	// stat-ing every file in its directory. Under load that was about 9%
-	// of CPU, for numbers that barely move in a few hundred milliseconds.
+	// Check runs on every submission, and a Pebble store's size means
+	// stat-ing every file in its directory. Under load that (with the
+	// stop-the-world ReadMemStats memory used to come from) was about 9% of
+	// CPU, for numbers that barely move in a few hundred milliseconds.
 	memSample sampledInt64
 	dbSample  sampledInt64
 }
@@ -147,10 +214,32 @@ func (s *sampledInt64) get(read func() int64) int64 {
 	return s.value
 }
 
+// processMemoryMB is the memory the Go runtime is holding: everything it
+// has mapped from the OS, less what it has already handed back. It used to
+// be MemStats.Sys, which counts what was handed back too and so never comes
+// down. In storm test 2 one spike past the 1,400MB limit left Sys at
+// 1,417MB for good while resident memory sat near 750MB, and admission
+// refused every job from then on. runtime/metrics reads this without
+// stopping the world, unlike ReadMemStats.
 func processMemoryMB() int64 {
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-	return int64(m.Sys / (1024 * 1024))
+	total, released := goMemoryBytes()
+	return int64((total - released) / (1024 * 1024))
+}
+
+// reservedMemoryMB is everything the runtime has mapped, released or not
+// (what MemStats.Sys reports). /health shows it beside processMemoryMB.
+func reservedMemoryMB() int64 {
+	total, _ := goMemoryBytes()
+	return int64(total / (1024 * 1024))
+}
+
+func goMemoryBytes() (total, released uint64) {
+	samples := []metrics.Sample{
+		{Name: "/memory/classes/total:bytes"},
+		{Name: "/memory/classes/heap/released:bytes"},
+	}
+	metrics.Read(samples)
+	return samples[0].Value.Uint64(), samples[1].Value.Uint64()
 }
 
 func NewAdmissionController(limits AdmissionLimits, dbPath string) *AdmissionController {
@@ -205,9 +294,7 @@ func (c *AdmissionController) Check() AdmissionDecision {
 // Snapshot reports current admission pressure for /health, independent of
 // whether any request is currently being rejected.
 func (c *AdmissionController) Snapshot() map[string]any {
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-	currentMB := int64(m.Sys / (1024 * 1024))
+	currentMB := processMemoryMB()
 
 	var dbBytes int64
 	if c.dbPath != "" {
@@ -216,6 +303,7 @@ func (c *AdmissionController) Snapshot() map[string]any {
 
 	return map[string]any{
 		"memory_mb":           currentMB,
+		"memory_reserved_mb":  reservedMemoryMB(),
 		"memory_limit_mb":     c.limits.MemoryLimitMB,
 		"db_bytes":            dbBytes,
 		"db_max_bytes":        c.limits.DBMaxBytes,
