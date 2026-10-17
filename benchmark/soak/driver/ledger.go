@@ -50,6 +50,7 @@ type pending struct {
 	AcceptedAt   int64 // unix ms when the 201 arrived
 	SeenTerminal int64 // unix ms when GET /jobs first showed completed/failed
 	Checking     bool
+	Node         string // cluster test: the node that kept the job
 }
 
 type lostJob struct {
@@ -161,13 +162,19 @@ func (l *ledger) nextSeq() uint64 {
 }
 
 func (l *ledger) accepted(seq uint64, jobID string, at time.Time) {
+	l.acceptedOn(seq, jobID, "", at)
+}
+
+// acceptedOn also records which cluster node kept the job ("" outside a
+// cluster test).
+func (l *ledger) acceptedOn(seq uint64, jobID, node string, at time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.s.Counters.Accepted++
 	if l.s.Done.has(seq) {
 		return // the webhook beat the 201 back
 	}
-	l.s.Outstanding[seq] = &pending{JobID: jobID, AcceptedAt: at.UnixMilli()}
+	l.s.Outstanding[seq] = &pending{JobID: jobID, AcceptedAt: at.UnixMilli(), Node: node}
 }
 
 func (l *ledger) shed() {

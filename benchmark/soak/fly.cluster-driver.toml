@@ -1,0 +1,43 @@
+# Driver for the cluster failure test (see README, "Cluster failure test"):
+# 500 jobs/s spread over three Aquifer nodes, and one failure about every
+# 25 minutes, with recovery time in between. It also runs the Valkey the
+# nodes coordinate through (port 6379, private network only). Status pages
+# on 8081.
+app = "aquifer-cluster-driver"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile.cluster-driver"
+
+[env]
+  SOAK_NAME = "Aquifer cluster"
+  SOAK_SELF = "http://aquifer-cluster-driver.internal:8080"
+  SOAK_DATA = "/data/cluster-1"
+  SOAK_WS = "false"
+  SOAK_NODES = "a=http://aquifer-cluster-a.internal:8080|http://aquifer-cluster-a.internal:9090,b=http://aquifer-cluster-b.internal:8080|http://aquifer-cluster-b.internal:9090,c=http://aquifer-cluster-c.internal:8080|http://aquifer-cluster-c.internal:9090"
+
+# Arguments to the image's /driver entrypoint. -chaos=false keeps the
+# upstream and webhook receiver healthy and turns off the soak's random
+# kills, so every failure is one the schedule chose.
+[processes]
+  app = "-valkey -chaos=false -phases=3h@500 -ramp-hour=-1 -peak-hour=-1 -reboot-every=0 -scenarios=30m:kill:a,25m:hold:b:5m,25m:freeze:c:20s,25m:valkey:5m,25m:hold:a+b:5m,25m:drain:c,20m:end"
+
+[http_service]
+  internal_port = 8081
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = false
+  min_machines_running = 1
+  processes = ["app"]
+
+[[mounts]]
+  source = "cluster_driver_data"
+  destination = "/data"
+  initial_size = "3gb"
+
+[[restart]]
+  policy = "always"
+
+[[vm]]
+  size = "performance-2x"
+  memory = "4gb"

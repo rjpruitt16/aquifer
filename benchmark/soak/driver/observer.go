@@ -512,6 +512,7 @@ func (o *observer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"ledger":        v,
 		"websocket":     o.wsStatus(),
 		"storm":         o.d.storm.status(),
+		"cluster":       o.d.cluster.status(o.d),
 		"last_minute":   last,
 		"last_hour":     lastHour,
 		"daily":         days,

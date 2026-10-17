@@ -1,0 +1,35 @@
+# Aquifer node a of the cluster failure test (see README, "Cluster failure
+# test"). Same image and machine size as the soak target. The three nodes
+# route users through the Valkey on aquifer-cluster-driver and check
+# idempotency there too. No public service.
+app = "aquifer-cluster-a"
+primary_region = "iad"
+kill_signal = "SIGTERM"
+kill_timeout = 30
+
+[build]
+  dockerfile = "Dockerfile.target"
+
+[env]
+  SOAK_DATA_DIR = "/data/cluster-1"
+  DB_PATH = "/data/cluster-1/aquifer.db"
+  AQUIFER_CLUSTER_ENABLED = "true"
+  AQUIFER_CLUSTER_PROVIDER = "valkey"
+  AQUIFER_CLUSTER_SELF_ID = "a"
+  AQUIFER_CLUSTER_SELF_ADDR = "http://aquifer-cluster-a.internal:8080"
+  AQUIFER_CLUSTER_MEMBERS = "a=http://aquifer-cluster-a.internal:8080,b=http://aquifer-cluster-b.internal:8080,c=http://aquifer-cluster-c.internal:8080"
+  AQUIFER_CLUSTER_VALKEY_URL = "redis://aquifer-cluster-driver.internal:6379"
+  AQUIFER_VALKEY_URL = "redis://aquifer-cluster-driver.internal:6379"
+  AQUIFER_REMOTE_IDEMPOTENCY_ENABLED = "true"
+
+[[mounts]]
+  source = "aquifer_cluster_data"
+  destination = "/data"
+  initial_size = "3gb"
+
+[[restart]]
+  policy = "always"
+
+[[vm]]
+  size = "performance-1x"
+  memory = "2gb"
