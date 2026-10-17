@@ -336,3 +336,50 @@ func TestAdmissionMemoryComesBackDownAfterASpike(t *testing.T) {
 		t.Fatalf("after the spike, admission still refuses: %+v", d)
 	}
 }
+
+func TestDefaultMemoryLimitFollowsTheMachine(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	missing := filepath.Join(dir, "missing")
+	meminfo := write("meminfo", "MemTotal:        2048000 kB\nMemFree:          100000 kB\n")
+
+	// A container limit wins over the machine's memory.
+	v2 := write("memory.max", "1073741824\n") // 1GiB
+	if got := deriveMemoryLimitMB(memorySources{cgroupV2: v2, cgroupV1: missing, meminfo: meminfo}); got != 716 {
+		t.Fatalf("cgroup v2 1GiB: got %dMB, want 716 (70%%)", got)
+	}
+
+	// No limit ("max" in v2, a huge number in v1): fall back to MemTotal.
+	unlimited := write("memory.max.unlimited", "max\n")
+	v1huge := write("limit_in_bytes", "9223372036854771712\n")
+	if got := deriveMemoryLimitMB(memorySources{cgroupV2: unlimited, cgroupV1: v1huge, meminfo: meminfo}); got != 1400 {
+		t.Fatalf("2,048,000kB machine: got %dMB, want 1400", got)
+	}
+
+	v1 := write("limit_in_bytes.512m", "536870912\n")
+	if got := deriveMemoryLimitMB(memorySources{cgroupV2: missing, cgroupV1: v1, meminfo: meminfo}); got != 358 {
+		t.Fatalf("cgroup v1 512MiB: got %dMB, want 358", got)
+	}
+
+	// Nothing readable (macOS): unbounded, as before.
+	if got := deriveMemoryLimitMB(memorySources{cgroupV2: missing, cgroupV1: missing, meminfo: missing}); got != 0 {
+		t.Fatalf("nothing to read: got %dMB, want 0", got)
+	}
+}
+
+func TestExplicitMemoryLimitZeroStaysOff(t *testing.T) {
+	t.Setenv("AQUIFER_MEMORY_LIMIT_MB", "0")
+	if got := LoadAdmissionLimits().MemoryLimitMB; got != 0 {
+		t.Fatalf("AQUIFER_MEMORY_LIMIT_MB=0: got %d", got)
+	}
+	t.Setenv("AQUIFER_MEMORY_LIMIT_MB", "900")
+	if got := LoadAdmissionLimits().MemoryLimitMB; got != 900 {
+		t.Fatalf("AQUIFER_MEMORY_LIMIT_MB=900: got %d", got)
+	}
+}
