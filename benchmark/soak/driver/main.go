@@ -56,6 +56,9 @@ type config struct {
 	Receivers   int           `json:"storm_receivers,omitempty"`
 	BodyKB      int           `json:"storm_body_kb,omitempty"`
 	NoWebhook   bool          `json:"storm_no_webhook,omitempty"`
+	Nodes       string        `json:"cluster_nodes,omitempty"`
+	Scenarios   string        `json:"cluster_scenarios,omitempty"`
+	Valkey      bool          `json:"cluster_valkey,omitempty"`
 	Name        string        `json:"name"`
 	WS          wsConfig      `json:"websocket"`
 }
@@ -85,7 +88,8 @@ type driver struct {
 
 	runID      string // prefixes WebSocket session IDs, new per driver process
 	wsUpstream *endpoint
-	storm      *storm // nil outside a storm test, see storm.go
+	storm      *storm   // nil outside a storm test, see storm.go
+	cluster    *cluster // nil outside a cluster failure test, see cluster.go
 	wsLedger   *wsLedger
 	wsWin      wsWindow
 	wsWanted   atomic.Int64 // sessions wanted right now
@@ -136,7 +140,23 @@ func main() {
 	flag.IntVar(&cfg.Receivers, "receivers", 0, "storm test: spread jobs over this many customer endpoints, one port each from 9000")
 	flag.IntVar(&cfg.BodyKB, "body-kb", 0, "storm test: send a random 0..N KB request body with each job")
 	flag.BoolVar(&cfg.NoWebhook, "no-webhook", false, "storm test: jobs carry no webhook_url; a job is done when its receiver first answers 2xx, or when Aquifer reports it failed (needs -receivers)")
+	flag.StringVar(&cfg.Nodes, "nodes", envOr("SOAK_NODES", ""), "cluster test: id=target|supervisor,... spread load over these Aquifer nodes instead of -target")
+	flag.StringVar(&cfg.Scenarios, "scenarios", "", "cluster test: failures in order, after:action[:nodes][:for], e.g. 30m:kill:a,25m:hold:b:5m,25m:freeze:c:20s,25m:valkey:5m,20m:end")
+	flag.BoolVar(&cfg.Valkey, "valkey", false, "cluster test: run the nodes' Valkey here (valkey-server on :6379) so a scenario can take it down")
 	flag.Parse()
+	var nodes []*clusterNode
+	var plan []scenario
+	if cfg.Nodes != "" {
+		var err error
+		if nodes, err = parseNodes(cfg.Nodes); err != nil {
+			log.Fatal(err)
+		}
+		if plan, err = parseScenarios(cfg.Scenarios, nodes); err != nil {
+			log.Fatal(err)
+		}
+		// Status pages and per-minute target stats follow the first node.
+		cfg.Target, cfg.Supervisor = nodes[0].Target, nodes[0].Supervisor
+	}
 	var phases []stormPhase
 	if cfg.Phases != "" {
 		var err error
@@ -178,6 +198,14 @@ func main() {
 		d.storm = newStorm(cfg, phases)
 	}
 	d.ledger.failedIsTerminal = cfg.NoWebhook
+	if len(nodes) > 0 {
+		d.cluster = newCluster(nodes, plan, cfg.Valkey)
+		if d.cluster.valkey != nil {
+			if err := d.cluster.valkey.start(); err != nil {
+				log.Fatalf("valkey: %v", err)
+			}
+		}
+	}
 	var discardedWS *WSCounters
 	d.wsLedger, discardedWS = openWSLedger(cfg.DataDir)
 	d.rate.Store(int64(cfg.Rate))
@@ -207,7 +235,13 @@ func main() {
 	go func() { log.Fatal(http.ListenAndServe(":8081", pub)) }()
 
 	stop := make(chan struct{})
-	waitForTarget(cfg.Target)
+	if d.cluster != nil {
+		for _, n := range d.cluster.nodes {
+			waitForTarget(n.Target)
+		}
+	} else {
+		waitForTarget(cfg.Target)
+	}
 	if cfg.Chaos {
 		// A storm's chaos is its receivers (and the kill); the callback
 		// Aquifer reports results to stays healthy so it doesn't blur them.
@@ -225,6 +259,9 @@ func main() {
 		go d.wsExpireLoop(stop)
 		go d.wsBurstLoop(stop)
 		go d.peakLoop(stop)
+	}
+	if d.cluster != nil && len(d.cluster.plan) > 0 {
+		go d.runScenarios(stop)
 	}
 	if d.storm != nil && len(d.storm.phases) > 0 {
 		go d.runPhases(stop)
@@ -305,24 +342,27 @@ func (d *driver) submit() {
 	body := fmt.Sprintf(`{"user_id":"soak-%d","idempotent_key":"soak-%d","url":"%s","method":"POST"%s%s}`,
 		seq%uint64(d.cfg.Users), seq, d.storm.jobURL(d.cfg.Self, seq), webhook, d.storm.body())
 	start := time.Now()
-	resp, err := d.client.Post(d.cfg.Target+"/jobs", "application/json", strings.NewReader(body))
+	status, owner, rb, err := d.post(body)
 	if err != nil {
 		d.ledger.clientError(seq)
 		d.win.clientErr.Add(1)
 		return
 	}
-	rb, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
 	now := time.Now()
-	switch resp.StatusCode {
-	case 201:
+	// 200 is the existing job for a key already accepted: in a cluster
+	// test, the answer to a 504 retried with the same key.
+	if status == 200 && d.cluster == nil {
+		status = -1
+	}
+	switch status {
+	case 200, 201:
 		m := jobIDRe.FindSubmatch(rb)
 		if m == nil {
 			d.ledger.clientError(seq)
 			d.win.clientErr.Add(1)
 			return
 		}
-		d.ledger.accepted(seq, string(m[1]), now)
+		d.ledger.acceptedOn(seq, string(m[1]), owner, now)
 		d.win.accepted.Add(1)
 		d.win.accept.add(now.Sub(start))
 	case 429, 503:
@@ -505,7 +545,7 @@ func (d *driver) checkLoop(stop <-chan struct{}) {
 			go func() {
 				defer wg.Done()
 				for seq := range work {
-					status := d.jobStatus(batch[seq].JobID)
+					status := d.jobStatus(batch[seq])
 					if d.ledger.resolve(seq, status, time.Now()) == "failed" && d.storm != nil {
 						d.storm.recordFailed(seq)
 					}
@@ -520,10 +560,34 @@ func (d *driver) checkLoop(stop <-chan struct{}) {
 	}
 }
 
-func (d *driver) jobStatus(id string) string {
+// post sends one submission: to -target, or to a random node in a cluster
+// test. owner is the node that kept the job (X-Aquifer-Cluster-Owner).
+func (d *driver) post(body string) (status int, owner string, rb []byte, err error) {
+	if d.cluster != nil {
+		return d.clusterPost(body)
+	}
+	resp, err := d.client.Post(d.cfg.Target+"/jobs", "application/json", strings.NewReader(body))
+	if err != nil {
+		return 0, "", nil, err
+	}
+	rb, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	return resp.StatusCode, "", rb, nil
+}
+
+// jobStatus asks the node that kept the job. Any other node would 404.
+func (d *driver) jobStatus(p pending) string {
+	target := d.cfg.Target
+	if d.cluster != nil {
+		target = d.cluster.targetFor(p.Node)
+	}
+	return d.jobStatusAt(target, p.JobID)
+}
+
+func (d *driver) jobStatusAt(target, id string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, d.cfg.Target+"/jobs/"+id, nil)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, target+"/jobs/"+id, nil)
 	resp, err := d.client.Do(req)
 	if err != nil {
 		return "error"

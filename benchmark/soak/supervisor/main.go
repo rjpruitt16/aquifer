@@ -48,7 +48,8 @@ type supervisor struct {
 	logOut    *os.File
 	logBytes  int64
 	bootAt    time.Time
-	stopping  bool // shutting down: don't restart aquifer
+	stopping  bool      // shutting down: don't restart aquifer
+	holdUntil time.Time // /hold: don't restart aquifer before this
 }
 
 const ringSize = 5000
@@ -70,6 +71,9 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /kill", s.handleKill)
 	mux.HandleFunc("POST /reboot", s.handleReboot)
+	mux.HandleFunc("POST /hold", s.handleHold)
+	mux.HandleFunc("POST /freeze", s.handleFreeze)
+	mux.HandleFunc("POST /drain", s.handleDrain)
 	mux.HandleFunc("GET /stats", s.handleStats)
 	mux.HandleFunc("GET /logs", s.handleLogs)
 	go func() { log.Fatal(http.ListenAndServe(*listen, mux)) }()
@@ -79,9 +83,15 @@ func main() {
 		s.runOnce()
 		s.mu.Lock()
 		stopping := s.stopping
+		hold := time.Until(s.holdUntil)
 		s.mu.Unlock()
 		if stopping {
 			select {} // forwardShutdown exits the process
+		}
+		if hold > 0 {
+			s.record(fmt.Sprintf("supervisor: holding aquifer down for %s", hold.Round(time.Second)))
+			time.Sleep(hold)
+			s.record("supervisor: hold over, restarting aquifer")
 		}
 		time.Sleep(time.Second)
 	}
@@ -242,6 +252,86 @@ func (s *supervisor) handleReboot(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 		os.Exit(1)
 	}()
+}
+
+// The cluster failure test's controls. Each takes ?for=<duration>.
+
+// handleHold kills Aquifer (SIGKILL) and keeps it down for the duration:
+// the node is gone, its port refuses connections, and its heartbeats stop,
+// while the machine stays up. Then it restarts and recovers its store.
+func (s *supervisor) handleHold(w http.ResponseWriter, r *http.Request) {
+	d, ok := forParam(w, r)
+	if !ok {
+		return
+	}
+	s.mu.Lock()
+	p := s.proc
+	s.holdUntil = time.Now().Add(d)
+	s.mu.Unlock()
+	at := time.Now()
+	if p != nil {
+		p.Signal(syscall.SIGKILL)
+	}
+	s.mu.Lock()
+	s.kills++
+	s.mu.Unlock()
+	s.record(fmt.Sprintf("supervisor: hold requested for %s", d))
+	writeJSON(w, map[string]any{"at_unix_ms": at.UnixMilli(), "for_s": int(d.Seconds())})
+}
+
+// handleFreeze stops Aquifer (SIGSTOP) and resumes it (SIGCONT) after the
+// duration: connections are accepted by the kernel but nothing answers,
+// the "slow owner" case cluster routing answers with 504.
+func (s *supervisor) handleFreeze(w http.ResponseWriter, r *http.Request) {
+	d, ok := forParam(w, r)
+	if !ok {
+		return
+	}
+	s.mu.Lock()
+	p := s.proc
+	s.mu.Unlock()
+	if p == nil {
+		http.Error(w, "aquifer not running", http.StatusConflict)
+		return
+	}
+	at := time.Now()
+	if err := p.Signal(syscall.SIGSTOP); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.record(fmt.Sprintf("supervisor: froze pid %d for %s", p.Pid, d))
+	go func() {
+		time.Sleep(d)
+		p.Signal(syscall.SIGCONT)
+		s.record(fmt.Sprintf("supervisor: resumed pid %d", p.Pid))
+	}()
+	writeJSON(w, map[string]any{"at_unix_ms": at.UnixMilli(), "for_s": int(d.Seconds())})
+}
+
+// handleDrain sends Aquifer SIGTERM, the graceful path a deploy takes: it
+// advertises itself as draining, finishes what it can and exits, and the
+// supervisor starts it again.
+func (s *supervisor) handleDrain(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	p := s.proc
+	s.mu.Unlock()
+	if p == nil {
+		http.Error(w, "aquifer not running", http.StatusConflict)
+		return
+	}
+	at := time.Now()
+	p.Signal(syscall.SIGTERM)
+	s.record(fmt.Sprintf("supervisor: sent SIGTERM to pid %d", p.Pid))
+	writeJSON(w, map[string]any{"at_unix_ms": at.UnixMilli()})
+}
+
+func forParam(w http.ResponseWriter, r *http.Request) (time.Duration, bool) {
+	d, err := time.ParseDuration(r.URL.Query().Get("for"))
+	if err != nil || d <= 0 || d > time.Hour {
+		http.Error(w, "for must be a duration up to 1h, e.g. ?for=5m", http.StatusBadRequest)
+		return 0, false
+	}
+	return d, true
 }
 
 func (s *supervisor) handleLogs(w http.ResponseWriter, r *http.Request) {
