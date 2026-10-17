@@ -60,6 +60,11 @@ Parameters:
     Default: v2.40.2
     Description: Docker Compose release installed as a verified CLI plugin
     AllowedPattern: "^v[0-9]+\\.[0-9]+\\.[0-9]+$"
+  BuildxVersion:
+    Type: String
+    Default: v0.38.0
+    Description: Docker Buildx release installed as a verified CLI plugin
+    AllowedPattern: "^v[0-9]+\\.[0-9]+\\.[0-9]+$"
   AllowedUrlDomains:
     Type: String
     Default: postman-echo.com
@@ -217,6 +222,16 @@ Resources:
           install -m 0755 "$COMPOSE_ASSET" /usr/local/lib/docker/cli-plugins/docker-compose
           docker compose version
 
+          BUILDX_ASSET=buildx-${BuildxVersion}.linux-amd64
+          BUILDX_BASE=https://github.com/docker/buildx/releases/download/${BuildxVersion}
+          curl --fail --silent --show-error --location --retry 5 --retry-all-errors --output "$BUILDX_ASSET" "$BUILDX_BASE/$BUILDX_ASSET"
+          curl --fail --silent --show-error --location --retry 5 --retry-all-errors --output buildx-checksums.txt "$BUILDX_BASE/checksums.txt"
+          awk -v asset="$BUILDX_ASSET" '$2 == "*" asset || $2 == asset { print }' buildx-checksums.txt > "$BUILDX_ASSET.sha256"
+          test -s "$BUILDX_ASSET.sha256"
+          sha256sum --check "$BUILDX_ASSET.sha256"
+          install -m 0755 "$BUILDX_ASSET" /usr/local/lib/docker/cli-plugins/docker-buildx
+          docker buildx version
+
           git clone --depth 1 --branch '${QuickStartRef}' https://github.com/rjpruitt16/aquifer.git /opt/aquifer
           cd /opt/aquifer/examples/canalis
           cat > .env <<'QUICKSTART_ENV'
@@ -299,6 +314,16 @@ Resources:
           sha256sum --check "$COMPOSE_ASSET.sha256"
           install -m 0755 "$COMPOSE_ASSET" /usr/local/lib/docker/cli-plugins/docker-compose
           docker compose version
+
+          BUILDX_ASSET=buildx-${BuildxVersion}.linux-amd64
+          BUILDX_BASE=https://github.com/docker/buildx/releases/download/${BuildxVersion}
+          curl --fail --silent --show-error --location --retry 5 --retry-all-errors --output "$BUILDX_ASSET" "$BUILDX_BASE/$BUILDX_ASSET"
+          curl --fail --silent --show-error --location --retry 5 --retry-all-errors --output buildx-checksums.txt "$BUILDX_BASE/checksums.txt"
+          awk -v asset="$BUILDX_ASSET" '$2 == "*" asset || $2 == asset { print }' buildx-checksums.txt > "$BUILDX_ASSET.sha256"
+          test -s "$BUILDX_ASSET.sha256"
+          sha256sum --check "$BUILDX_ASSET.sha256"
+          install -m 0755 "$BUILDX_ASSET" /usr/local/lib/docker/cli-plugins/docker-buildx
+          docker buildx version
 
           git clone --depth 1 --branch '${QuickStartRef}' https://github.com/rjpruitt16/aquifer.git /opt/aquifer
           cd /opt/aquifer/examples/canalis
