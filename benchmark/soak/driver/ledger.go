@@ -97,6 +97,8 @@ type ledger struct {
 	s    ledgerState
 	path string
 	seqF string
+
+	failedIsTerminal bool // storm -no-webhook, see resolve
 }
 
 const seqBlock = 100_000
@@ -269,12 +271,18 @@ const flushWindow = 300 * time.Millisecond
 
 // resolve applies the outcome of a GET /jobs/{id} check. status is the job's
 // status there, "" for 404, or "error" if the check itself failed.
-func (l *ledger) resolve(seq uint64, status string, now time.Time) {
+//
+// With failedIsTerminal (storm -no-webhook) there is no webhook to wait
+// for: a failed job is finished, and resolve returns "failed" when it
+// closes one that way. A job Aquifer calls completed whose receiver never
+// recorded it still counts as finished_without_webhook, which in that mode
+// means "completed, but never delivered".
+func (l *ledger) resolve(seq uint64, status string, now time.Time) (closed string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	p, ok := l.s.Outstanding[seq]
 	if !ok {
-		return // webhook arrived meanwhile
+		return "" // webhook arrived meanwhile
 	}
 	p.Checking = false
 	c := &l.s.Counters
@@ -291,7 +299,14 @@ func (l *ledger) resolve(seq uint64, status string, now time.Time) {
 	}
 	switch status {
 	case "error":
-	case "completed", "failed":
+	case "failed":
+		if l.failedIsTerminal {
+			c.Failed++
+			closeAs("")
+			return "failed"
+		}
+		fallthrough
+	case "completed":
 		if p.SeenTerminal == 0 {
 			p.SeenTerminal = now.UnixMilli()
 		} else if now.Sub(time.UnixMilli(p.SeenTerminal)) > 10*time.Minute {
@@ -317,6 +332,7 @@ func (l *ledger) resolve(seq uint64, status string, now time.Time) {
 			closeAs("stuck_" + status)
 		}
 	}
+	return ""
 }
 
 func (l *ledger) acceptedJustBeforeRestart(acceptedAt int64) bool {

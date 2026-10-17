@@ -174,6 +174,9 @@ func (d *driver) handleHook(w http.ResponseWriter, r *http.Request) {
 	}
 	json.Unmarshal(body, &payload)
 	e2e, hasE2E, dup := d.ledger.webhook(seq, payload.Status, time.Now())
+	if d.storm != nil {
+		d.storm.recordHook(seq, payload.Status, e2e, hasE2E, dup)
+	}
 	switch {
 	case dup:
 		d.win.dups.Add(1)

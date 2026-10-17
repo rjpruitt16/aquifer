@@ -1,0 +1,27 @@
+# Aquifer for the 3-hour storm test (see README, "Storm test"). Same image
+# and machine size as the week-long soak, in its own app so the soak keeps
+# running. No public service: the storm driver reaches Aquifer (8080) and
+# the supervisor (9090) over Fly's private network.
+app = "aquifer-storm"
+primary_region = "iad"
+kill_signal = "SIGTERM"
+kill_timeout = 30
+
+[build]
+  dockerfile = "Dockerfile.target"
+
+[env]
+  SOAK_DATA_DIR = "/data/storm-1"
+  DB_PATH = "/data/storm-1/aquifer.db"
+
+[[mounts]]
+  source = "aquifer_storm_data"
+  destination = "/data"
+  initial_size = "10gb"
+
+[[restart]]
+  policy = "always"
+
+[[vm]]
+  size = "performance-1x"
+  memory = "2gb"

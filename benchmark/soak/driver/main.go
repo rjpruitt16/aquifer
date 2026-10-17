@@ -52,6 +52,10 @@ type config struct {
 	Users       int           `json:"users"`
 	Chaos       bool          `json:"chaos"`
 	PeakHourUTC int           `json:"combined_peak_hour_utc"`
+	Phases      string        `json:"storm_phases,omitempty"`
+	Receivers   int           `json:"storm_receivers,omitempty"`
+	BodyKB      int           `json:"storm_body_kb,omitempty"`
+	NoWebhook   bool          `json:"storm_no_webhook,omitempty"`
 	Name        string        `json:"name"`
 	WS          wsConfig      `json:"websocket"`
 }
@@ -81,6 +85,7 @@ type driver struct {
 
 	runID      string // prefixes WebSocket session IDs, new per driver process
 	wsUpstream *endpoint
+	storm      *storm // nil outside a storm test, see storm.go
 	wsLedger   *wsLedger
 	wsWin      wsWindow
 	wsWanted   atomic.Int64 // sessions wanted right now
@@ -127,7 +132,18 @@ func main() {
 	flag.DurationVar(&cfg.WS.CmdEvery, "ws-cmd-every", time.Second, "time between commands on each session")
 	flag.IntVar(&cfg.WS.Events, "ws-events", 3, "events the backend sends per command")
 	flag.StringVar(&wsRampSteps, "ws-ramp-steps", "200,400,800,1200,1600,2000,2500", "WebSocket ramp steps, sessions")
+	flag.StringVar(&cfg.Phases, "phases", "", "storm test: offered rates in order, e.g. 15m@500,2h@1500,45m@300, replacing the daily bursts and ramps; load stops after the last")
+	flag.IntVar(&cfg.Receivers, "receivers", 0, "storm test: spread jobs over this many customer endpoints, one port each from 9000")
+	flag.IntVar(&cfg.BodyKB, "body-kb", 0, "storm test: send a random 0..N KB request body with each job")
+	flag.BoolVar(&cfg.NoWebhook, "no-webhook", false, "storm test: jobs carry no webhook_url; a job is done when its receiver first answers 2xx, or when Aquifer reports it failed (needs -receivers)")
 	flag.Parse()
+	var phases []stormPhase
+	if cfg.Phases != "" {
+		var err error
+		if phases, err = parsePhases(cfg.Phases); err != nil {
+			log.Fatal(err)
+		}
+	}
 	cfg.WS.CmdEveryMS = cfg.WS.CmdEvery.Milliseconds()
 	for _, s := range strings.Split(wsRampSteps, ",") {
 		if n, err := strconv.Atoi(strings.TrimSpace(s)); err == nil {
@@ -155,6 +171,13 @@ func main() {
 		runID:      fmt.Sprintf("r%d", time.Now().Unix()),
 		wsUpstream: newEndpoint("ws_upstream", wsUpstreamModes),
 	}
+	if cfg.NoWebhook && cfg.Receivers <= 0 {
+		log.Fatal("-no-webhook needs -receivers: the receivers are what record delivery")
+	}
+	if len(phases) > 0 || cfg.Receivers > 0 || cfg.BodyKB > 0 {
+		d.storm = newStorm(cfg, phases)
+	}
+	d.ledger.failedIsTerminal = cfg.NoWebhook
 	var discardedWS *WSCounters
 	d.wsLedger, discardedWS = openWSLedger(cfg.DataDir)
 	d.rate.Store(int64(cfg.Rate))
@@ -175,6 +198,9 @@ func main() {
 	priv.HandleFunc("/hook", d.handleHook)
 	priv.HandleFunc("/socket", d.handleWSUpstream)
 	go func() { log.Fatal(http.ListenAndServe(":8080", priv)) }()
+	if d.storm != nil && d.storm.receivers > 0 {
+		d.serveReceivers()
+	}
 
 	pub := http.NewServeMux()
 	d.obs.routes(pub)
@@ -183,8 +209,12 @@ func main() {
 	stop := make(chan struct{})
 	waitForTarget(cfg.Target)
 	if cfg.Chaos {
-		go d.upstream.schedule(10*time.Minute, d.events, stop)
-		go d.webhook.schedule(10*time.Minute, d.events, stop)
+		// A storm's chaos is its receivers (and the kill); the callback
+		// Aquifer reports results to stays healthy so it doesn't blur them.
+		if d.storm == nil {
+			go d.upstream.schedule(10*time.Minute, d.events, stop)
+			go d.webhook.schedule(10*time.Minute, d.events, stop)
+		}
 		if cfg.WS.Enabled {
 			go d.wsUpstream.schedule(10*time.Minute, d.events, stop)
 		}
@@ -196,8 +226,12 @@ func main() {
 		go d.wsBurstLoop(stop)
 		go d.peakLoop(stop)
 	}
-	go d.burstLoop(stop)
-	go d.rampLoop(stop)
+	if d.storm != nil && len(d.storm.phases) > 0 {
+		go d.runPhases(stop)
+	} else {
+		go d.burstLoop(stop)
+		go d.rampLoop(stop)
+	}
 	go d.checkLoop(stop)
 	go d.obs.run(stop)
 	go d.saveLoop(stop)
@@ -264,8 +298,12 @@ func (d *driver) load(stop <-chan struct{}) {
 func (d *driver) submit() {
 	defer func() { <-d.sem }()
 	seq := d.ledger.nextSeq()
-	body := fmt.Sprintf(`{"user_id":"soak-%d","idempotent_key":"soak-%d","url":"%s/work?s=%d","method":"POST","webhook_url":"%s/hook?s=%d"}`,
-		seq%uint64(d.cfg.Users), seq, d.cfg.Self, seq, d.cfg.Self, seq)
+	webhook := fmt.Sprintf(`,"webhook_url":"%s/hook?s=%d"`, d.cfg.Self, seq)
+	if d.cfg.NoWebhook {
+		webhook = ""
+	}
+	body := fmt.Sprintf(`{"user_id":"soak-%d","idempotent_key":"soak-%d","url":"%s","method":"POST"%s%s}`,
+		seq%uint64(d.cfg.Users), seq, d.storm.jobURL(d.cfg.Self, seq), webhook, d.storm.body())
 	start := time.Now()
 	resp, err := d.client.Post(d.cfg.Target+"/jobs", "application/json", strings.NewReader(body))
 	if err != nil {
@@ -467,7 +505,10 @@ func (d *driver) checkLoop(stop <-chan struct{}) {
 			go func() {
 				defer wg.Done()
 				for seq := range work {
-					d.ledger.resolve(seq, d.jobStatus(batch[seq].JobID), time.Now())
+					status := d.jobStatus(batch[seq].JobID)
+					if d.ledger.resolve(seq, status, time.Now()) == "failed" && d.storm != nil {
+						d.storm.recordFailed(seq)
+					}
 				}
 			}()
 		}

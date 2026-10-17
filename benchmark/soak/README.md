@@ -185,6 +185,44 @@ and `monitor/setup.py` creates or updates an agent for the target named by `SOAK
 - posts each report to `/reports`, which is also its memory between runs;
 - on a warning or problem, opens a `soak-alert` issue in its own repository (aquifer or spillway), or comments on the open one, and goes no further. A person decides what happens next.
 
+## Storm test
+
+A 3-hour run for one question the soak doesn't answer: what happens when
+traffic sits well above what Aquifer can sustain for hours, against many
+customer endpoints that each misbehave differently. It runs in its own apps
+(`aquifer-storm`, `aquifer-storm-driver`, configs `fly.storm-target.toml`
+and `fly.storm-driver.toml`), on the same machine sizes as the soak.
+
+The driver flags behind it are off unless set, so the soak is unchanged:
+
+- `-phases=15m@500,2h@1500,45m@300` replaces the hourly bursts and daily
+  ramp with a fixed schedule of offered rates, and stops offering load after
+  the last phase.
+- `-receivers=200` sends each job to one of 200 endpoints, each on its own
+  port from 9000. Aquifer queues and paces by host and port, so each port is
+  a separate destination. By index, 1 in 20 is dead (always 503), 2 are
+  flaky (30% 503), 3 are slow (1-8 s) and 14 are healthy. Results still
+  come back on the driver's own `/hook`, which stays healthy in a storm.
+- `-body-kb=4` sends a random 0-4KB body with each job.
+- `-no-webhook` (with `-receivers`) leaves out `webhook_url`. That's the
+  one-hop case: a merchant puts Aquifer in front of inbound webhooks
+  (Shopify, payment or AI providers) and only needs each one forwarded to
+  its own service. A job counts as delivered when its endpoint first answers
+  2xx. A job to a dead endpoint is finished once Aquifer reports it failed.
+  `finished_without_webhook` then means Aquifer called the job completed
+  but its endpoint never saw it. `fly.storm2-*.toml` run this variant as
+  `aquifer-storm2` and `aquifer-storm2-driver`.
+
+`/status` gains a `storm` section: the schedule, the current phase, and per
+phase and endpoint class the requests the endpoints saw, jobs completed and
+failed, and end-to-end p50/p99. Shedding (429/503 with Retry-After) is
+expected above capacity. A pass means:
+- no accepted job is lost outside the kill's flush window;
+- every accepted job ends completed or failed, with its webhook;
+- the backlog drains during the last phase;
+- memory and disk stay bounded;
+- healthy endpoints' latency holds while dead ones retry.
+
 ## Running it locally
 
 At a light rate, for checking the harness itself:
