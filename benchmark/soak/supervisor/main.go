@@ -239,7 +239,8 @@ func (s *supervisor) handleKill(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleReboot exits the supervisor, which ends the machine's main process;
-// Fly's restart policy then boots the machine again.
+// Fly's restart policy then boots the machine again. The driver's
+// rebootKillDelay assumes the 200ms below; change both together.
 func (s *supervisor) handleReboot(w http.ResponseWriter, r *http.Request) {
 	s.record("supervisor: machine restart requested")
 	writeJSON(w, map[string]any{"at_unix_ms": time.Now().UnixMilli()})
