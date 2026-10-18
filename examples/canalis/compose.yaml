@@ -1,0 +1,94 @@
+name: canalis-aquifer
+
+x-aquifer: &aquifer
+  image: aquifer-canalis-a:${AQUIFER_VERSION:-latest}
+  build:
+    context: ../..
+    dockerfile: deploy/Dockerfile.release
+    args:
+      AQUIFER_VERSION: ${AQUIFER_VERSION:-latest}
+  environment: &aquifer-environment
+    AQUIFER_ADAPTER: http
+    AQUIFER_ALLOWED_URL_DOMAINS: ${AQUIFER_ALLOWED_URL_DOMAINS:-postman-echo.com}
+    AQUIFER_MEMORY_LIMIT_MB: ${AQUIFER_MEMORY_LIMIT_MB:-384}
+    AQUIFER_REGISTRY_INTERVAL_SECONDS: "2"
+    AQUIFER_REGISTRY_ROLE: http
+    AQUIFER_REGISTRY_URL: ${AQUIFER_REGISTRY_URL:-http://canalis:8080/register}
+    DB_PATH: /data/aquifer
+    L8_KEY_PATH: /data/.l8-key
+    PORT: "8080"
+  restart: unless-stopped
+  stop_grace_period: 60s
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  healthcheck:
+    test: ["CMD", "wget", "--quiet", "--output-document=-", "http://127.0.0.1:8080/ready"]
+    interval: 10s
+    timeout: 3s
+    retries: 6
+    start_period: 10s
+
+services:
+  valkey:
+    image: valkey/valkey:8
+    command:
+      - valkey-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+    volumes:
+      - valkey_data:/data
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  canalis:
+    image: ghcr.io/rjpruitt16/canalis-rs:${CANALIS_VERSION:-0.2}
+    environment:
+      CANALIS_VALKEY_URL: redis://valkey:6379
+      RUST_LOG: info
+    ports:
+      - "${CANALIS_HOST_ADDRESS:-127.0.0.1}:${CANALIS_HOST_PORT:-8080}:8080"
+    volumes:
+      - canalis_data:/data
+    restart: unless-stopped
+    stop_grace_period: 60s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    depends_on:
+      valkey:
+        condition: service_healthy
+
+  aquifer-a:
+    <<: *aquifer
+    volumes:
+      - aquifer_a_data:/data
+    depends_on:
+      - canalis
+
+  aquifer-b:
+    <<: *aquifer
+    image: aquifer-canalis-b:${AQUIFER_VERSION:-latest}
+    environment:
+      <<: *aquifer-environment
+      AQUIFER_REGISTRY_URL: ${AQUIFER_B_REGISTRY_URL:-http://canalis:8080/register}
+    volumes:
+      - aquifer_b_data:/data
+    depends_on:
+      - canalis
+
+volumes:
+  aquifer_a_data:
+  aquifer_b_data:
+  canalis_data:
+  valkey_data:

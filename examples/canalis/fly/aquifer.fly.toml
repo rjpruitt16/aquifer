@@ -1,0 +1,40 @@
+primary_region = "iad"
+kill_signal = "SIGTERM"
+kill_timeout = "60s"
+
+[env]
+  AQUIFER_ADAPTER = "http"
+  AQUIFER_MEMORY_LIMIT_MB = "400"
+  AQUIFER_REGISTRY_INTERVAL_SECONDS = "2"
+  AQUIFER_REGISTRY_ROLE = "http"
+  DB_PATH = "/data/aquifer"
+  L8_KEY_PATH = "/data/.l8-key"
+  PORT = "8080"
+
+[http_service]
+  internal_port = 8080
+  force_https = false
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 200
+    hard_limit = 250
+
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "15s"
+    method = "GET"
+    path = "/ready"
+    timeout = "3s"
+
+[[mounts]]
+  source = "aquifer_data"
+  destination = "/data"
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1
