@@ -472,6 +472,26 @@ curl -N http://localhost:8080/jobs/<id>/stream
 
 `GET /health` is a liveness endpoint. It remains **200** during graceful shutdown, with `status: "draining"`, so an orchestrator does not kill the process before accepted work has a chance to finish.
 
+## GET /metrics
+
+Prometheus text format, on the same port as `/health`. The `aquifer` binary serves it by default. A program embedding Aquifer gets it by passing `aquifer.NewPrometheusMetrics()` as `RuntimeOptions.Metrics`; with any other adapter it's a 404. Like `/health`, everything is this node's own.
+
+| Metric | Type | Labels | What |
+|---|---|---|---|
+| `aquifer_jobs_total` | counter | `target`, `outcome` | Jobs that reached a terminal state: `completed`, `failed` or `expired` |
+| `aquifer_dispatch_attempts_total` | counter | `target`, `status_class` | Attempts at the target API, retries included: `2xx`, `4xx`, `429`, `5xx`, or `error` (no response) |
+| `aquifer_queue_wait_seconds` | histogram | `target` | Submission to first dispatch: time spent waiting in Aquifer |
+| `aquifer_job_duration_seconds` | histogram | `target`, `outcome` | Submission to terminal state: end to end |
+| `aquifer_admission_rejected_total` | counter | `reason` | Jobs refused with `429`: `memory`, `db_size`, `sync_lag`, `upstream_queue`, `queue_fair_share`, ... |
+| `aquifer_webhooks_total` | counter | `outcome` | Completion webhooks `delivered` or `failed` |
+| `aquifer_active_queues` | gauge | `target` | Queues with work waiting (one per tenant with account queues on) |
+| `aquifer_backlog_jobs` | gauge | `target` | Jobs queued or in flight |
+| `aquifer_flow_rate_rps` | gauge | `target` | Sum of the active queues' current rates, after the target API's pacing headers |
+| `aquifer_fairness_jain` | gauge | `target` | [Jain's index](https://en.wikipedia.org/wiki/Fairness_measure) over queues with work waiting, by jobs each finished in about the last minute. `1` is perfectly even, `1/n` is one queue getting everything. Absent when nothing is waiting. |
+| `aquifer_node_info` | gauge | `node_id` | `1`, carrying the id sent as `X-Aqueduct-Node-Id` |
+
+`target` is the target API's scheme and host (`https://api.example.com`), or `pool:<id>`. There are no tenant labels by default: tenant IDs are unbounded, and often customer data. For a pilot, `AQUIFER_METRICS_TENANT_LABELS=true` adds `aquifer_tenant_jobs_total` and `aquifer_tenant_job_duration_seconds` with a `tenant` (`user_id`) label. The first 1,000 tenants seen get their own label, and the rest share `other`.
+
 ## GET /ready
 
 Readiness for load balancers and fleet discovery. An active node returns **200** with `{"status":"ready"}`. A draining node returns **503**, `Retry-After`, and both `X-Aqueduct-Node-State: draining` and the compatibility alias `X-Aquifer-Node-State: draining`.
@@ -663,10 +683,17 @@ curl "http://localhost:8080/results?idempotency_scope=shared&idempotent_key=weat
 
 ## Autoscaling
 
+Every dispatch carries these, with `X-Aquifer-*` aliases:
+
 | Header                    | Value                                              |
 |---------------------------|----------------------------------------------------|
 | `X-Aqueduct-Total-Jobs`   | Total jobs on this machine right now               |
 | `X-Aqueduct-Queue-Depth`  | Jobs waiting to be dispatched                      |
 | `X-Aqueduct-Flow-Rate`    | Current dispatch rate (RPS) for this queue         |
+| `X-Aqueduct-Active-Queues` | Queues on this node sending to this target API     |
+| `X-Aqueduct-Upstream-Backlog` | Jobs on this node waiting for this target API  |
+| `X-Aqueduct-Node-Id`      | This node's id: count the distinct ids to know how many Aquifer nodes are sending to you |
+
+Pacing is per node and per queue: a rate you advertise applies to each queue that received it, and nodes don't coordinate. So when several nodes send to you, divide your budget by the total of their active queues. `X-Aqueduct-Node-Id` tells the nodes apart. It's `AQUIFER_NODE_ID`, else `AQUIFER_CLUSTER_SELF_ID`, else `FLY_MACHINE_ID`, else the host name.
 
 Traditional load balancers and autoscalers rely on failure to start scaling — capacity only responds once something's already struggling. Aquifer treats resources as fluid, not fixed: it paces down as machines show strain and back up as capacity comes online, using the same signals it already reports on every response.

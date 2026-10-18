@@ -542,3 +542,18 @@ func (r *Registry) SetFullnessSource(source func() int) {
 		r.fullnessSource.Store(source)
 	}
 }
+
+// TargetStats is every target API's live queue state, for /metrics.
+func (r *Registry) TargetStats() []TargetStats {
+	r.mu.Lock()
+	workers := make([]*URLWorker, 0, len(r.workers))
+	for _, worker := range r.workers {
+		workers = append(workers, worker)
+	}
+	r.mu.Unlock()
+	stats := make([]TargetStats, 0, len(workers))
+	for _, worker := range workers {
+		stats = append(stats, worker.Stats())
+	}
+	return stats
+}

@@ -79,6 +79,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /jobs/{id}/stream", s.streamJob)
 	mux.HandleFunc("GET /jobs/{id}", s.getJob)
 	mux.HandleFunc("GET /health", s.health)
+	mux.HandleFunc("GET /metrics", s.metrics)
 	mux.HandleFunc("GET /ready", s.ready)
 	mux.HandleFunc("POST /pools/{pool_id}/members", s.registerPoolMember)
 	mux.HandleFunc("GET /.well-known/l8", s.wellKnownL8)
@@ -168,6 +169,7 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		}
 		var admissionErr *AdmissionRejectedError
 		if errors.As(err, &admissionErr) {
+			s.observeRejected(admissionErr.Decision.Reason)
 			if admissionErr.Decision.Queue != nil {
 				setQueueHeaders(w.Header(), *admissionErr.Decision.Queue)
 			}
@@ -418,6 +420,7 @@ func (s *Server) proxyJob(w http.ResponseWriter, r *http.Request) {
 		}
 		var admissionErr *AdmissionRejectedError
 		if errors.As(outcome.Err, &admissionErr) {
+			s.observeRejected(admissionErr.Decision.Reason)
 			if admissionErr.Decision.Queue != nil {
 				setQueueHeaders(w.Header(), *admissionErr.Decision.Queue)
 			}
@@ -499,6 +502,7 @@ func (s *Server) proxyJob(w http.ResponseWriter, r *http.Request) {
 		unsubscribe()
 		var admissionErr *AdmissionRejectedError
 		if errors.As(err, &admissionErr) {
+			s.observeRejected(admissionErr.Decision.Reason)
 			setQueueHeaders(w.Header(), queue)
 			w.Header().Set("Retry-After", fmt.Sprintf("%d", s.aquifer.RetryAfterSeconds()))
 			jsonErrorFields(w, err.Error(), http.StatusTooManyRequests, map[string]any{
@@ -818,4 +822,20 @@ func setInboundRPS(w http.ResponseWriter, a *Aquifer, userID string) {
 		w.Header().Set("X-Aqueduct-Rps", value)
 		w.Header().Set("X-Aquifer-Rps", value)
 	}
+}
+
+// metrics serves GET /metrics when the node runs the built-in Prometheus
+// adapter (the aquifer binary's default); 404 otherwise.
+func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
+	prom, ok := s.aquifer.registry.metrics.(*PrometheusMetrics)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	prom.Write(w, NodeID(), s.aquifer.registry.TargetStats())
+}
+
+func (s *Server) observeRejected(reason string) {
+	observeRejected(s.aquifer.registry.metrics, reason)
 }

@@ -84,7 +84,7 @@ func main() {
 		DBPath:     dbPath,
 		ConfigPath: os.Getenv("CONFIG_PATH"),
 		L8KeyPath:  l8KeyPath,
-		Metrics:    aquifer.NoopMetricsAdapter{},
+		Metrics:    aquifer.NewPrometheusMetrics(),
 	}); err != nil {
 		log.Fatal(err)
 	}

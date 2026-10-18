@@ -98,7 +98,10 @@ type AccountQueue struct {
 	workerBacklog      *atomic.Int64
 	onJobDone          func(*Job)
 	currentRPS         atomic.Int64 // stored as rps * 100
-	backlog            atomic.Int64 // accepted queued + in-flight work
+	// served counts jobs that left this queue for good (finished or failed),
+	// for the fairness gauge on /metrics.
+	served  atomic.Int64
+	backlog atomic.Int64 // accepted queued + in-flight work
 	// nextDeadline is the earliest execute_before (Unix ms) among queued
 	// jobs, or 0 when none has one. Owned by the run goroutine. It lets
 	// dropExpiredJobs skip its scan of the whole queue, which otherwise ran
@@ -127,6 +130,11 @@ func (q *AccountQueue) Active() bool {
 
 func (q *AccountQueue) Backlog() int64 {
 	return q.backlog.Load()
+}
+
+// Served is how many jobs have left this queue for good.
+func (q *AccountQueue) Served() int64 {
+	return q.served.Load()
 }
 
 func (q *AccountQueue) reserveBacklog() {
@@ -392,6 +400,7 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 			lastRequestAt = time.Now()
 
 			q.metrics.JobDispatched(job.UserID, q.upstream)
+			observeJobWaited(q.metrics, job, q.upstream)
 
 			dispatchURL := job.URL
 			if member != nil {
@@ -408,6 +417,7 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 						log.Printf("[AccountQueue] panic executing job %s: %v", j.ID, r)
 						q.store.UpdateStatus(j.ID, StatusFailed)
 						q.metrics.JobFailed(j.UserID, q.upstream, "internal panic")
+						observeJobFinished(q.metrics, j, q.upstream, "failed")
 						if !j.isWebhookDeliveryJob() && j.WebhookURL != "" {
 							q.enqueueWebhook(j.ID, j.UserID, j.WebhookURL, j.webhookMaxRetries(), map[string]any{
 								"job_id": j.ID,
@@ -449,6 +459,7 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 					resetRetryTimer(retryTimer, waiting)
 				} else {
 					q.releaseBacklog()
+					q.served.Add(1)
 					if q.onJobDone != nil && msg.job != nil {
 						q.onJobDone(msg.job)
 					}
@@ -644,6 +655,11 @@ func execute(ctx context.Context, job *Job, dispatchURL, upstream string, store 
 		store.UpdateStatus(job.ID, StatusQueued)
 		return jobDoneMsg{}
 	}
+	if err != nil {
+		observeDispatch(metrics, upstream, 0)
+	} else {
+		observeDispatch(metrics, upstream, resp.StatusCode)
+	}
 
 	var reason string
 	var responseStatus int
@@ -676,6 +692,7 @@ func execute(ctx context.Context, job *Job, dispatchURL, upstream string, store 
 			},
 		})
 		metrics.JobCompleted(job.UserID, upstream, time.Since(startedAt).Milliseconds())
+		observeJobFinished(metrics, job, upstream, "completed")
 		if !job.isWebhookDeliveryJob() && job.WebhookURL != "" && !streamed {
 			payload := map[string]any{
 				"job_id":          job.ID,
@@ -749,6 +766,11 @@ func failJob(job *Job, upstream, reason string, responseStatus int, body []byte,
 		Data:  map[string]any{"job_id": job.ID, "reason": reason, "response_status": responseStatus, "body": string(body), "attempts": job.Attempts + 1},
 	})
 	metrics.JobFailed(job.UserID, upstream, reason)
+	outcome := "failed"
+	if reason == "execution_deadline_exceeded" {
+		outcome = "expired"
+	}
+	observeJobFinished(metrics, job, upstream, outcome)
 	if !job.isWebhookDeliveryJob() && job.WebhookURL != "" && !streamed {
 		payload := map[string]any{
 			"job_id":          job.ID,
@@ -837,6 +859,7 @@ func failExpiredJob(job *Job, upstream string, store JobStore, broker *Broker, m
 		"job_id": job.ID, "reason": reason,
 	}})
 	metrics.JobFailed(job.UserID, upstream, reason)
+	observeJobFinished(metrics, job, upstream, "expired")
 	if !job.isWebhookDeliveryJob() && job.WebhookURL != "" {
 		payload := map[string]any{"job_id": job.ID, "status": "failed", "reason": reason}
 		if resultKey != "" {
@@ -936,6 +959,7 @@ func makeRequest(ctx context.Context, job *Job, dispatchURL string, totalJobs, q
 	setLoadHeader(req.Header, "Flow-Rate", fmt.Sprintf("%.2f", flowRate))
 	setLoadHeader(req.Header, "Active-Queues", fmt.Sprintf("%d", activeQueues))
 	setLoadHeader(req.Header, "Upstream-Backlog", fmt.Sprintf("%d", upstreamBacklog))
+	setLoadHeader(req.Header, "Node-Id", NodeID())
 
 	// Opt in to ORCA endpoint-load-metrics on every dispatch. In current
 	// vLLM, this is entirely request-driven -- the backend only includes
