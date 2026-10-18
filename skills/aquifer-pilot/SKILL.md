@@ -116,7 +116,7 @@ Partitioning matters for the pacing math. **Pacing is per node and per queue.** 
 > advertised rate × active queues per node × number of nodes
 
 Account for that in the AIMD:
-- **Count the senders.** Read `X-Aqueduct-Active-Queues` per node. Tell nodes apart by `X-L8-Key-Id` when L8 is on, or else by source address. Add them up.
+- **Count the senders.** Read `X-Aqueduct-Active-Queues` per node. Tell nodes apart by `X-Aqueduct-Node-Id`, which every request carries. Add them up.
 - **Divide.** Advertise each queue `budget ÷ total active queues`, not the whole budget.
 - **Scale the step.** An additive step of +5 rps lands on every queue at once. With 20 queues across 4 nodes, that's +100 rps at the backend. Size the increase for the total, and cut on the total.
 
@@ -161,7 +161,15 @@ Then:
 
 ## 5. Measure
 
-Measure the same things on both passes. Aquifer doesn't export per-tenant metrics yet; `GET /health` only shows its admission state. So write the load generator to record, for every job, its tenant, submit time, finish time, status and attempts. Finish times come from the job's stream or webhook, or from polling `GET /jobs/{id}`. Have the backend log the `X-Aqueduct-*` headers above as they arrive. That log, the headers and the backend's own metrics are the evidence. Keep it as raw data next to the report.
+Measure the same things on both passes. On the Aquifer pass, scrape `GET /metrics` (Prometheus format, next to `/health`) every 15–30 s, and keep the scrapes. It has:
+- jobs by outcome;
+- attempts at the backend by status (`2xx`, `429`, `5xx`, no response);
+- time waiting in Aquifer and end to end (histograms);
+- 429s by reason;
+- live active queues, backlog and flow rate;
+- `aquifer_fairness_jain`.
+
+For per-tenant detail, start Aquifer with `AQUIFER_METRICS_TENANT_LABELS=true` (the first 1,000 tenants get their own series). The baseline pass has no Aquifer, so have the load generator record each job's tenant, submit and finish times, status and attempts there. Do the same on the Aquifer pass too, as a cross-check. Have the backend log the `X-Aqueduct-*` headers as they arrive. The scrapes, those logs and the backend's own metrics are the evidence.
 
 - **Saturation:** the share of time the backend was saturated, and its utilization the rest of the time. For GPUs, the useful number is how long they stay busy and accepting work without tipping over.
 - **Errors:** 429/5xx rates, timeouts, and retries sent (Aquifer's pass should send far fewer).
@@ -171,7 +179,7 @@ Measure the same things on both passes. Aquifer doesn't export per-tenant metric
   - each tenant's share of completed work;
   - each tenant's p99;
   - whether a bursty tenant slowed everyone else down;
-  - optionally, [Jain's fairness index](https://en.wikipedia.org/wiki/Fairness_measure) over tenants' throughput (1.0 is perfectly fair).
+  - [Jain's fairness index](https://en.wikipedia.org/wiki/Fairness_measure) over tenants' throughput (1.0 is perfectly fair). Aquifer reports it as `aquifer_fairness_jain`; compute it from the load generator's log for the baseline.
 - **Cost:** turn saturation and work done into money. Examples: GPU hours needed for the same work, instances that no longer need overprovisioning, or third-party rate limit you no longer waste on retries.
 
 ## 6. Write it up
