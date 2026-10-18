@@ -20,7 +20,7 @@ The usual answer to that is more hardware: double the fleet, triple the GPU budg
 
 ![How teams handle traffic spikes: overprovisioning the fleet versus queueing the burst and pacing the flow while capacity catches up](docs/images/how-teams-handle-traffic-spikes.png)
 
-Aquifer gives those agents a coordination layer: a self-hosted load balancer that absorbs the burst, queues requests durably (SQLite by default, or Pebble, see below), and releases them at a rate you configure, or a slower one, if the destination service asks for it.
+Aquifer gives those agents a coordination layer: a self-hosted load balancer that absorbs the burst, queues requests durably (Pebble by default, or SQLite, see below), and releases them at a rate you configure, or a slower one, if the destination service asks for it.
 
 What's usually behind that backend can't scale instantly either: a GPU, a database, a CI runner. Aquifer buys time for more of it to come online; it's overkill if that ceiling is fixed for good.
 
@@ -92,7 +92,7 @@ Long-term protocol goal: if more services emit `X-Aqueduct-*`, agents can respon
 ## How it works
 
 1. Client submits a job through an adapter (MCP tool or HTTP endpoint) and moves on
-2. Aquifer persists it to SQLite, surviving crashes and re-dispatching on restart
+2. Aquifer persists it to disk (Pebble by default), surviving crashes and re-dispatching on restart
 3. A per-target-API worker dispatches at your configured RPS with jitter
 4. On completion Aquifer POSTs your webhook with the response body and status, or skips it if you [stayed on the line](#streaming--stay-on-the-line-or-hang-up) and got the result there
 5. The target API can adjust the rate live via `X-Aqueduct-*` response headers
@@ -107,6 +107,19 @@ Long-term protocol goal: if more services emit `X-Aqueduct-*`, agents can respon
 ```bash
 go install github.com/rjpruitt16/aquifer/cmd/aquifer@latest
 aquifer
+```
+
+Then send it a job and watch it go through the line:
+```bash
+curl -s localhost:8080/jobs -H 'Content-Type: application/json' -d '{
+  "user_id": "me", "idempotent_key": "first-job",
+  "url": "https://httpbin.org/post", "method": "POST", "body": "{\"hello\":\"aquifer\"}"
+}'
+# {"job_id":"c22c473d…","status":"queued"}
+
+curl -N localhost:8080/jobs/<job_id>/stream
+# event: queued
+# event: completed   (data carries the target API's response_status and body)
 ```
 
 **Docker Compose**
@@ -180,7 +193,7 @@ upstreams:
 | `CONFIG_PATH` | _(none)_     | Path to rate limit config YAML |
 | `AQUIFER_STORE_BACKEND` | `pebble` | Storage engine: `pebble` (pure-Go LSM store, the faster backend; see [benchmark.md](benchmark.md)) or `sqlite`. If `DB_PATH` is an existing SQLite file, Aquifer stays on SQLite so an upgrade doesn't orphan queued jobs |
 | `AQUIFER_PEBBLE_WAL_SYNC_INTERVAL_MS` | `5` | Pebble only: batches concurrent durable writes into fewer real fsyncs under load (Pebble's own group-commit); each caller still blocks until its own write is actually durable |
-| `AQUIFER_PEBBLE_FLUSH_INTERVAL_MS` | `100` | Pebble only: answer before a write reaches disk and sync the log on this timer, like Spillway's 100ms Mnesia flush. A crash can lose up to this many milliseconds of accepted jobs. On Fly it took one machine from about 150 to about 700 jobs/s end to end (see [benchmark.md](benchmark.md#11-per-job-overhead-make-perf)). Set `0` to make every write wait for its own fsync: zero acknowledged-job loss, much lower throughput |
+| `AQUIFER_PEBBLE_FLUSH_INTERVAL_MS` | `100` | Pebble only: answer before a write reaches disk and sync the log on this timer. A crash can lose up to this many milliseconds of accepted jobs. On Fly it took one machine from about 150 to about 700 jobs/s end to end (see [benchmark.md](benchmark.md#11-per-job-overhead-make-perf)). Set `0` to make every write wait for its own fsync: zero acknowledged-job loss, much lower throughput |
 | `AQUIFER_PEBBLE_CACHE_MB` | `64` | Pebble only: block cache size. Pebble's own default (8MB) is too small to keep recently written jobs in memory, so status updates read them back from disk |
 | `AQUIFER_DEBUG_ADDR` | unset | Serves Go's `net/http/pprof` (goroutine counts, heap, CPU profiles) on its own listener, e.g. `127.0.0.1:6060`. Off when unset. Bind it to loopback or a private network; it is not meant to be public |
 | `AQUIFER_MEMORY_LIMIT_MB` | 70% of the container's memory limit, or of the machine's memory | Reject new jobs with `429` once the memory the Go runtime is holding (mapped from the OS, minus what it has returned) exceeds this many MB. It falls back below the limit once a spike's memory is returned, so intake reopens. `GET /health` shows it as `admission.memory_mb`, beside `memory_reserved_mb` (everything ever mapped). The default is logged at startup and is only a guess: if anything else runs on the machine (Valkey, a sidecar) or the machine is resized, set it yourself. `0` disables it, and then nothing is refused before the kernel's OOM killer acts. Off by default where memory can't be read (macOS). |
@@ -197,7 +210,7 @@ upstreams:
 | `AQUIFER_REDIRECT_GATE_COOLDOWN_SECONDS` | `500` | How long to stop attempting cross-region redirect after a tour finds no reachable region at all, before trying again: internal probe throttling, not what's told to the caller |
 | `AQUIFER_REDIRECT_EXHAUSTED_RETRY_AFTER_SECONDS` | `900` (15min) | `Retry-After` sent to the caller when cross-region redirect is configured but exhausted: no known-live region could serve or queue the request. Request is rejected (429), not queued locally. See [`POST /proxy`](API.md#post-proxy) |
 
-Body-size and DB-size admission are on by default; memory admission stays off until you set a limit, since a safe default depends on your own deployment, not Aquifer's disk usage. Retry-After backs off exponentially under sustained rejection (5s → 10s → 20s → 40s → capped at 60s, resets on the next allowed request). See [CONFIGURATION.md](CONFIGURATION.md) for the full rationale and [benchmark.md](benchmark.md) for the numbers behind these defaults.
+Body-size, DB-size and memory admission are all on by default. Memory defaults to 70% of the container's limit (or the machine's memory); `AQUIFER_MEMORY_LIMIT_MB=0` turns it off. Retry-After backs off exponentially under sustained rejection (5s → 10s → 20s → 40s → capped at 60s, resets on the next allowed request). See [CONFIGURATION.md](CONFIGURATION.md) for the full rationale and [benchmark.md](benchmark.md) for the numbers behind these defaults.
 
 </details>
 
