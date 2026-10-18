@@ -518,13 +518,29 @@ func (d *driver) killLoop(stop <-chan struct{}) {
 		if err != nil || resp.StatusCode != 200 {
 			d.events.add(action+"_failed", map[string]any{"error": fmt.Sprint(err)})
 		} else {
-			d.ledger.recordRestart(at)
+			d.ledger.recordRestart(restartTime(action, at))
 			d.events.add(action, map[string]any{"at_unix_ms": at.UnixMilli()})
 		}
 		time.Sleep(30 * time.Second)
 		d.wsBusy.Unlock()
 		d.busy.Unlock()
 	}
+}
+
+// rebootKillDelay matches the supervisor's handleReboot, which answers
+// /reboot and only then, 200ms later, kills Aquifer and exits. A kill is
+// sent before /kill answers, so only a reboot needs the offset.
+const rebootKillDelay = 200 * time.Millisecond
+
+// restartTime is when the target actually went down for a kill or reboot
+// requested at `at`. The ledger excuses jobs accepted just before that
+// moment as flush-window losses, so recording a reboot at the request time
+// counted jobs accepted in its last 200ms as lost (aquifer#67).
+func restartTime(action string, at time.Time) time.Time {
+	if action == "reboot" {
+		return at.Add(rebootKillDelay)
+	}
+	return at
 }
 
 // checkLoop looks up jobs with no webhook after 5 minutes.
