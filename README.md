@@ -12,6 +12,8 @@ The backend is also closer to the truth about its own capacity than a static pro
 
 Circuit breaking protects the service by saying "stop." Aquifer coordinates demand by saying "wait here, and I'll tell you when to go."
 
+**Not going to read all this?** Point your coding agent at the [Aquifer pilot skill](skills/aquifer-pilot/SKILL.md). It evaluates Aquifer against your own workload in a shadow run on a branch, then shows you the numbers.
+
 **Increase your rate limit without DDoSing your backend.**
 
 Distributed agents call tools and APIs in bursts. Your backend gets overwhelmed on inbound. Your app gets 429s on outbound. One slow dependency takes everything else down with it, and the retries agents fire off while they wait only make it worse: [wasted utilization and higher cost](https://rahmipruitt.me/content/gpu-retry-tax/) on one end, [outages reactive autoscaling alone can't prevent](https://rahmipruitt.me/content/github-outage-reactive-scaling/) on the other.
