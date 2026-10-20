@@ -4,7 +4,7 @@ One Aquifer node (Fly performance-1x: 1 CPU, 2GB, 10GB volume, Pebble with
 the default 100ms flush) under the harness in [`benchmark/soak`](../../README.md),
 HTTP jobs and WebSocket sessions together, with chaos on. Built from `main` at
 3fea9f1 and deployed 2026-10-12 23:18 UTC. Started 23:24 UTC that day,
-stopped 2026-10-20 22:10 UTC after 190 hours (7 days 23 hours).
+stopped 2026-10-20 22:10 UTC after 190 hours (7 days 22 hours).
 
 Load: 500 jobs/s from 50 users, a 2,000/s burst every hour at :00, a
 1,000-session WebSocket burst every hour at :30, a daily ramp at 04:00 UTC
@@ -19,11 +19,12 @@ backend switch between healthy, slow, 503s, 429s, dropping and down.
 | Submitted | 361.1M |
 | Accepted | 318.7M |
 | Turned away when full (429/503) | 41.1M |
+| Requests that errored on the client side | 1.3M |
 | Webhooks received (completed / failed) | 318.6M / 110k |
 | Restarts caused by the harness (`kill -9` and machine reboots) | 47 |
 | Full machine reboots | 5 |
-| **Lost** | **37**, all at machine reboots, explained below |
-| Lost with the `201` inside the flush window of a kill | 342 |
+| **Lost** (accepted, never finished, outside any flush window) | **37**, all at machine reboots, explained below |
+| Lost inside the flush window (accepted within 100ms before a kill; counted separately from the 37) | 342 |
 | Duplicate webhooks, all within 10 minutes of a restart | 2,499 |
 | Finished without a webhook | 4,641 |
 | Stuck over 24 hours | 0 |
@@ -44,7 +45,7 @@ hours.
   accepted up to 50ms after it. So these jobs were in the flush window, and
   the driver counted them wrong. #93 fixes the driver. No job was counted
   lost after any of the plain kills.
-- **No leaks over eight days.**
+- **No leaks over nearly eight days.**
   - RSS at the end of each hour: median 274MB, highest 658MB, during a burst.
   - Goroutines at the end of each hour: median 1.8k.
   - Pebble stayed between 640MB and 1.08GB after its first day.
