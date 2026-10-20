@@ -40,6 +40,23 @@ jobs:
           ref: ${{ steps.runner.outputs.ref }}
           path: aqueduct-runner
 
+      # Dagger occasionally fails to load this module's Python SDK on a cold
+      # engine ("failed to load sdk for local module source"), before any
+      # test runs. Load it here, with retries, so a setup hiccup doesn't fail
+      # the run. The test steps below then reuse the warm engine and run once.
+      - name: Load the aqueduct-runner module (retries Dagger setup failures)
+        run: |
+          curl -fsSL https://dl.dagger.io/dagger/install.sh | BIN_DIR="$HOME/.local/bin" DAGGER_VERSION=0.21.8 sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          for attempt in 1 2 3; do
+            if "$HOME/.local/bin/dagger" -m ./aqueduct-runner functions > /dev/null; then
+              exit 0
+            fi
+            echo "::warning::Loading the aqueduct-runner module failed (attempt $attempt of 3)"
+            sleep 15
+          done
+          exit 1
+
       - name: Contract test -- shared suite (health, lifecycle, idempotency, proxy, L8)
         uses: dagger/dagger-for-github@v8.4.1
         with:
@@ -124,6 +141,23 @@ jobs:
           ref: ${{ steps.runner.outputs.ref }}
           path: aqueduct-runner
 
+      # Dagger occasionally fails to load this module's Python SDK on a cold
+      # engine ("failed to load sdk for local module source"), before any
+      # test runs. Load it here, with retries, so a setup hiccup doesn't fail
+      # the run. The test steps below then reuse the warm engine and run once.
+      - name: Load the aqueduct-runner module (retries Dagger setup failures)
+        run: |
+          curl -fsSL https://dl.dagger.io/dagger/install.sh | BIN_DIR="$HOME/.local/bin" DAGGER_VERSION=0.21.8 sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          for attempt in 1 2 3; do
+            if "$HOME/.local/bin/dagger" -m ./aqueduct-runner functions > /dev/null; then
+              exit 0
+            fi
+            echo "::warning::Loading the aqueduct-runner module failed (attempt $attempt of 3)"
+            sleep 15
+          done
+          exit 1
+
       # Genuinely takes ~5+ minutes -- gated by a hardcoded 5-minute idle
       # constant in account_queue.go, not by AQUIFER_DRAIN_TIMER_SECONDS.
       # See aqueduct-runner's README "Known caveat" section.
@@ -181,6 +215,23 @@ jobs:
           repository: rjpruitt16/aqueduct-runner
           ref: ${{ steps.runner.outputs.ref }}
           path: aqueduct-runner
+
+      # Dagger occasionally fails to load this module's Python SDK on a cold
+      # engine ("failed to load sdk for local module source"), before any
+      # test runs. Load it here, with retries, so a setup hiccup doesn't fail
+      # the run. The test steps below then reuse the warm engine and run once.
+      - name: Load the aqueduct-runner module (retries Dagger setup failures)
+        run: |
+          curl -fsSL https://dl.dagger.io/dagger/install.sh | BIN_DIR="$HOME/.local/bin" DAGGER_VERSION=0.21.8 sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          for attempt in 1 2 3; do
+            if "$HOME/.local/bin/dagger" -m ./aqueduct-runner functions > /dev/null; then
+              exit 0
+            fi
+            echo "::warning::Loading the aqueduct-runner module failed (attempt $attempt of 3)"
+            sleep 15
+          done
+          exit 1
 
       - name: Contract test -- real Aquifer -> Canalis -> Valkey registration ping
         uses: dagger/dagger-for-github@v8.4.1
