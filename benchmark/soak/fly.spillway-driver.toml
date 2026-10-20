@@ -11,7 +11,7 @@ primary_region = "iad"
   SOAK_TARGET = "http://spillway-soak.internal:4000"
   SOAK_SUPERVISOR = "http://spillway-soak.internal:9090"
   SOAK_SELF = "http://spillway-soak-driver.internal:8080"
-  SOAK_DATA = "/data/run-3j"
+  SOAK_DATA = "/data/run-3l"
 
 [http_service]
   internal_port = 8081
