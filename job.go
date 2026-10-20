@@ -110,8 +110,8 @@ type JobRequest struct {
 
 	// WebhookMaxRetries is max_retries for this job's webhook delivery rather
 	// than its target API call, with the same values: nil means
-	// DefaultMaxRetries, -1 retries until the receiver accepts it (bounded by
-	// the queued-job TTL). It is separate because the two calls go to
+	// DefaultWebhookMaxRetries, -1 retries until the receiver accepts it
+	// (bounded by the queued-job TTL). It is separate because the two calls go to
 	// different places: a caller may want a non-idempotent target API tried
 	// once but the webhook retried through a long receiver outage. The
 	// X-Aqueduct-Webhook-Max-Retries request header overrides this field.
@@ -217,6 +217,12 @@ const (
 	DefaultMaxRetries  = 4
 	RetryUntilComplete = -1
 	MaxAllowedRetries  = 100
+
+	// DefaultWebhookMaxRetries is higher than DefaultMaxRetries so an unset
+	// webhook_max_retries rides out a receiver deploy or restart: with the
+	// default backoff (1s doubling, capped at 300s) 10 retries span about 13
+	// minutes, where 4 span about 15 seconds.
+	DefaultWebhookMaxRetries = 10
 )
 
 const (
@@ -284,7 +290,10 @@ func validRetryLimit(n *int) bool {
 
 // webhookMaxRetries is the retry limit for this job's webhook delivery.
 func (j *Job) webhookMaxRetries() int {
-	return resolveMaxRetries(j.WebhookMaxRetries)
+	if j.WebhookMaxRetries == nil {
+		return DefaultWebhookMaxRetries
+	}
+	return *j.WebhookMaxRetries
 }
 
 // retryDeadline is when a job stops being retried: its execute_before if

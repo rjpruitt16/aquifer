@@ -69,7 +69,7 @@ How retries are paced:
 - **Per queue:** every retryable failure halves that account queue's dispatch rate (down to 0.5 rps); successes raise it again by 5% each. An `X-Aqueduct-Rps` on a successful response sets the rate directly; on a failed response it can only lower it, so a server that stamps the same rate on every response, `503`s included, still gets backed off while it's failing.
 - A job waiting out its backoff does not hold a concurrency slot, so other jobs in the same queue keep moving. The attempt count is persisted, so a restart doesn't reset it.
 
-**Webhook retries** are set separately, with `"webhook_max_retries"` in the body or the `X-Aqueduct-Webhook-Max-Retries` header (the header wins). It takes the same values as `max_retries`, applies only to delivering this job's webhook, and defaults to 4 retries. The two are separate because they go to different places: a non-idempotent target API call can be tried once while its webhook keeps retrying through a receiver outage.
+**Webhook retries** are set separately, with `"webhook_max_retries"` in the body or the `X-Aqueduct-Webhook-Max-Retries` header (the header wins). It takes the same values as `max_retries`, applies only to delivering this job's webhook, and defaults to 10 retries (about 13 minutes with the default backoff, enough to ride out a receiver deploy; `max_retries` defaults to 4). The two are separate because they go to different places: a non-idempotent target API call can be tried once while its webhook keeps retrying through a receiver outage.
 
 ```bash
 curl -X POST localhost:8080/jobs -H "X-Aqueduct-Max-Retries: 0" -H "X-Aqueduct-Webhook-Max-Retries: -1" -d '{ ... }'
