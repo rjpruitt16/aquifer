@@ -1,0 +1,298 @@
+[
+  {
+    "date": "2026-10-12",
+    "hours": 1,
+    "rss_mb_first": 275.37890625,
+    "rss_mb_last": 275.37890625,
+    "rss_mb_max": 382.6328125,
+    "goroutines_last": 2850,
+    "goroutines_max": 7698,
+    "pebble_mb_first": 592.7001428604126,
+    "pebble_mb_last": 592.7001428604126,
+    "e2e_p99_ms_median_of_hours": 36692.71,
+    "accept_p99_ms_median_of_hours": 82.4,
+    "accepted": 973543,
+    "lost": 0,
+    "lost_within_flush_window": 0,
+    "duplicates": 0,
+    "finished_without_webhook": 0,
+    "ws_commands_completed": 450928
+  },
+  {
+    "date": "2026-10-13",
+    "hours": 24,
+    "rss_mb_first": 259.6328125,
+    "rss_mb_last": 264.953125,
+    "rss_mb_max": 612.93359375,
+    "goroutines_last": 1770,
+    "goroutines_max": 11625,
+    "pebble_mb_first": 537.8565292358398,
+    "pebble_mb_last": 927.96861743927,
+    "e2e_p99_ms_median_of_hours": 38527.34,
+    "accept_p99_ms_median_of_hours": 412.25,
+    "accepted": 39734328,
+    "lost": 0,
+    "lost_within_flush_window": 35,
+    "duplicates": 73,
+    "finished_without_webhook": 510,
+    "ramp_ceiling_per_s": 750,
+    "ramp_kind": "http_jobs_per_s",
+    "ramp_steps": [
+      {
+        "offered": 500,
+        "accepted_per_s": 499.9166666666667,
+        "shed_per_s": 9.666666666666666,
+        "completed_per_s": 660.1333333333333,
+        "sustained": true
+      },
+      {
+        "offered": 750,
+        "accepted_per_s": 749.7166666666667,
+        "shed_per_s": 0,
+        "completed_per_s": 749.6333333333333,
+        "sustained": true
+      },
+      {
+        "offered": 1000,
+        "accepted_per_s": 798.3166666666667,
+        "shed_per_s": 191.31666666666666,
+        "completed_per_s": 636.7166666666667,
+        "sustained": false
+      }
+    ],
+    "ws_commands_completed": 15132552,
+    "ws_lost_commands": 179422,
+    "ws_duplicate_events": 1871465
+  },
+  {
+    "date": "2026-10-14",
+    "hours": 24,
+    "rss_mb_first": 282.80859375,
+    "rss_mb_last": 275.1796875,
+    "rss_mb_max": 603.38671875,
+    "goroutines_last": 1826,
+    "goroutines_max": 11402,
+    "pebble_mb_first": 937.381121635437,
+    "pebble_mb_last": 951.3761329650879,
+    "e2e_p99_ms_median_of_hours": 27380.66,
+    "accept_p99_ms_median_of_hours": 412.25,
+    "accepted": 39520432,
+    "lost": 10,
+    "lost_within_flush_window": 54,
+    "duplicates": 170,
+    "finished_without_webhook": 594,
+    "ramp_kind": "websocket_sessions",
+    "ramp_steps": [
+      {
+        "offered": 200,
+        "accepted_per_s": 116.05,
+        "shed_per_s": 0,
+        "completed_per_s": 115.76666666666667,
+        "sustained": false
+      }
+    ],
+    "ws_commands_completed": 15609450,
+    "ws_lost_commands": 116703,
+    "ws_duplicate_events": 1381672
+  },
+  {
+    "date": "2026-10-15",
+    "hours": 24,
+    "rss_mb_first": 276.5234375,
+    "rss_mb_last": 255.91796875,
+    "rss_mb_max": 598.32421875,
+    "goroutines_last": 1681,
+    "goroutines_max": 11483,
+    "pebble_mb_first": 908.6268291473389,
+    "pebble_mb_last": 915.0794887542725,
+    "e2e_p99_ms_median_of_hours": 24835.07,
+    "accept_p99_ms_median_of_hours": 392.62,
+    "accepted": 41195304,
+    "lost": 0,
+    "lost_within_flush_window": 38,
+    "duplicates": 477,
+    "finished_without_webhook": 568,
+    "ramp_ceiling_per_s": 750,
+    "ramp_kind": "http_jobs_per_s",
+    "ramp_steps": [
+      {
+        "offered": 500,
+        "accepted_per_s": 491.1166666666667,
+        "shed_per_s": 75.28333333333333,
+        "completed_per_s": 651.0333333333333,
+        "sustained": true
+      },
+      {
+        "offered": 750,
+        "accepted_per_s": 747.1833333333333,
+        "shed_per_s": 0,
+        "completed_per_s": 735.5,
+        "sustained": true
+      },
+      {
+        "offered": 1000,
+        "accepted_per_s": 781.1166666666667,
+        "shed_per_s": 219.3,
+        "completed_per_s": 630.8166666666667,
+        "sustained": false
+      }
+    ],
+    "ws_commands_completed": 15961648,
+    "ws_lost_commands": 122564,
+    "ws_duplicate_events": 1584405
+  },
+  {
+    "date": "2026-10-16",
+    "hours": 24,
+    "rss_mb_first": 255.5078125,
+    "rss_mb_last": 284.84765625,
+    "rss_mb_max": 549.1015625,
+    "goroutines_last": 1909,
+    "goroutines_max": 10689,
+    "pebble_mb_first": 911.4150276184082,
+    "pebble_mb_last": 927.6061601638794,
+    "e2e_p99_ms_median_of_hours": 36692.71,
+    "accept_p99_ms_median_of_hours": 392.62,
+    "accepted": 39666221,
+    "lost": 0,
+    "lost_within_flush_window": 31,
+    "duplicates": 144,
+    "finished_without_webhook": 706,
+    "ramp_kind": "websocket_sessions",
+    "ramp_steps": [
+      {
+        "offered": 200,
+        "accepted_per_s": 139.21666666666667,
+        "shed_per_s": 0,
+        "completed_per_s": 169.28333333333333,
+        "sustained": false
+      }
+    ],
+    "ws_commands_completed": 15780610,
+    "ws_lost_commands": 98494,
+    "ws_duplicate_events": 1614812
+  },
+  {
+    "date": "2026-10-17",
+    "hours": 24,
+    "rss_mb_first": 278.125,
+    "rss_mb_last": 258.39453125,
+    "rss_mb_max": 571.36328125,
+    "goroutines_last": 1857,
+    "goroutines_max": 9982,
+    "pebble_mb_first": 945.9594373703003,
+    "pebble_mb_last": 923.8179893493652,
+    "e2e_p99_ms_median_of_hours": 36692.71,
+    "accept_p99_ms_median_of_hours": 392.62,
+    "accepted": 40002611,
+    "lost": 0,
+    "lost_within_flush_window": 47,
+    "duplicates": 126,
+    "finished_without_webhook": 340,
+    "ramp_ceiling_per_s": 750,
+    "ramp_kind": "http_jobs_per_s",
+    "ramp_steps": [
+      {
+        "offered": 500,
+        "accepted_per_s": 491.18333333333334,
+        "shed_per_s": 11.266666666666667,
+        "completed_per_s": 657.7666666666667,
+        "sustained": true
+      },
+      {
+        "offered": 750,
+        "accepted_per_s": 749.5,
+        "shed_per_s": 0,
+        "completed_per_s": 747.2,
+        "sustained": true
+      },
+      {
+        "offered": 1000,
+        "accepted_per_s": 814.9166666666666,
+        "shed_per_s": 173.43333333333334,
+        "completed_per_s": 656,
+        "sustained": false
+      }
+    ],
+    "ws_commands_completed": 16090713,
+    "ws_lost_commands": 42594,
+    "ws_duplicate_events": 1040371
+  },
+  {
+    "date": "2026-10-18",
+    "hours": 24,
+    "rss_mb_first": 278.171875,
+    "rss_mb_last": 285.0546875,
+    "rss_mb_max": 640.30859375,
+    "goroutines_last": 1988,
+    "goroutines_max": 11177,
+    "pebble_mb_first": 863.7122583389282,
+    "pebble_mb_last": 861.1769828796387,
+    "e2e_p99_ms_median_of_hours": 36692.71,
+    "accept_p99_ms_median_of_hours": 392.62,
+    "accepted": 40420861,
+    "lost": 24,
+    "lost_within_flush_window": 56,
+    "duplicates": 194,
+    "finished_without_webhook": 642,
+    "ramp_kind": "websocket_sessions",
+    "ramp_steps": [
+      {
+        "offered": 200,
+        "accepted_per_s": 128,
+        "shed_per_s": 0,
+        "completed_per_s": 161.11666666666667,
+        "sustained": false
+      }
+    ],
+    "ws_commands_completed": 15885783,
+    "ws_lost_commands": 74421,
+    "ws_duplicate_events": 1238984
+  },
+  {
+    "date": "2026-10-19",
+    "hours": 24,
+    "rss_mb_first": 280.45703125,
+    "rss_mb_last": 286.4140625,
+    "rss_mb_max": 614.96484375,
+    "goroutines_last": 2253,
+    "goroutines_max": 14745,
+    "pebble_mb_first": 882.3502244949341,
+    "pebble_mb_last": 795.1043481826782,
+    "e2e_p99_ms_median_of_hours": 34945.44,
+    "accept_p99_ms_median_of_hours": 432.87,
+    "accepted": 40506490,
+    "lost": 0,
+    "lost_within_flush_window": 43,
+    "duplicates": 628,
+    "finished_without_webhook": 775,
+    "ramp_ceiling_per_s": 750,
+    "ramp_kind": "http_jobs_per_s",
+    "ramp_steps": [
+      {
+        "offered": 500,
+        "accepted_per_s": 498.73333333333335,
+        "shed_per_s": 9.583333333333334,
+        "completed_per_s": 663.85,
+        "sustained": true
+      },
+      {
+        "offered": 750,
+        "accepted_per_s": 749.8666666666667,
+        "shed_per_s": 0,
+        "completed_per_s": 743.2166666666667,
+        "sustained": true
+      },
+      {
+        "offered": 1000,
+        "accepted_per_s": 778.6166666666667,
+        "shed_per_s": 220.36666666666667,
+        "completed_per_s": 619.7333333333333,
+        "sustained": false
+      }
+    ],
+    "ws_commands_completed": 14061281,
+    "ws_lost_commands": 204166,
+    "ws_duplicate_events": 1573578
+  }
+]
