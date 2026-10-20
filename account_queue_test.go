@@ -7,6 +7,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,6 +18,117 @@ type fakeJobResultRecorder struct {
 	result JobResult
 	key    string
 	ok     bool
+}
+
+func TestMakeRequestRedirectAllowlist(t *testing.T) {
+	cases := []struct {
+		name      string
+		status    int
+		allowlist string
+		location  string
+		poolID    string
+		kind      string
+		wantError bool
+	}{
+		{name: "301 blocked", status: 301, allowlist: "127.0.0.1", wantError: true},
+		{name: "302 blocked", status: 302, allowlist: "127.0.0.1", wantError: true},
+		{name: "303 blocked", status: 303, allowlist: "127.0.0.1", wantError: true},
+		{name: "307 blocked", status: 307, allowlist: "127.0.0.1", wantError: true},
+		{name: "308 blocked", status: 308, allowlist: "127.0.0.1", wantError: true},
+		{name: "scheme relative blocked", status: 302, allowlist: "127.0.0.1", location: "scheme-relative", wantError: true},
+		{name: "allowed host", status: 302, allowlist: "127.0.0.1,localhost"},
+		{name: "relative allowed", status: 302, allowlist: "127.0.0.1", location: "relative"},
+		{name: "unrestricted by default", status: 302},
+		{name: "pool exempt", status: 302, allowlist: "127.0.0.1", poolID: "trusted-pool"},
+		{name: "webhook exempt", status: 302, allowlist: "127.0.0.1", kind: jobKindWebhookDelivery},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AQUIFER_ALLOWED_URL_DOMAINS", tc.allowlist)
+			var hops, destinationHits atomic.Int64
+			var destination string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/start":
+					hops.Add(1)
+					http.Redirect(w, r, "/hop", tc.status)
+				case "/hop":
+					hops.Add(1)
+					http.Redirect(w, r, destination, tc.status)
+				case "/result":
+					destinationHits.Add(1)
+					w.Write([]byte("destination response"))
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+			destination = strings.Replace(srv.URL, "127.0.0.1", "localhost", 1) + "/result"
+			switch tc.location {
+			case "scheme-relative":
+				destination = strings.TrimPrefix(destination, "http:")
+			case "relative":
+				destination = "/result"
+			}
+
+			req := validRequest(srv.URL + "/start")
+			req.WebhookURL = ""
+			if tc.poolID != "" {
+				req.URL, req.PoolID = "", tc.poolID
+			}
+			if msg := req.Validate(); msg != "" {
+				t.Fatalf("initial request rejected: %s", msg)
+			}
+			job := NewJob(&req)
+			if tc.kind != "" {
+				job.Kind = tc.kind
+			}
+			resp, err := makeRequest(t.Context(), job, srv.URL+"/start", 0, 0, 0, 0, 0, nil)
+			if resp != nil {
+				defer resp.Body.Close()
+			}
+			if hops.Load() != 2 {
+				t.Fatalf("expected two allowed hops, got %d", hops.Load())
+			}
+			if tc.wantError {
+				if err == nil || !strings.Contains(err.Error(), "AQUIFER_ALLOWED_URL_DOMAINS") {
+					t.Errorf("expected allowlist error, got %v", err)
+				}
+				if destinationHits.Load() != 0 {
+					t.Errorf("prohibited destination received %d requests", destinationHits.Load())
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("makeRequest failed: %v", err)
+				}
+				if resp.StatusCode != http.StatusOK || destinationHits.Load() != 1 {
+					t.Fatalf("redirect failed: status=%d destination hits=%d", resp.StatusCode, destinationHits.Load())
+				}
+			}
+		})
+	}
+}
+
+func TestMakeRequestRedirectLimit(t *testing.T) {
+	t.Setenv("AQUIFER_ALLOWED_URL_DOMAINS", "127.0.0.1")
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		http.Redirect(w, r, "/loop", http.StatusFound)
+	}))
+	defer srv.Close()
+
+	req := validRequest(srv.URL)
+	resp, err := makeRequest(t.Context(), NewJob(&req), srv.URL, 0, 0, 0, 0, 0, nil)
+	if resp != nil {
+		defer resp.Body.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "stopped after 10 redirects") {
+		t.Fatalf("expected default redirect limit, got %v", err)
+	}
+	if hits.Load() != 10 {
+		t.Fatalf("expected 10 requests, got %d", hits.Load())
+	}
 }
 
 func (f *fakeJobResultRecorder) RecordResult(hash string, result JobResult) (string, bool) {
