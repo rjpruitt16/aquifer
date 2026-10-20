@@ -74,7 +74,7 @@ func waitFor(t *testing.T, timeout time.Duration, cond func() bool) bool {
 	return cond()
 }
 
-func TestWebhookDeliveryDefaultsToFourRetries(t *testing.T) {
+func TestWebhookDeliveryDefaultsToTenRetries(t *testing.T) {
 	withRetryBackoff(t, 0)
 	receiver := newFlakyReceiver(t, func(int64) bool { return true })
 	app, _ := testAquiferWithLimits(t, AdmissionLimits{})
@@ -82,7 +82,7 @@ func TestWebhookDeliveryDefaultsToFourRetries(t *testing.T) {
 	if _, err := app.Enqueue(retryJob("hook-default", okUpstream(t).URL, receiver.srv.URL, nil)); err != nil {
 		t.Fatal(err)
 	}
-	want := int64(DefaultMaxRetries + 1)
+	want := int64(DefaultWebhookMaxRetries + 1)
 	if !waitFor(t, 10*time.Second, func() bool { return receiver.attempts.Load() >= want }) {
 		t.Fatalf("expected %d delivery attempts, got %d", want, receiver.attempts.Load())
 	}
@@ -94,7 +94,8 @@ func TestWebhookDeliveryDefaultsToFourRetries(t *testing.T) {
 
 func TestWebhookMaxRetriesUntilDelivered(t *testing.T) {
 	withRetryBackoff(t, 0)
-	receiver := newFlakyReceiver(t, func(n int64) bool { return n <= 7 })
+	// Fail more times than the default allows, so this proves -1 does more.
+	receiver := newFlakyReceiver(t, func(n int64) bool { return n <= DefaultWebhookMaxRetries+2 })
 	app, _ := testAquiferWithLimits(t, AdmissionLimits{})
 
 	req := retryJob("hook-forever", okUpstream(t).URL, receiver.srv.URL, nil)
@@ -105,8 +106,8 @@ func TestWebhookMaxRetriesUntilDelivered(t *testing.T) {
 	if !waitFor(t, 15*time.Second, func() bool { return receiver.delivered() == 1 }) {
 		t.Fatalf("webhook was not delivered after %d attempts", receiver.attempts.Load())
 	}
-	if got := receiver.attempts.Load(); got != 8 {
-		t.Fatalf("expected delivery on attempt 8, got %d attempts", got)
+	if got := receiver.attempts.Load(); got != DefaultWebhookMaxRetries+3 {
+		t.Fatalf("expected delivery on attempt %d, got %d attempts", DefaultWebhookMaxRetries+3, got)
 	}
 }
 
@@ -235,7 +236,7 @@ func TestWebhookMaxRetriesPersists(t *testing.T) {
 				t.Fatalf("expected webhook_max_retries -1 after reload, got %+v", got)
 			}
 			got = store.GetJob(unsetJob.ID)
-			if got == nil || got.WebhookMaxRetries != nil || got.webhookMaxRetries() != DefaultMaxRetries {
+			if got == nil || got.WebhookMaxRetries != nil || got.webhookMaxRetries() != DefaultWebhookMaxRetries {
 				t.Fatalf("expected an unset webhook_max_retries to stay unset, got %+v", got)
 			}
 		})
