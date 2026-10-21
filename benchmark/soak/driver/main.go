@@ -365,6 +365,19 @@ func (d *driver) submit() {
 		d.ledger.acceptedOn(seq, id, lineNode, now)
 		d.cluster.lined.Add(1)
 		d.win.accepted.Add(1)
+		if outcome := lineOutcome(rb); outcome != "" {
+			// It finished while we listened: no webhook will follow.
+			switch {
+			case d.ledger.finishedOnStream(seq, outcome, now):
+				d.win.dups.Add(1)
+			case outcome == "failed":
+				d.win.failed.Add(1)
+			default:
+				d.win.completed.Add(1)
+			}
+			d.win.e2e.add(now.Sub(start))
+			return
+		}
 		d.win.accept.add(now.Sub(start))
 		return
 	}

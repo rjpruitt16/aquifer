@@ -52,6 +52,20 @@ func lineAccept(status int, body []byte) (id string, ok bool) {
 	return "", true
 }
 
+// lineOutcome is how a job ended if its line stream already says so: when
+// the gateway hands a job over while its caller is still listening, it
+// relays the instance's own events, through completed or failed. "" if the
+// stream ended before that.
+func lineOutcome(body []byte) string {
+	switch {
+	case bytes.Contains(body, []byte("event: completed")):
+		return "completed"
+	case bytes.Contains(body, []byte("event: failed")):
+		return "failed"
+	}
+	return ""
+}
+
 func backendIDs(backends []*clusterNode) []string {
 	ids := make([]string, 0, len(backends))
 	for _, b := range backends {

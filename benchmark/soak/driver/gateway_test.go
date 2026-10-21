@@ -91,8 +91,14 @@ func TestGatewayJobStatusFindsJobsWhereverTheyAre(t *testing.T) {
 	a := fakeGateway(t, nil)
 	defer a.Close()
 	b := fakeGateway(t, map[string]func(http.ResponseWriter){
-		"/jobs/soak-7": func(w http.ResponseWriter) { w.WriteHeader(http.StatusAccepted); fmt.Fprint(w, `{"status":"queued","ahead":2}`) },
-		"/jobs/soak-8": func(w http.ResponseWriter) { w.WriteHeader(http.StatusCreated); fmt.Fprint(w, `{"job_id":"j-handed","status":"queued"}`) },
+		"/jobs/soak-7": func(w http.ResponseWriter) {
+			w.WriteHeader(http.StatusAccepted)
+			fmt.Fprint(w, `{"status":"queued","ahead":2}`)
+		},
+		"/jobs/soak-8": func(w http.ResponseWriter) {
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `{"job_id":"j-handed","status":"queued"}`)
+		},
 	})
 	defer b.Close()
 
@@ -142,5 +148,29 @@ func TestAJobWithNoTraceInTheLineIsLostOnlyAfterAWhile(t *testing.T) {
 	}
 	if c := l.view().Counters; c.Completed != 1 || c.LostInLine != 1 {
 		t.Fatalf("counters after the webhook: %+v", c)
+	}
+}
+
+func TestAJobThatFinishesOnTheLineStreamIsDone(t *testing.T) {
+	body := []byte("event: canalis_queued\ndata: {}\n\nevent: canalis_assigned\ndata: {\"job_id\":\"j1\"}\n\nevent: queued\ndata: {\"job_id\":\"j1\"}\n\nevent: completed\ndata: {\"job_id\":\"j1\",\"response_status\":200}\n\n")
+	if lineOutcome(body) != "completed" || lineOutcome([]byte("event: failed\n")) != "failed" || lineOutcome([]byte("event: canalis_queued\n")) != "" {
+		t.Fatal("lineOutcome")
+	}
+	l := openLedger(t.TempDir())
+	now := time.Now()
+	l.acceptedOn(3, "j1", lineNode, now)
+	if dup := l.finishedOnStream(3, "completed", now); dup {
+		t.Fatal("first finish isn't a duplicate")
+	}
+	c := l.view().Counters
+	if c.CompletedOnStream != 1 || c.Completed != 0 {
+		t.Fatalf("counted as finished on the stream, not as a webhook: %+v", c)
+	}
+	if _, still := l.s.Outstanding[3]; still {
+		t.Fatal("a finished job is no longer outstanding")
+	}
+	// A webhook for the same job afterwards would be a double delivery.
+	if _, _, dup := l.webhook(3, "completed", now); !dup {
+		t.Fatal("a webhook after the stream said completed is a duplicate")
 	}
 }
