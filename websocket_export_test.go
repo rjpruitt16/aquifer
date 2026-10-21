@@ -238,12 +238,7 @@ func TestWebSocketExportSplitsBatchesBySizeAndHandles413(t *testing.T) {
 	var mu sync.Mutex
 	var batchSizes []int
 	var delivered []string
-	// The first POST waits until every message is appended, so the first
-	// batch is guaranteed to hold all six.
-	appended := make(chan struct{})
-	var first sync.Once
 	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		first.Do(func() { <-appended })
 		var batch WebSocketExportBatch
 		json.NewDecoder(req.Body).Decode(&batch)
 		mu.Lock()
@@ -267,18 +262,23 @@ func TestWebSocketExportSplitsBatchesBySizeAndHandles413(t *testing.T) {
 	}))
 	defer receiver.Close()
 
-	exporter, err := StartWebSocketExport(store, WebSocketExportConfig{Enabled: true, URL: receiver.URL, BatchSize: 6, MaxPending: 1000, MaxBatchBytes: 1 << 20, IncludePayloads: true})
-	if err != nil {
+	// Preload the export stream before the exporter starts, so its first
+	// read holds all six messages and the receiver's 413 forces a split.
+	ctx := context.Background()
+	if err := store.client.XGroupCreateMkStream(ctx, store.exportKey(), webSocketExportGroup, "0").Err(); err != nil {
 		t.Fatal(err)
 	}
-	defer exporter.Stop()
-	ctx := context.Background()
+	store.EnableExport(1000)
 	for _, id := range []string{"a", "b", "huge", "c", "d", "e"} {
 		if _, err := store.Append(ctx, "session-big", "client", WebSocketEnvelope{Type: "command", MessageID: id, Payload: json.RawMessage(`{"x":1}`)}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	close(appended)
+	exporter, err := StartWebSocketExport(store, WebSocketExportConfig{Enabled: true, URL: receiver.URL, BatchSize: 6, MaxPending: 1000, MaxBatchBytes: 1 << 20, IncludePayloads: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer exporter.Stop()
 
 	snapshot := func() ([]string, []int) {
 		mu.Lock()
@@ -298,8 +298,9 @@ func TestWebSocketExportSplitsBatchesBySizeAndHandles413(t *testing.T) {
 	if strings.Join(got, ",") != "a,b,c,d,e" {
 		t.Fatalf("expected exactly a, b, c, d and e once each, got %v", got)
 	}
-	if _, sizes := snapshot(); len(sizes) == 0 || sizes[0] != 6 {
-		t.Fatalf("the first batch should hold all six messages, got %v", sizes)
+	_, sizes := snapshot()
+	if len(sizes) < 2 || sizes[0] != 6 || sizes[1] >= sizes[0] {
+		t.Fatalf("the first batch should hold all six and the 413 should shrink the next one, got %v", sizes)
 	}
 }
 
@@ -358,6 +359,11 @@ func TestWebSocketExportStopRemovesItsIdleConsumer(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForExport(t, receiver, 1)
+	// The receiver has the message; wait for the acknowledgement too, so
+	// nothing is pending when Stop runs.
+	if !waitUntil(10*time.Second, func() bool { return store.client.XLen(ctx, store.exportKey()).Val() == 0 }) {
+		t.Fatal("the exported message was never acknowledged")
+	}
 	exporter.Stop()
 	consumers, err := store.client.XInfoConsumers(ctx, store.exportKey(), webSocketExportGroup).Result()
 	if err != nil {
