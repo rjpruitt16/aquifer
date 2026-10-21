@@ -569,7 +569,7 @@ A client that vanishes without closing its connection (a dropped network, a slee
 }
 ```
 
-**Failed** (after 4 retries with exponential backoff)
+**Failed** (the job used up its own retries; `max_retries` defaults to 4)
 ```json
 {
   "job_id": "a3f9...",
@@ -582,7 +582,7 @@ A client that vanishes without closing its connection (a dropped network, a slee
 
 - A webhook receiver can slow Aquifer down with the same `X-Aqueduct-Rps` / `X-Aqueduct-Max-Concurrent` response headers a real target API uses, instead of just getting hammered.
 - Delivery is crash-durable — a webhook still pending when the process restarts is recovered and retried, the same way a queued job is, rather than being lost with an in-memory retry loop.
-- Retries trigger on `5xx` responses (not every non-`2xx`), matching forward dispatch's own retry condition. An unset `webhook_max_retries` means 10 retries, with backoff doubling from 1 s up to 300 s, about 13 minutes in total, enough to ride out a receiver deploy.
+- Retries trigger on connection errors and `5xx`, `408` and `429` responses, the same retryable failures as forward dispatch. An unset `webhook_max_retries` means 10 retries, with backoff doubling from 1 s up to 300 s, about 13 minutes in total, enough to ride out a receiver deploy.
 - L8 signing (see [README.md](README.md#l8-protocol--trustless-webhook-delivery)) still applies exactly as before — trust is established and delivery is signed the same way, just from inside the paced dispatch path instead of a separate one-shot retry loop.
 - L8 encryption: when the receiver advertises `encrypted_payloads` and an X25519 `encryption_public_key`, the body is encrypted to that key (`x25519-hkdf-sha256-aes256gcm`) and the signature covers the ciphertext. The receiver verifies, then decrypts. See the [L8 spec](https://rjpruitt16.github.io/l8-protocol/) for the exact construction.
 
