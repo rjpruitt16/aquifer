@@ -1,7 +1,7 @@
 // Copyright 2026 Rahmi Pruitt
 // SPDX-License-Identifier: Apache-2.0
 
-package aquifer
+package websocket
 
 import (
 	"context"
@@ -17,6 +17,9 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/rjpruitt16/aquifer/internal/httpx"
+	"github.com/rjpruitt16/aquifer/internal/retry"
+	"github.com/rjpruitt16/aquifer/internal/urlpolicy"
 )
 
 const (
@@ -47,10 +50,10 @@ func (w *webSocketWriter) Close(code int, reason string) {
 	})
 }
 
-type WebSocketManager struct {
-	cfg      WebSocketConfig
-	store    WebSocketStreamStore
-	queue    *WebSocketScheduler
+type Manager struct {
+	cfg      Config
+	store    StreamStore
+	queue    *Scheduler
 	dialer   *websocket.Dialer
 	upgrader websocket.Upgrader
 
@@ -64,12 +67,12 @@ type WebSocketManager struct {
 	draining   bool
 }
 
-func NewWebSocketManager(cfg WebSocketConfig, store WebSocketStreamStore) *WebSocketManager {
+func NewManager(cfg Config, store StreamStore) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &WebSocketManager{
+	return &Manager{
 		cfg:   cfg,
 		store: store,
-		queue: NewWebSocketScheduler(cfg.Scheduler),
+		queue: NewScheduler(cfg.Scheduler),
 		dialer: &websocket.Dialer{
 			HandshakeTimeout: cfg.HandshakeTimeout,
 			Subprotocols:     []string{webSocketSubprotocol},
@@ -89,49 +92,49 @@ func NewWebSocketManager(cfg WebSocketConfig, store WebSocketStreamStore) *WebSo
 	}
 }
 
-func NewWebSocketManagerFromConfig(cfg WebSocketConfig) (*WebSocketManager, error) {
+func NewManagerFromConfig(cfg Config) (*Manager, error) {
 	if !cfg.Enabled {
 		return nil, nil
 	}
-	store, err := NewRedisWebSocketStreamStore(cfg.RedisURL, cfg.StreamPrefix, cfg.StreamMaxEvents, cfg.StreamTTL, cfg.ReaderShards)
+	store, err := NewRedisStreamStore(cfg.RedisURL, cfg.StreamPrefix, cfg.StreamMaxEvents, cfg.StreamTTL, cfg.ReaderShards)
 	if err != nil {
 		return nil, err
 	}
-	return NewWebSocketManager(cfg, store), nil
+	return NewManager(cfg, store), nil
 }
 
-func (m *WebSocketManager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (m *Manager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if m == nil || !m.cfg.Enabled {
-		jsonError(w, "websocket proxy is disabled", http.StatusNotFound)
+		httpx.JSONError(w, "websocket proxy is disabled", http.StatusNotFound)
 		return
 	}
 	if !websocket.IsWebSocketUpgrade(r) {
-		jsonError(w, "websocket upgrade required", http.StatusUpgradeRequired)
+		httpx.JSONError(w, "websocket upgrade required", http.StatusUpgradeRequired)
 		return
 	}
 	if m.IsDraining() {
-		writeNodeDraining(w, 1)
+		httpx.WriteDraining(w, 1)
 		return
 	}
 	if !containsString(websocket.Subprotocols(r), webSocketSubprotocol) {
-		jsonError(w, "Sec-WebSocket-Protocol must include aqueduct.v1", http.StatusBadRequest)
+		httpx.JSONError(w, "Sec-WebSocket-Protocol must include aqueduct.v1", http.StatusBadRequest)
 		return
 	}
 
 	sessionID := r.URL.Query().Get("session_id")
 	if sessionID == "" {
-		jsonError(w, "session_id is required", http.StatusBadRequest)
+		httpx.JSONError(w, "session_id is required", http.StatusBadRequest)
 		return
 	}
 	after := defaultString(r.URL.Query().Get("after"), "0-0")
 	if _, _, err := parseRedisStreamID(after); err != nil {
-		jsonError(w, "after must be a Redis stream id", http.StatusBadRequest)
+		httpx.JSONError(w, "after must be a Redis stream id", http.StatusBadRequest)
 		return
 	}
 
 	upstreamURL := r.Header.Get(webSocketUpstreamURLHeader)
 	if err := validateWebSocketUpstreamURL(upstreamURL); err != nil {
-		jsonError(w, err.Error(), http.StatusBadRequest)
+		httpx.JSONError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -139,22 +142,22 @@ func (m *WebSocketManager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	if err := m.store.Ping(checkCtx); err != nil {
 		w.Header().Set("Retry-After", "1")
-		jsonError(w, "websocket event store unavailable", http.StatusServiceUnavailable)
+		httpx.JSONError(w, "websocket event store unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	if err := m.store.CheckCursor(checkCtx, sessionID, after); err != nil {
 		if errors.Is(err, ErrWebSocketReplayGap) {
-			jsonError(w, "websocket replay cursor is older than retained history", http.StatusConflict)
+			httpx.JSONError(w, "websocket replay cursor is older than retained history", http.StatusConflict)
 		} else {
 			w.Header().Set("Retry-After", "1")
-			jsonError(w, "websocket event store unavailable", http.StatusServiceUnavailable)
+			httpx.JSONError(w, "websocket event store unavailable", http.StatusServiceUnavailable)
 		}
 		return
 	}
 
 	if err := m.queue.AcquireClient(); err != nil {
 		w.Header().Set("Retry-After", "1")
-		jsonError(w, err.Error(), http.StatusTooManyRequests)
+		httpx.JSONError(w, err.Error(), http.StatusTooManyRequests)
 		return
 	}
 	defer m.queue.ReleaseClient()
@@ -162,7 +165,7 @@ func (m *WebSocketManager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	admission, err := m.queue.EnqueueUpstream()
 	if err != nil {
 		w.Header().Set("Retry-After", "1")
-		jsonError(w, err.Error(), http.StatusTooManyRequests)
+		httpx.JSONError(w, err.Error(), http.StatusTooManyRequests)
 		return
 	}
 
@@ -183,16 +186,16 @@ func (m *WebSocketManager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		upstreamURL:      upstreamURL,
 		upstreamHeaders:  forwardedWebSocketHeaders(r.Header, sessionID),
 		client:           &webSocketWriter{conn: client},
-		commands:         make(chan WebSocketEnvelope, 128),
+		commands:         make(chan Envelope, 128),
 		initialAdmission: admission,
 	}
 
 	if !m.registerSession(session) {
 		admission.Cancel()
-		_ = session.client.WriteJSON(WebSocketEnvelope{
+		_ = session.client.WriteJSON(Envelope{
 			Type:         "status",
 			State:        "server_draining",
-			Reason:       ErrAquiferDraining.Error(),
+			Reason:       httpx.ErrDraining.Error(),
 			RetryAfterMS: 1000,
 		})
 		session.client.Close(websocket.CloseServiceRestart, "aquifer is draining; reconnect through the gateway")
@@ -202,7 +205,7 @@ func (m *WebSocketManager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	session.run()
 }
 
-func (m *WebSocketManager) Snapshot() map[string]any {
+func (m *Manager) Snapshot() map[string]any {
 	if m == nil {
 		return nil
 	}
@@ -223,7 +226,7 @@ func (m *WebSocketManager) Snapshot() map[string]any {
 	}
 }
 
-func (m *WebSocketManager) IsDraining() bool {
+func (m *Manager) IsDraining() bool {
 	if m == nil {
 		return false
 	}
@@ -232,7 +235,7 @@ func (m *WebSocketManager) IsDraining() bool {
 	return m.draining
 }
 
-func (m *WebSocketManager) BeginDrain(grace time.Duration) {
+func (m *Manager) BeginDrain(grace time.Duration) {
 	if m == nil {
 		return
 	}
@@ -250,7 +253,7 @@ func (m *WebSocketManager) BeginDrain(grace time.Duration) {
 
 	for _, session := range sessions {
 		go func(s *webSocketSession) {
-			_ = s.client.WriteJSON(WebSocketEnvelope{
+			_ = s.client.WriteJSON(Envelope{
 				Type:         "status",
 				State:        "server_draining",
 				Reason:       "reconnect through the gateway",
@@ -275,7 +278,7 @@ func (m *WebSocketManager) BeginDrain(grace time.Duration) {
 	}()
 }
 
-func (m *WebSocketManager) WaitDrained(ctx context.Context) error {
+func (m *Manager) WaitDrained(ctx context.Context) error {
 	if m == nil {
 		return nil
 	}
@@ -292,7 +295,7 @@ func (m *WebSocketManager) WaitDrained(ctx context.Context) error {
 	}
 }
 
-func (m *WebSocketManager) registerSession(session *webSocketSession) bool {
+func (m *Manager) registerSession(session *webSocketSession) bool {
 	m.sessionsMu.Lock()
 	defer m.sessionsMu.Unlock()
 	if m.draining {
@@ -303,14 +306,14 @@ func (m *WebSocketManager) registerSession(session *webSocketSession) bool {
 	return true
 }
 
-func (m *WebSocketManager) unregisterSession(session *webSocketSession) {
+func (m *Manager) unregisterSession(session *webSocketSession) {
 	m.sessionsMu.Lock()
 	delete(m.sessions, session)
 	m.sessionsMu.Unlock()
 	m.wg.Done()
 }
 
-func (m *WebSocketManager) sessionSnapshotLocked() []*webSocketSession {
+func (m *Manager) sessionSnapshotLocked() []*webSocketSession {
 	sessions := make([]*webSocketSession, 0, len(m.sessions))
 	for session := range m.sessions {
 		sessions = append(sessions, session)
@@ -318,7 +321,7 @@ func (m *WebSocketManager) sessionSnapshotLocked() []*webSocketSession {
 	return sessions
 }
 
-func (m *WebSocketManager) Close() {
+func (m *Manager) Close() {
 	if m == nil {
 		return
 	}
@@ -334,7 +337,7 @@ func (m *WebSocketManager) Close() {
 }
 
 type webSocketSession struct {
-	manager          *WebSocketManager
+	manager          *Manager
 	ctx              context.Context
 	cancel           context.CancelFunc
 	sessionID        string
@@ -342,8 +345,8 @@ type webSocketSession struct {
 	upstreamURL      string
 	upstreamHeaders  http.Header
 	client           *webSocketWriter
-	commands         chan WebSocketEnvelope
-	initialAdmission *WebSocketAdmission
+	commands         chan Envelope
+	initialAdmission *Admission
 }
 
 func (s *webSocketSession) run() {
@@ -379,18 +382,18 @@ func (s *webSocketSession) readClient() error {
 		}
 		message, err := decodeClientWebSocketMessage(raw)
 		if err != nil {
-			_ = s.client.WriteJSON(WebSocketEnvelope{Type: "error", Reason: err.Error()})
+			_ = s.client.WriteJSON(Envelope{Type: "error", Reason: err.Error()})
 			continue
 		}
 		if s.manager.IsDraining() {
-			_ = s.client.WriteJSON(WebSocketEnvelope{Type: "error", Reason: ErrAquiferDraining.Error()})
+			_ = s.client.WriteJSON(Envelope{Type: "error", Reason: httpx.ErrDraining.Error()})
 			continue
 		}
 		streamID, err := s.manager.store.Append(s.ctx, s.sessionID, "client", message)
 		if err != nil {
 			return err
 		}
-		if err := s.client.WriteJSON(WebSocketEnvelope{
+		if err := s.client.WriteJSON(Envelope{
 			Type:      "command_recorded",
 			MessageID: message.MessageID,
 			StreamID:  streamID,
@@ -406,7 +409,7 @@ func (s *webSocketSession) readClient() error {
 }
 
 func (s *webSocketSession) deliverStream() error {
-	if err := s.client.WriteJSON(WebSocketEnvelope{Type: "status", State: "replaying"}); err != nil {
+	if err := s.client.WriteJSON(Envelope{Type: "status", State: "replaying"}); err != nil {
 		return err
 	}
 
@@ -425,7 +428,7 @@ func (s *webSocketSession) deliverStream() error {
 			break
 		}
 	}
-	if err := s.client.WriteJSON(WebSocketEnvelope{Type: "status", State: "replay_complete"}); err != nil {
+	if err := s.client.WriteJSON(Envelope{Type: "status", State: "replay_complete"}); err != nil {
 		return err
 	}
 
@@ -458,7 +461,7 @@ func (s *webSocketSession) deliverStream() error {
 	}
 }
 
-func (s *webSocketSession) deliverEvents(events []WebSocketStreamEvent) error {
+func (s *webSocketSession) deliverEvents(events []StreamEvent) error {
 	for _, event := range events {
 		s.cursor = event.StreamID
 		if event.Direction != "backend" {
@@ -485,14 +488,14 @@ func (s *webSocketSession) connectUpstream() error {
 			}
 		}
 		release, err := admission.Wait(s.ctx, func(position int) error {
-			return s.client.WriteJSON(WebSocketEnvelope{Type: "status", State: "waiting", Position: position})
+			return s.client.WriteJSON(Envelope{Type: "status", State: "waiting", Position: position})
 		})
 		admission = nil
 		if err != nil {
 			return err
 		}
 
-		if err := s.client.WriteJSON(WebSocketEnvelope{Type: "status", State: "connecting"}); err != nil {
+		if err := s.client.WriteJSON(Envelope{Type: "status", State: "connecting"}); err != nil {
 			release()
 			return err
 		}
@@ -503,7 +506,7 @@ func (s *webSocketSession) connectUpstream() error {
 			s.manager.queue.ReportFailure()
 			attempt++
 			backoff := reconnectBackoff(attempt, retryAfter, s.manager.cfg.ReconnectMax)
-			if err := s.client.WriteJSON(WebSocketEnvelope{
+			if err := s.client.WriteJSON(Envelope{
 				Type:         "status",
 				State:        "reconnecting",
 				Reason:       err.Error(),
@@ -511,7 +514,7 @@ func (s *webSocketSession) connectUpstream() error {
 			}); err != nil {
 				return err
 			}
-			if !sleepBeforeRetryContext(s.ctx, backoff) {
+			if !retry.Sleep(s.ctx, backoff) {
 				return s.ctx.Err()
 			}
 			continue
@@ -527,7 +530,7 @@ func (s *webSocketSession) connectUpstream() error {
 		attempt = 0
 		generation := s.manager.generation.Add(1)
 		upstream.SetReadLimit(s.manager.cfg.MaxMessageBytes)
-		if err := s.client.WriteJSON(WebSocketEnvelope{Type: "status", State: "connected", Generation: generation}); err != nil {
+		if err := s.client.WriteJSON(Envelope{Type: "status", State: "connected", Generation: generation}); err != nil {
 			release()
 			_ = upstream.Close()
 			return err
@@ -540,7 +543,7 @@ func (s *webSocketSession) connectUpstream() error {
 		}
 		attempt++
 		backoff := reconnectBackoff(attempt, 0, s.manager.cfg.ReconnectMax)
-		if writeErr := s.client.WriteJSON(WebSocketEnvelope{
+		if writeErr := s.client.WriteJSON(Envelope{
 			Type:         "status",
 			State:        "reconnecting",
 			Reason:       err.Error(),
@@ -548,7 +551,7 @@ func (s *webSocketSession) connectUpstream() error {
 		}); writeErr != nil {
 			return writeErr
 		}
-		if !sleepBeforeRetryContext(s.ctx, backoff) {
+		if !retry.Sleep(s.ctx, backoff) {
 			return s.ctx.Err()
 		}
 	}
@@ -611,7 +614,7 @@ func (s *webSocketSession) relayUpstream(upstream *websocket.Conn, generation in
 	return err
 }
 
-func (m *WebSocketManager) applyCapacityHeaders(response *http.Response) time.Duration {
+func (m *Manager) applyCapacityHeaders(response *http.Response) time.Duration {
 	if response == nil {
 		return 0
 	}
@@ -651,7 +654,7 @@ func reconnectBackoff(attempt int, retryAfter, maximum time.Duration) time.Durat
 	if maximum > 0 && backoff > maximum {
 		backoff = maximum
 	}
-	return withJitter(backoff)
+	return retry.Jitter(backoff)
 }
 
 func validateWebSocketUpstreamURL(raw string) error {
@@ -662,7 +665,7 @@ func validateWebSocketUpstreamURL(raw string) error {
 	if err != nil || u.Host == "" || (u.Scheme != "ws" && u.Scheme != "wss") {
 		return errors.New("X-Aqueduct-Upstream-URL must be an absolute ws:// or wss:// URL")
 	}
-	if !domainAllowed(raw) {
+	if !urlpolicy.Allowed(raw) {
 		return errors.New("websocket upstream domain is not in AQUIFER_ALLOWED_URL_DOMAINS")
 	}
 	return nil

@@ -15,6 +15,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/rjpruitt16/aquifer/internal/env"
+	"github.com/rjpruitt16/aquifer/internal/retry"
 )
 
 const (
@@ -307,7 +310,7 @@ const defaultAccountQueueIdleTimeoutSeconds = 300
 // (aqueduct-runner) don't have to burn 5+ real minutes per drain-mode
 // run; production should leave this at the default.
 func accountQueueIdleTimeout() time.Duration {
-	return time.Duration(envInt64("AQUIFER_IDLE_TIMEOUT_SECONDS", defaultAccountQueueIdleTimeoutSeconds)) * time.Second
+	return time.Duration(env.Int64("AQUIFER_IDLE_TIMEOUT_SECONDS", defaultAccountQueueIdleTimeoutSeconds)) * time.Second
 }
 
 func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowStart bool, onSlowStartSignal func(bool), onMaxBacklogSignal func(int64)) {
@@ -375,7 +378,7 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 				case <-dispatchTimer.C:
 				default:
 				}
-				dispatchTimer.Reset(withJitter(interval - elapsed))
+				dispatchTimer.Reset(retry.Jitter(interval - elapsed))
 				break
 			}
 
@@ -753,7 +756,7 @@ const defaultStreamDeliveryWaitMS = 2000
 // (the result is also stored for GET /jobs/{id}). A client that drops before
 // the end, or never streams, still gets the webhook.
 func publishTerminal(broker *Broker, jobID string, event SSEEvent) bool {
-	wait := time.Duration(envInt64("AQUIFER_STREAM_DELIVERY_WAIT_MS", defaultStreamDeliveryWaitMS)) * time.Millisecond
+	wait := time.Duration(env.Int64("AQUIFER_STREAM_DELIVERY_WAIT_MS", defaultStreamDeliveryWaitMS)) * time.Millisecond
 	return broker.PublishTerminal(jobID, event, wait)
 }
 
@@ -842,12 +845,12 @@ func retryDelay(attempts int, header http.Header) time.Duration {
 }
 
 func defaultRetryBackoff(attempts int) time.Duration {
-	ceiling := time.Duration(envInt64("AQUIFER_RETRY_MAX_BACKOFF_SECONDS", defaultRetryMaxBackoffSeconds)) * time.Second
+	ceiling := time.Duration(env.Int64("AQUIFER_RETRY_MAX_BACKOFF_SECONDS", defaultRetryMaxBackoffSeconds)) * time.Second
 	backoff := time.Second << min(attempts, 30)
 	if backoff > ceiling || backoff <= 0 {
 		backoff = ceiling
 	}
-	return withJitter(backoff)
+	return retry.Jitter(backoff)
 }
 
 func failExpiredJob(job *Job, upstream string, store JobStore, broker *Broker, metrics MetricsAdapter, enqueueWebhook webhookEnqueuer, resultRecorder JobResultRecorder) {
@@ -877,7 +880,7 @@ func saveLocalResult(store JobStore, job *Job, status Status, responseStatus int
 	if job.isWebhookDeliveryJob() {
 		return
 	}
-	truncated, wasTruncated := truncateStringBytes(body, envInt64("AQUIFER_RESULT_MAX_BYTES", defaultLocalResultMaxBytes))
+	truncated, wasTruncated := truncateStringBytes(body, env.Int64("AQUIFER_RESULT_MAX_BYTES", defaultLocalResultMaxBytes))
 	store.PutResult(job.ID, JobResult{
 		JobID:          job.ID,
 		Status:         status,

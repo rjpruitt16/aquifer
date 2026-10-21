@@ -26,7 +26,7 @@ type fakeRegionAdapter struct {
 }
 
 func (f fakeRegionAdapter) LiveRegions() []string { return f.live }
-func (f fakeRegionAdapter) SelfRegion() string     { return f.self }
+func (f fakeRegionAdapter) SelfRegion() string    { return f.self }
 
 func TestRendezvousPickIsDeterministic(t *testing.T) {
 	candidates := []string{"iad", "lhr", "sjc", "nrt"}

@@ -1,7 +1,7 @@
 // Copyright 2026 Rahmi Pruitt
 // SPDX-License-Identifier: Apache-2.0
 
-package aquifer
+package websocket
 
 import (
 	"bytes"
@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"github.com/rjpruitt16/aquifer/internal/env"
+	"github.com/rjpruitt16/aquifer/internal/nodeid"
 )
 
 // WebSocket transcript export.
@@ -53,7 +55,7 @@ const (
 	webSocketExportGrowAfter     = 10
 )
 
-type WebSocketExportConfig struct {
+type ExportConfig struct {
 	Enabled bool
 	URL     string
 	// Token is sent as "Authorization: Bearer <token>" when set.
@@ -69,25 +71,25 @@ type WebSocketExportConfig struct {
 	IncludePayloads bool
 }
 
-// LoadWebSocketExportConfig reads AQUIFER_WS_EXPORT_*. Export is off unless
+// LoadExportConfig reads AQUIFER_WS_EXPORT_*. Export is off unless
 // AQUIFER_WS_EXPORT_ENABLED=true, and stays off with a warning when it is
 // enabled without a URL.
-func LoadWebSocketExportConfig() WebSocketExportConfig {
-	cfg := WebSocketExportConfig{
-		Enabled:         envBool("AQUIFER_WS_EXPORT_ENABLED", false),
+func LoadExportConfig() ExportConfig {
+	cfg := ExportConfig{
+		Enabled:         env.Bool("AQUIFER_WS_EXPORT_ENABLED", false),
 		URL:             strings.TrimSpace(os.Getenv("AQUIFER_WS_EXPORT_URL")),
 		Token:           os.Getenv("AQUIFER_WS_EXPORT_TOKEN"),
 		BatchSize:       positiveEnvInt64("AQUIFER_WS_EXPORT_BATCH", defaultWebSocketExportBatch),
 		MaxBatchBytes:   int(positiveEnvInt64("AQUIFER_WS_EXPORT_MAX_BATCH_BYTES", defaultWebSocketExportBatchBytes)),
 		MaxPending:      positiveEnvInt64("AQUIFER_WS_EXPORT_MAX_PENDING", defaultWebSocketExportMaxPending),
-		IncludePayloads: envBool("AQUIFER_WS_EXPORT_PAYLOADS", true),
+		IncludePayloads: env.Bool("AQUIFER_WS_EXPORT_PAYLOADS", true),
 	}
 	if cfg.Enabled && cfg.URL == "" {
 		log.Printf("websocket export: AQUIFER_WS_EXPORT_ENABLED is set but AQUIFER_WS_EXPORT_URL is empty; export stays off")
 		cfg.Enabled = false
 	}
 	if cfg.Enabled {
-		if err := checkWebSocketExportURL(cfg.URL, envBool("AQUIFER_WS_EXPORT_ALLOW_INSECURE", false)); err != nil {
+		if err := checkWebSocketExportURL(cfg.URL, env.Bool("AQUIFER_WS_EXPORT_ALLOW_INSECURE", false)); err != nil {
 			log.Printf("websocket export: %v; export stays off", err)
 			cfg.Enabled = false
 		}
@@ -121,8 +123,8 @@ func checkWebSocketExportURL(raw string, allowInsecure bool) error {
 	}
 }
 
-// WebSocketExportEvent is one exported transcript message.
-type WebSocketExportEvent struct {
+// ExportEvent is one exported transcript message.
+type ExportEvent struct {
 	SessionID  string          `json:"session_id"`
 	StreamID   string          `json:"stream_id"`
 	Direction  string          `json:"direction"`
@@ -134,11 +136,11 @@ type WebSocketExportEvent struct {
 	RecordedAt int64           `json:"recorded_at"`
 }
 
-// WebSocketExportBatch is the body POSTed to AQUIFER_WS_EXPORT_URL.
-type WebSocketExportBatch struct {
-	Schema string                 `json:"schema"`
-	NodeID string                 `json:"node_id"`
-	Events []WebSocketExportEvent `json:"events"`
+// ExportBatch is the body POSTed to AQUIFER_WS_EXPORT_URL.
+type ExportBatch struct {
+	Schema string        `json:"schema"`
+	NodeID string        `json:"node_id"`
+	Events []ExportEvent `json:"events"`
 }
 
 // webSocketExportAppendScript adds a transcript entry, refreshes the
@@ -154,21 +156,21 @@ redis.call('XADD', KEYS[2], 'MAXLEN', '~', ARGV[3], '*', 'session_id', ARGV[4], 
 return id
 `)
 
-func (s *RedisWebSocketStreamStore) exportKey() string {
+func (s *RedisStreamStore) exportKey() string {
 	return s.prefix + "export"
 }
 
 // EnableExport makes every Append also write to the export stream.
-func (s *RedisWebSocketStreamStore) EnableExport(maxPending int64) {
+func (s *RedisStreamStore) EnableExport(maxPending int64) {
 	s.exportMaxLen = maxPending
 }
 
-// WebSocketExporter moves the export stream to the receiver.
-type WebSocketExporter struct {
+// Exporter moves the export stream to the receiver.
+type Exporter struct {
 	client   *redis.Client
 	key      string
 	consumer string
-	cfg      WebSocketExportConfig
+	cfg      ExportConfig
 	http     *http.Client
 	// limit is the batch size for the next read. A 413 halves it; it
 	// doubles back toward BatchSize after webSocketExportGrowAfter
@@ -183,15 +185,15 @@ type WebSocketExporter struct {
 	once   sync.Once
 }
 
-// StartWebSocketExport turns export on for store and starts the exporter.
-func StartWebSocketExport(store *RedisWebSocketStreamStore, cfg WebSocketExportConfig) (*WebSocketExporter, error) {
+// StartExport turns export on for store and starts the exporter.
+func StartExport(store *RedisStreamStore, cfg ExportConfig) (*Exporter, error) {
 	if cfg.MaxBatchBytes <= 0 {
 		cfg.MaxBatchBytes = defaultWebSocketExportBatchBytes
 	}
-	exporter := &WebSocketExporter{
+	exporter := &Exporter{
 		client:   store.client,
 		key:      store.exportKey(),
-		consumer: NodeID(),
+		consumer: nodeid.Get(),
 		cfg:      cfg,
 		http: &http.Client{
 			Timeout: webSocketExportRequestTimeout,
@@ -219,7 +221,7 @@ func StartWebSocketExport(store *RedisWebSocketStreamStore, cfg WebSocketExportC
 // Stop ends the exporter. Messages not yet acknowledged stay in the export
 // stream and are sent after the next start. With nothing pending, this
 // node's consumer is removed from the group.
-func (e *WebSocketExporter) Stop() {
+func (e *Exporter) Stop() {
 	if e == nil {
 		return
 	}
@@ -234,7 +236,7 @@ func (e *WebSocketExporter) Stop() {
 	})
 }
 
-func (e *WebSocketExporter) consumerPending(ctx context.Context, name string) (int64, error) {
+func (e *Exporter) consumerPending(ctx context.Context, name string) (int64, error) {
 	consumers, err := e.client.XInfoConsumers(ctx, e.key, webSocketExportGroup).Result()
 	if err != nil {
 		return 0, err
@@ -250,7 +252,7 @@ func (e *WebSocketExporter) consumerPending(ctx context.Context, name string) (i
 // sweepConsumers removes other nodes' consumers that have nothing pending
 // and have been idle for an hour. Consumers with pending messages are kept:
 // claimStale moves those messages to a live node first.
-func (e *WebSocketExporter) sweepConsumers(ctx context.Context) {
+func (e *Exporter) sweepConsumers(ctx context.Context) {
 	consumers, err := e.client.XInfoConsumers(ctx, e.key, webSocketExportGroup).Result()
 	if err != nil {
 		return
@@ -262,7 +264,7 @@ func (e *WebSocketExporter) sweepConsumers(ctx context.Context) {
 	}
 }
 
-func (e *WebSocketExporter) ensureGroup(ctx context.Context) error {
+func (e *Exporter) ensureGroup(ctx context.Context) error {
 	// "0": a new group starts with whatever is already in the stream.
 	err := e.client.XGroupCreateMkStream(ctx, e.key, webSocketExportGroup, "0").Err()
 	if err != nil && !strings.Contains(err.Error(), "BUSYGROUP") {
@@ -271,7 +273,7 @@ func (e *WebSocketExporter) ensureGroup(ctx context.Context) error {
 	return nil
 }
 
-func (e *WebSocketExporter) run(ctx context.Context) {
+func (e *Exporter) run(ctx context.Context) {
 	defer close(e.done)
 	backoff := time.Second
 	for ctx.Err() == nil {
@@ -300,7 +302,7 @@ func (e *WebSocketExporter) run(ctx context.Context) {
 // then messages another node left unacknowledged for over a minute, then
 // new messages (waiting up to a second for some). It returns how many it
 // sent.
-func (e *WebSocketExporter) exportOnce(ctx context.Context) (int, error) {
+func (e *Exporter) exportOnce(ctx context.Context) (int, error) {
 	messages, err := e.readGroup(ctx, "0", 0)
 	if err != nil {
 		return 0, err
@@ -324,7 +326,7 @@ func (e *WebSocketExporter) exportOnce(ctx context.Context) (int, error) {
 	// Fill the batch up to MaxBatchBytes. Messages that don't fit stay
 	// pending and lead the next batch. Entries that can't be decoded are
 	// acknowledged with the batch and dropped.
-	batch := WebSocketExportBatch{Schema: webSocketExportSchema, NodeID: e.consumer}
+	batch := ExportBatch{Schema: webSocketExportSchema, NodeID: e.consumer}
 	ids := make([]string, 0, len(messages))
 	size := 0
 	for _, message := range messages {
@@ -383,7 +385,7 @@ func (err errBatchTooLarge) Error() string {
 	return fmt.Sprintf("receiver answered 413 to a batch of %d", err.events)
 }
 
-func (e *WebSocketExporter) readGroup(ctx context.Context, id string, block time.Duration) ([]redis.XMessage, error) {
+func (e *Exporter) readGroup(ctx context.Context, id string, block time.Duration) ([]redis.XMessage, error) {
 	args := &redis.XReadGroupArgs{
 		Group:    webSocketExportGroup,
 		Consumer: e.consumer,
@@ -415,7 +417,7 @@ func (e *WebSocketExporter) readGroup(ctx context.Context, id string, block time
 	return messages, nil
 }
 
-func (e *WebSocketExporter) claimStale(ctx context.Context) ([]redis.XMessage, error) {
+func (e *Exporter) claimStale(ctx context.Context) ([]redis.XMessage, error) {
 	messages, _, err := e.client.XAutoClaim(ctx, &redis.XAutoClaimArgs{
 		Stream:   e.key,
 		Group:    webSocketExportGroup,
@@ -435,16 +437,16 @@ func (e *WebSocketExporter) claimStale(ctx context.Context) ([]redis.XMessage, e
 
 // event decodes one export stream entry. Entries a newer or older version
 // wrote in another shape are skipped (and still acknowledged).
-func (e *WebSocketExporter) event(message redis.XMessage) (WebSocketExportEvent, bool) {
+func (e *Exporter) event(message redis.XMessage) (ExportEvent, bool) {
 	field := func(name string) string {
 		value, _ := message.Values[name].(string)
 		return value
 	}
 	sessionID := field("session_id")
 	if sessionID == "" {
-		return WebSocketExportEvent{}, false
+		return ExportEvent{}, false
 	}
-	event := WebSocketExportEvent{
+	event := ExportEvent{
 		SessionID: sessionID,
 		StreamID:  field("stream_id"),
 		Direction: field("direction"),
@@ -465,7 +467,7 @@ func (e *WebSocketExporter) event(message redis.XMessage) (WebSocketExportEvent,
 	return event, true
 }
 
-func (e *WebSocketExporter) post(ctx context.Context, batch WebSocketExportBatch) error {
+func (e *Exporter) post(ctx context.Context, batch ExportBatch) error {
 	body, err := json.Marshal(batch)
 	if err != nil {
 		return err

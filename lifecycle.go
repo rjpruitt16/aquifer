@@ -4,13 +4,16 @@
 package aquifer
 
 import (
-	"errors"
 	"time"
+
+	"github.com/rjpruitt16/aquifer/internal/httpx"
 )
 
-const nodeStateHeader = "X-Aqueduct-Node-State"
+const nodeStateHeader = httpx.NodeStateHeader
 
-var ErrAquiferDraining = errors.New("aquifer is draining")
+// ErrAquiferDraining is returned for work refused because the node is
+// shutting down.
+var ErrAquiferDraining = httpx.ErrDraining
 
 type LifecycleState string
 

@@ -1,13 +1,15 @@
 // Copyright 2026 Rahmi Pruitt
 // SPDX-License-Identifier: Apache-2.0
 
-package aquifer
+package websocket
 
 import (
 	"context"
 	"errors"
 	"sync"
 	"time"
+
+	"github.com/rjpruitt16/aquifer/internal/retry"
 )
 
 var (
@@ -16,7 +18,7 @@ var (
 	ErrWebSocketSchedulerClosed = errors.New("websocket scheduler closed")
 )
 
-type WebSocketSchedulerConfig struct {
+type SchedulerConfig struct {
 	MaxClients   int
 	MaxUpstreams int
 	MaxWaiting   int
@@ -24,7 +26,7 @@ type WebSocketSchedulerConfig struct {
 	SlowStartRPS float64
 }
 
-type WebSocketSchedulerSnapshot struct {
+type SchedulerSnapshot struct {
 	Clients             int     `json:"clients"`
 	ActiveUpstreams     int     `json:"active_upstreams"`
 	Waiting             int     `json:"waiting"`
@@ -46,16 +48,16 @@ type websocketWaiter struct {
 	err       error
 }
 
-type WebSocketAdmission struct {
-	scheduler *WebSocketScheduler
+type Admission struct {
+	scheduler *Scheduler
 	waiter    *websocketWaiter
 	Position  int
 }
 
-// WebSocketScheduler is the per-Aquifer connection queue. It admits client
+// Scheduler is the per-Aquifer connection queue. It admits client
 // sockets, holds target API connection attempts in FIFO order, and dispatches
 // those attempts at the configured, jittered connection-open rate.
-type WebSocketScheduler struct {
+type Scheduler struct {
 	mu sync.Mutex
 
 	maxClients      int
@@ -78,7 +80,7 @@ type WebSocketScheduler struct {
 	jitter    func(time.Duration) time.Duration
 }
 
-func NewWebSocketScheduler(cfg WebSocketSchedulerConfig) *WebSocketScheduler {
+func NewScheduler(cfg SchedulerConfig) *Scheduler {
 	if cfg.MaxClients <= 0 {
 		cfg.MaxClients = 1000
 	}
@@ -97,7 +99,7 @@ func NewWebSocketScheduler(cfg WebSocketSchedulerConfig) *WebSocketScheduler {
 	if cfg.SlowStartRPS > cfg.ConnectRPS {
 		cfg.SlowStartRPS = cfg.ConnectRPS
 	}
-	s := &WebSocketScheduler{
+	s := &Scheduler{
 		maxClients:    cfg.MaxClients,
 		maxUpstreams:  cfg.MaxUpstreams,
 		maxWaiting:    cfg.MaxWaiting,
@@ -107,13 +109,13 @@ func NewWebSocketScheduler(cfg WebSocketSchedulerConfig) *WebSocketScheduler {
 		wake:          make(chan struct{}, 1),
 		stop:          make(chan struct{}),
 		done:          make(chan struct{}),
-		jitter:        withJitter,
+		jitter:        retry.Jitter,
 	}
 	go s.run()
 	return s
 }
 
-func (s *WebSocketScheduler) AcquireClient() error {
+func (s *Scheduler) AcquireClient() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	select {
@@ -128,7 +130,7 @@ func (s *WebSocketScheduler) AcquireClient() error {
 	return nil
 }
 
-func (s *WebSocketScheduler) ReleaseClient() {
+func (s *Scheduler) ReleaseClient() {
 	s.mu.Lock()
 	if s.clients > 0 {
 		s.clients--
@@ -136,7 +138,7 @@ func (s *WebSocketScheduler) ReleaseClient() {
 	s.mu.Unlock()
 }
 
-func (s *WebSocketScheduler) EnqueueUpstream() (*WebSocketAdmission, error) {
+func (s *Scheduler) EnqueueUpstream() (*Admission, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	select {
@@ -154,12 +156,12 @@ func (s *WebSocketScheduler) EnqueueUpstream() (*WebSocketAdmission, error) {
 		position:  position,
 	}
 	s.waiters = append(s.waiters, waiter)
-	admission := &WebSocketAdmission{scheduler: s, waiter: waiter, Position: position}
+	admission := &Admission{scheduler: s, waiter: waiter, Position: position}
 	s.notify()
 	return admission, nil
 }
 
-func (a *WebSocketAdmission) Wait(ctx context.Context, onPosition func(int) error) (func(), error) {
+func (a *Admission) Wait(ctx context.Context, onPosition func(int) error) (func(), error) {
 	if a == nil || a.scheduler == nil || a.waiter == nil {
 		return nil, ErrWebSocketSchedulerClosed
 	}
@@ -208,7 +210,7 @@ func (a *WebSocketAdmission) Wait(ctx context.Context, onPosition func(int) erro
 	}
 }
 
-func (a *WebSocketAdmission) Cancel() {
+func (a *Admission) Cancel() {
 	if a == nil || a.scheduler == nil || a.waiter == nil {
 		return
 	}
@@ -226,7 +228,7 @@ func (a *WebSocketAdmission) Cancel() {
 	s.notify()
 }
 
-func (s *WebSocketScheduler) ReportSuccess() {
+func (s *Scheduler) ReportSuccess() {
 	s.mu.Lock()
 	s.rampRPS *= 2
 	if s.rampRPS > s.configuredRPS {
@@ -236,7 +238,7 @@ func (s *WebSocketScheduler) ReportSuccess() {
 	s.notify()
 }
 
-func (s *WebSocketScheduler) ReportFailure() {
+func (s *Scheduler) ReportFailure() {
 	s.mu.Lock()
 	s.rampRPS = s.slowStartRPS
 	if len(s.waiters) > 0 {
@@ -250,7 +252,7 @@ func (s *WebSocketScheduler) ReportFailure() {
 	s.notify()
 }
 
-func (s *WebSocketScheduler) UpdateCapacity(maxConnections *int, connectRPS *float64) {
+func (s *Scheduler) UpdateCapacity(maxConnections *int, connectRPS *float64) {
 	s.mu.Lock()
 	if maxConnections != nil && *maxConnections > 0 {
 		s.advertisedMax = *maxConnections
@@ -262,10 +264,10 @@ func (s *WebSocketScheduler) UpdateCapacity(maxConnections *int, connectRPS *flo
 	s.notify()
 }
 
-func (s *WebSocketScheduler) Snapshot() WebSocketSchedulerSnapshot {
+func (s *Scheduler) Snapshot() SchedulerSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return WebSocketSchedulerSnapshot{
+	return SchedulerSnapshot{
 		Clients:             s.clients,
 		ActiveUpstreams:     s.activeUpstreams,
 		Waiting:             len(s.waiters),
@@ -279,7 +281,7 @@ func (s *WebSocketScheduler) Snapshot() WebSocketSchedulerSnapshot {
 	}
 }
 
-func (s *WebSocketScheduler) Close() {
+func (s *Scheduler) Close() {
 	s.closeOnce.Do(func() {
 		close(s.stop)
 		s.notify()
@@ -287,7 +289,7 @@ func (s *WebSocketScheduler) Close() {
 	})
 }
 
-func (s *WebSocketScheduler) run() {
+func (s *Scheduler) run() {
 	defer close(s.done)
 	for {
 		delay, hasWork := s.grantReady()
@@ -329,7 +331,7 @@ func (s *WebSocketScheduler) run() {
 
 // grantReady grants at most one connection per call so the configured
 // connection-open rate applies even when many target API slots are free.
-func (s *WebSocketScheduler) grantReady() (time.Duration, bool) {
+func (s *Scheduler) grantReady() (time.Duration, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -355,14 +357,14 @@ func (s *WebSocketScheduler) grantReady() (time.Duration, bool) {
 	return 0, len(s.waiters) > 0
 }
 
-func (s *WebSocketScheduler) effectiveMaxLocked() int {
+func (s *Scheduler) effectiveMaxLocked() int {
 	if s.advertisedMax > 0 && s.advertisedMax < s.maxUpstreams {
 		return s.advertisedMax
 	}
 	return s.maxUpstreams
 }
 
-func (s *WebSocketScheduler) effectiveRPSLocked() float64 {
+func (s *Scheduler) effectiveRPSLocked() float64 {
 	effective := s.configuredRPS
 	if s.rampRPS > 0 && s.rampRPS < effective {
 		effective = s.rampRPS
@@ -373,7 +375,7 @@ func (s *WebSocketScheduler) effectiveRPSLocked() float64 {
 	return effective
 }
 
-func (s *WebSocketScheduler) publishPositionsLocked() {
+func (s *Scheduler) publishPositionsLocked() {
 	for i, waiter := range s.waiters {
 		position := i + 1
 		if waiter.position == position {
@@ -391,7 +393,7 @@ func (s *WebSocketScheduler) publishPositionsLocked() {
 	}
 }
 
-func (s *WebSocketScheduler) releaseFunc() func() {
+func (s *Scheduler) releaseFunc() func() {
 	var once sync.Once
 	return func() {
 		once.Do(func() {
@@ -405,7 +407,7 @@ func (s *WebSocketScheduler) releaseFunc() func() {
 	}
 }
 
-func (s *WebSocketScheduler) removeWaiterLocked(target *websocketWaiter) {
+func (s *Scheduler) removeWaiterLocked(target *websocketWaiter) {
 	for i, waiter := range s.waiters {
 		if waiter == target {
 			s.waiters = append(s.waiters[:i], s.waiters[i+1:]...)
@@ -414,7 +416,7 @@ func (s *WebSocketScheduler) removeWaiterLocked(target *websocketWaiter) {
 	}
 }
 
-func (s *WebSocketScheduler) failWaiters() {
+func (s *Scheduler) failWaiters() {
 	s.mu.Lock()
 	waiters := s.waiters
 	s.waiters = nil
@@ -425,7 +427,7 @@ func (s *WebSocketScheduler) failWaiters() {
 	s.mu.Unlock()
 }
 
-func (s *WebSocketScheduler) notify() {
+func (s *Scheduler) notify() {
 	select {
 	case s.wake <- struct{}{}:
 	default:

@@ -1,7 +1,7 @@
 // Copyright 2026 Rahmi Pruitt
 // SPDX-License-Identifier: Apache-2.0
 
-package aquifer
+package websocket
 
 import (
 	"context"
@@ -11,11 +11,11 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// WebSocketFollow tells a live session when its transcript may have entries
+// Follow tells a live session when its transcript may have entries
 // it hasn't delivered. The session still reads and delivers them itself,
 // from its own cursor, so replay and ordering are unchanged; the follow only
 // decides when to read.
-type WebSocketFollow interface {
+type Follow interface {
 	// C is signaled when entries may exist that the session hasn't read.
 	// Spurious signals are possible; a missed entry is not.
 	C() <-chan struct{}

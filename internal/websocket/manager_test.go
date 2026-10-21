@@ -1,7 +1,7 @@
 // Copyright 2026 Rahmi Pruitt
 // SPDX-License-Identifier: Apache-2.0
 
-package aquifer
+package websocket
 
 import (
 	"context"
@@ -17,11 +17,12 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/rjpruitt16/aquifer/internal/httpx"
 )
 
 type memoryWebSocketStreamStore struct {
 	mu        sync.Mutex
-	events    map[string][]WebSocketStreamEvent
+	events    map[string][]StreamEvent
 	next      int64
 	notify    chan struct{}
 	available bool
@@ -30,13 +31,13 @@ type memoryWebSocketStreamStore struct {
 
 func newMemoryWebSocketStreamStore() *memoryWebSocketStreamStore {
 	return &memoryWebSocketStreamStore{
-		events:    make(map[string][]WebSocketStreamEvent),
+		events:    make(map[string][]StreamEvent),
 		notify:    make(chan struct{}),
 		available: true,
 	}
 }
 
-func (s *memoryWebSocketStreamStore) Append(_ context.Context, sessionID, direction string, message WebSocketEnvelope) (string, error) {
+func (s *memoryWebSocketStreamStore) Append(_ context.Context, sessionID, direction string, message Envelope) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.available || s.closed {
@@ -46,7 +47,7 @@ func (s *memoryWebSocketStreamStore) Append(_ context.Context, sessionID, direct
 	id := fmt.Sprintf("%d-0", s.next)
 	copyMessage := message
 	copyMessage.Payload = append(json.RawMessage(nil), message.Payload...)
-	s.events[sessionID] = append(s.events[sessionID], WebSocketStreamEvent{
+	s.events[sessionID] = append(s.events[sessionID], StreamEvent{
 		StreamID:   id,
 		Direction:  direction,
 		Envelope:   copyMessage,
@@ -57,14 +58,14 @@ func (s *memoryWebSocketStreamStore) Append(_ context.Context, sessionID, direct
 	return id, nil
 }
 
-func (s *memoryWebSocketStreamStore) ReadAfter(ctx context.Context, sessionID, after string, count int64, block time.Duration) ([]WebSocketStreamEvent, error) {
+func (s *memoryWebSocketStreamStore) ReadAfter(ctx context.Context, sessionID, after string, count int64, block time.Duration) ([]StreamEvent, error) {
 	for {
 		s.mu.Lock()
 		if !s.available || s.closed {
 			s.mu.Unlock()
 			return nil, errors.New("stream unavailable")
 		}
-		var result []WebSocketStreamEvent
+		var result []StreamEvent
 		for _, event := range s.events[sessionID] {
 			cmp, err := compareRedisStreamIDs(event.StreamID, after)
 			if err != nil {
@@ -110,7 +111,7 @@ func (s *memoryWebSocketStreamStore) ReadAfter(ctx context.Context, sessionID, a
 // Follow signals on every append to the session's stream, with no cursor
 // tracking: the session re-reads from its own cursor, so extra signals are
 // harmless and the fake stays simple.
-func (s *memoryWebSocketStreamStore) Follow(ctx context.Context, sessionID, _ string) (WebSocketFollow, error) {
+func (s *memoryWebSocketStreamStore) Follow(ctx context.Context, sessionID, _ string) (Follow, error) {
 	f := &memoryFollow{c: make(chan struct{}, 1), done: make(chan struct{})}
 	go func() {
 		for {
@@ -184,15 +185,15 @@ func (s *memoryWebSocketStreamStore) Close() error {
 	return nil
 }
 
-func testWebSocketConfig() WebSocketConfig {
-	return WebSocketConfig{
+func testWebSocketConfig() Config {
+	return Config{
 		Enabled:          true,
 		ReadBatch:        100,
 		ReadBlock:        10 * time.Millisecond,
 		MaxMessageBytes:  1024 * 1024,
 		HandshakeTimeout: time.Second,
 		ReconnectMax:     20 * time.Millisecond,
-		Scheduler: WebSocketSchedulerConfig{
+		Scheduler: SchedulerConfig{
 			MaxClients:   10,
 			MaxUpstreams: 10,
 			MaxWaiting:   10,
@@ -219,13 +220,13 @@ func TestWebSocketProxyRecordsCorrelatesAndDeliversThroughStream(t *testing.T) {
 		defer conn.Close()
 		backendAuthorization <- r.Header.Get("Authorization")
 
-		var command WebSocketEnvelope
+		var command Envelope
 		if err := conn.ReadJSON(&command); err != nil {
 			return
 		}
-		_ = conn.WriteJSON(WebSocketEnvelope{Type: "ack", MessageID: command.MessageID})
-		_ = conn.WriteJSON(WebSocketEnvelope{Type: "event", MessageID: "backend-1", CausedBy: command.MessageID, Payload: json.RawMessage(`{"part":1}`)})
-		_ = conn.WriteJSON(WebSocketEnvelope{Type: "event", MessageID: "backend-2", CausedBy: command.MessageID, Payload: json.RawMessage(`{"part":2}`)})
+		_ = conn.WriteJSON(Envelope{Type: "ack", MessageID: command.MessageID})
+		_ = conn.WriteJSON(Envelope{Type: "event", MessageID: "backend-1", CausedBy: command.MessageID, Payload: json.RawMessage(`{"part":1}`)})
+		_ = conn.WriteJSON(Envelope{Type: "event", MessageID: "backend-2", CausedBy: command.MessageID, Payload: json.RawMessage(`{"part":2}`)})
 		for {
 			if _, _, err := conn.ReadMessage(); err != nil {
 				return
@@ -235,9 +236,8 @@ func TestWebSocketProxyRecordsCorrelatesAndDeliversThroughStream(t *testing.T) {
 	defer backend.Close()
 
 	store := newMemoryWebSocketStreamStore()
-	manager := NewWebSocketManager(testWebSocketConfig(), store)
-	app := &Aquifer{webSockets: manager}
-	server := httptest.NewServer(NewServer(app).Routes())
+	manager := NewManager(testWebSocketConfig(), store)
+	server := serveManager(manager)
 	defer server.Close()
 	defer manager.Close()
 
@@ -247,10 +247,10 @@ func TestWebSocketProxyRecordsCorrelatesAndDeliversThroughStream(t *testing.T) {
 	client := dialAqueductWebSocket(t, server.URL+"/websocket?session_id=session-1&after=0-0", headers)
 	defer client.Close()
 
-	readWebSocketUntil(t, client, func(message WebSocketEnvelope) bool {
+	readWebSocketUntil(t, client, func(message Envelope) bool {
 		return message.Type == "status" && message.State == "connected"
 	})
-	if err := client.WriteJSON(WebSocketEnvelope{
+	if err := client.WriteJSON(Envelope{
 		Type:      "command",
 		MessageID: "client-1",
 		Payload:   json.RawMessage(`{"action":"start"}`),
@@ -258,7 +258,7 @@ func TestWebSocketProxyRecordsCorrelatesAndDeliversThroughStream(t *testing.T) {
 		t.Fatalf("write client command: %v", err)
 	}
 
-	seen := make(map[string]WebSocketEnvelope)
+	seen := make(map[string]Envelope)
 	deadline := time.Now().Add(2 * time.Second)
 	for len(seen) < 4 && time.Now().Before(deadline) {
 		message := readWebSocketEnvelope(t, client, time.Until(deadline))
@@ -291,7 +291,7 @@ func TestWebSocketProxyRecordsCorrelatesAndDeliversThroughStream(t *testing.T) {
 	}
 
 	store.mu.Lock()
-	events := append([]WebSocketStreamEvent(nil), store.events["session-1"]...)
+	events := append([]StreamEvent(nil), store.events["session-1"]...)
 	store.mu.Unlock()
 	if len(events) != 4 || events[0].Direction != "client" {
 		t.Fatalf("expected one ordered client command and three backend entries, got %+v", events)
@@ -311,7 +311,7 @@ func TestWebSocketProxyReconnectsUpstreamAndKeepsClientConnected(t *testing.T) {
 			_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseServiceRestart, "restart"), time.Now().Add(time.Second))
 			return
 		}
-		_ = conn.WriteJSON(WebSocketEnvelope{Type: "event", MessageID: "after-reconnect", Payload: json.RawMessage(`{"ok":true}`)})
+		_ = conn.WriteJSON(Envelope{Type: "event", MessageID: "after-reconnect", Payload: json.RawMessage(`{"ok":true}`)})
 		for {
 			if _, _, err := conn.ReadMessage(); err != nil {
 				return
@@ -324,9 +324,8 @@ func TestWebSocketProxyReconnectsUpstreamAndKeepsClientConnected(t *testing.T) {
 	cfg := testWebSocketConfig()
 	cfg.Scheduler.ConnectRPS = 8
 	cfg.Scheduler.SlowStartRPS = 1
-	manager := NewWebSocketManager(cfg, store)
-	app := &Aquifer{webSockets: manager}
-	server := httptest.NewServer(NewServer(app).Routes())
+	manager := NewManager(cfg, store)
+	server := serveManager(manager)
 	defer server.Close()
 	defer manager.Close()
 
@@ -373,19 +372,18 @@ func TestWebSocketDrainNotifiesClosesAndRejectsNewHandshakes(t *testing.T) {
 	defer backend.Close()
 
 	store := newMemoryWebSocketStreamStore()
-	manager := NewWebSocketManager(testWebSocketConfig(), store)
-	app := &Aquifer{webSockets: manager}
-	server := httptest.NewServer(NewServer(app).Routes())
+	manager := NewManager(testWebSocketConfig(), store)
+	server := serveManager(manager)
 	defer server.Close()
 	defer manager.Close()
 
 	headers := http.Header{webSocketUpstreamURLHeader: []string{toWebSocketURL(backend.URL)}}
 	client := dialAqueductWebSocket(t, server.URL+"/websocket?session_id=drain-existing&after=0-0", headers)
-	readWebSocketUntil(t, client, func(message WebSocketEnvelope) bool {
+	readWebSocketUntil(t, client, func(message Envelope) bool {
 		return message.Type == "status" && message.State == "connected"
 	})
 
-	app.BeginDrain(50 * time.Millisecond)
+	manager.BeginDrain(50 * time.Millisecond)
 	message := readWebSocketEnvelope(t, client, time.Second)
 	for message.Type != "status" || message.State != "server_draining" {
 		message = readWebSocketEnvelope(t, client, time.Second)
@@ -407,7 +405,7 @@ func TestWebSocketDrainNotifiesClosesAndRejectsNewHandshakes(t *testing.T) {
 		t.Fatalf("expected draining handshake rejection, response=%v err=%v", response, err)
 	}
 	defer response.Body.Close()
-	if response.Header.Get(nodeStateHeader) != "draining" {
+	if response.Header.Get(httpx.NodeStateHeader) != "draining" {
 		t.Fatalf("expected draining node-state header, got %v", response.Header)
 	}
 }
@@ -415,9 +413,8 @@ func TestWebSocketDrainNotifiesClosesAndRejectsNewHandshakes(t *testing.T) {
 func TestWebSocketProxyRejectsHandshakeWhenStreamUnavailable(t *testing.T) {
 	store := newMemoryWebSocketStreamStore()
 	store.available = false
-	manager := NewWebSocketManager(testWebSocketConfig(), store)
-	app := &Aquifer{webSockets: manager}
-	server := httptest.NewServer(NewServer(app).Routes())
+	manager := NewManager(testWebSocketConfig(), store)
+	server := serveManager(manager)
 	defer server.Close()
 	defer manager.Close()
 
@@ -435,7 +432,7 @@ func TestWebSocketProxyRejectsHandshakeWhenStreamUnavailable(t *testing.T) {
 
 func TestWebSocketProxyReplaysOnlyBackendEventsAfterCursor(t *testing.T) {
 	store := newMemoryWebSocketStreamStore()
-	firstID, err := store.Append(context.Background(), "replay", "backend", WebSocketEnvelope{
+	firstID, err := store.Append(context.Background(), "replay", "backend", Envelope{
 		Type:      "event",
 		MessageID: "already-processed",
 		Payload:   json.RawMessage(`{"part":1}`),
@@ -443,14 +440,14 @@ func TestWebSocketProxyReplaysOnlyBackendEventsAfterCursor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("append first replay event: %v", err)
 	}
-	if _, err := store.Append(context.Background(), "replay", "client", WebSocketEnvelope{
+	if _, err := store.Append(context.Background(), "replay", "client", Envelope{
 		Type:      "command",
 		MessageID: "client-between",
 		Payload:   json.RawMessage(`{"action":"next"}`),
 	}); err != nil {
 		t.Fatalf("append client transcript event: %v", err)
 	}
-	if _, err := store.Append(context.Background(), "replay", "backend", WebSocketEnvelope{
+	if _, err := store.Append(context.Background(), "replay", "backend", Envelope{
 		Type:      "event",
 		MessageID: "needs-replay",
 		Payload:   json.RawMessage(`{"part":2}`),
@@ -473,9 +470,8 @@ func TestWebSocketProxyReplaysOnlyBackendEventsAfterCursor(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	manager := NewWebSocketManager(testWebSocketConfig(), store)
-	app := &Aquifer{webSockets: manager}
-	server := httptest.NewServer(NewServer(app).Routes())
+	manager := NewManager(testWebSocketConfig(), store)
+	server := serveManager(manager)
 	defer server.Close()
 	defer manager.Close()
 
@@ -517,25 +513,24 @@ func TestWebSocketProxySharesOnePerNodeUpstreamLimit(t *testing.T) {
 	cfg := testWebSocketConfig()
 	cfg.Scheduler.MaxUpstreams = 1
 	store := newMemoryWebSocketStreamStore()
-	manager := NewWebSocketManager(cfg, store)
-	app := &Aquifer{webSockets: manager}
-	server := httptest.NewServer(NewServer(app).Routes())
+	manager := NewManager(cfg, store)
+	server := serveManager(manager)
 	defer server.Close()
 	defer manager.Close()
 
 	headers := http.Header{webSocketUpstreamURLHeader: []string{toWebSocketURL(backend.URL)}}
 	first := dialAqueductWebSocket(t, server.URL+"/websocket?session_id=limit-1&after=0-0", headers)
-	readWebSocketUntil(t, first, func(message WebSocketEnvelope) bool {
+	readWebSocketUntil(t, first, func(message Envelope) bool {
 		return message.Type == "status" && message.State == "connected"
 	})
 
 	second := dialAqueductWebSocket(t, server.URL+"/websocket?session_id=limit-2&after=0-0", headers)
 	defer second.Close()
-	messages := make(chan WebSocketEnvelope, 16)
+	messages := make(chan Envelope, 16)
 	readErrors := make(chan error, 1)
 	go func() {
 		for {
-			var message WebSocketEnvelope
+			var message Envelope
 			if err := second.ReadJSON(&message); err != nil {
 				readErrors <- err
 				return
@@ -599,7 +594,7 @@ func dialAqueductWebSocket(t *testing.T, rawURL string, headers http.Header) *we
 	return conn
 }
 
-func readWebSocketUntil(t *testing.T, conn *websocket.Conn, match func(WebSocketEnvelope) bool) WebSocketEnvelope {
+func readWebSocketUntil(t *testing.T, conn *websocket.Conn, match func(Envelope) bool) Envelope {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -609,16 +604,16 @@ func readWebSocketUntil(t *testing.T, conn *websocket.Conn, match func(WebSocket
 		}
 	}
 	t.Fatal("timed out waiting for matching WebSocket message")
-	return WebSocketEnvelope{}
+	return Envelope{}
 }
 
-func readWebSocketEnvelope(t *testing.T, conn *websocket.Conn, timeout time.Duration) WebSocketEnvelope {
+func readWebSocketEnvelope(t *testing.T, conn *websocket.Conn, timeout time.Duration) Envelope {
 	t.Helper()
 	if timeout <= 0 {
 		t.Fatal("timed out waiting for WebSocket message")
 	}
 	conn.SetReadDeadline(time.Now().Add(timeout))
-	var message WebSocketEnvelope
+	var message Envelope
 	if err := conn.ReadJSON(&message); err != nil {
 		t.Fatalf("read WebSocket message: %v", err)
 	}
@@ -627,4 +622,22 @@ func readWebSocketEnvelope(t *testing.T, conn *websocket.Conn, timeout time.Dura
 
 func toWebSocketURL(raw string) string {
 	return strings.NewReplacer("https://", "wss://", "http://", "ws://").Replace(raw)
+}
+
+// serveManager mounts the manager where Aquifer's server does.
+func serveManager(manager *Manager) *httptest.Server {
+	mux := http.NewServeMux()
+	mux.Handle("GET /websocket", manager)
+	return httptest.NewServer(mux)
+}
+
+func waitUntil(timeout time.Duration, condition func() bool) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return condition()
 }

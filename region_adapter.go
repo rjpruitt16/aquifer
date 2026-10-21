@@ -27,7 +27,7 @@ type RegionAdapter interface {
 type NoopRegionAdapter struct{}
 
 func (NoopRegionAdapter) LiveRegions() []string { return nil }
-func (NoopRegionAdapter) SelfRegion() string     { return "" }
+func (NoopRegionAdapter) SelfRegion() string    { return "" }
 
 func ensureRegionAdapter(adapter RegionAdapter) RegionAdapter {
 	if adapter == nil {

@@ -1,7 +1,7 @@
 // Copyright 2026 Rahmi Pruitt
 // SPDX-License-Identifier: Apache-2.0
 
-package aquifer
+package websocket
 
 import (
 	"context"
@@ -90,14 +90,14 @@ func TestSharedFollowerSignalsManySessions(t *testing.T) {
 	}
 	sessions := 10*runtime.GOMAXPROCS(0) + 500
 	prefix := fmt.Sprintf("aqueduct:test:follow:%d:", time.Now().UnixNano())
-	store, err := NewRedisWebSocketStreamStore(rawURL, prefix, 100, time.Minute, 4)
+	store, err := NewRedisStreamStore(rawURL, prefix, 100, time.Minute, 4)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer store.Close()
 	ctx := context.Background()
 
-	follows := make([]WebSocketFollow, sessions)
+	follows := make([]Follow, sessions)
 	for i := range follows {
 		f, err := store.Follow(ctx, fmt.Sprintf("s-%d", i), "0-0")
 		if err != nil {
@@ -118,7 +118,7 @@ func TestSharedFollowerSignalsManySessions(t *testing.T) {
 	}
 
 	started := time.Now()
-	if _, err := store.Append(ctx, "s-7", "backend", WebSocketEnvelope{Type: "event", MessageID: "e1"}); err != nil {
+	if _, err := store.Append(ctx, "s-7", "backend", Envelope{Type: "event", MessageID: "e1"}); err != nil {
 		t.Fatal(err)
 	}
 	if took := time.Since(started); took > 200*time.Millisecond {
@@ -147,7 +147,7 @@ func TestSharedFollowerSignalsManySessions(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("a follower joining an existing subscription was not signaled")
 	}
-	if _, err := store.Append(ctx, "s-7", "backend", WebSocketEnvelope{Type: "event", MessageID: "e2"}); err != nil {
+	if _, err := store.Append(ctx, "s-7", "backend", Envelope{Type: "event", MessageID: "e2"}); err != nil {
 		t.Fatal(err)
 	}
 	select {

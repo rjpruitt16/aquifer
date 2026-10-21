@@ -1,7 +1,7 @@
 // Copyright 2026 Rahmi Pruitt
 // SPDX-License-Identifier: Apache-2.0
 
-package aquifer
+package websocket
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 )
 
 func TestWebSocketSchedulerEnforcesPerNodeClientLimit(t *testing.T) {
-	s := NewWebSocketScheduler(WebSocketSchedulerConfig{MaxClients: 2, MaxUpstreams: 1, MaxWaiting: 1, ConnectRPS: 1000, SlowStartRPS: 1000})
+	s := NewScheduler(SchedulerConfig{MaxClients: 2, MaxUpstreams: 1, MaxWaiting: 1, ConnectRPS: 1000, SlowStartRPS: 1000})
 	t.Cleanup(s.Close)
 
 	if err := s.AcquireClient(); err != nil {
@@ -30,7 +30,7 @@ func TestWebSocketSchedulerEnforcesPerNodeClientLimit(t *testing.T) {
 }
 
 func TestWebSocketSchedulerQueuesUpstreamsFIFO(t *testing.T) {
-	s := NewWebSocketScheduler(WebSocketSchedulerConfig{MaxClients: 4, MaxUpstreams: 1, MaxWaiting: 4, ConnectRPS: 1000, SlowStartRPS: 1000})
+	s := NewScheduler(SchedulerConfig{MaxClients: 4, MaxUpstreams: 1, MaxWaiting: 4, ConnectRPS: 1000, SlowStartRPS: 1000})
 	s.jitter = func(d time.Duration) time.Duration { return d }
 	t.Cleanup(s.Close)
 
@@ -74,7 +74,7 @@ func TestWebSocketSchedulerQueuesUpstreamsFIFO(t *testing.T) {
 }
 
 func TestWebSocketSchedulerBackendCapacityOnlyLowersOperatorCeiling(t *testing.T) {
-	s := NewWebSocketScheduler(WebSocketSchedulerConfig{MaxClients: 10, MaxUpstreams: 8, MaxWaiting: 10, ConnectRPS: 20, SlowStartRPS: 20})
+	s := NewScheduler(SchedulerConfig{MaxClients: 10, MaxUpstreams: 8, MaxWaiting: 10, ConnectRPS: 20, SlowStartRPS: 20})
 	t.Cleanup(s.Close)
 
 	max := 3
@@ -95,7 +95,7 @@ func TestWebSocketSchedulerBackendCapacityOnlyLowersOperatorCeiling(t *testing.T
 }
 
 func TestWebSocketSchedulerRejectsWaitingOverflow(t *testing.T) {
-	s := NewWebSocketScheduler(WebSocketSchedulerConfig{MaxClients: 2, MaxUpstreams: 1, MaxWaiting: 1, ConnectRPS: 1, SlowStartRPS: 1})
+	s := NewScheduler(SchedulerConfig{MaxClients: 2, MaxUpstreams: 1, MaxWaiting: 1, ConnectRPS: 1, SlowStartRPS: 1})
 	t.Cleanup(s.Close)
 
 	if _, err := s.EnqueueUpstream(); err != nil {
@@ -107,7 +107,7 @@ func TestWebSocketSchedulerRejectsWaitingOverflow(t *testing.T) {
 }
 
 func TestWebSocketSchedulerPublishesLiveQueuePositions(t *testing.T) {
-	s := NewWebSocketScheduler(WebSocketSchedulerConfig{MaxClients: 4, MaxUpstreams: 1, MaxWaiting: 4, ConnectRPS: 1000, SlowStartRPS: 1000})
+	s := NewScheduler(SchedulerConfig{MaxClients: 4, MaxUpstreams: 1, MaxWaiting: 4, ConnectRPS: 1000, SlowStartRPS: 1000})
 	t.Cleanup(s.Close)
 
 	first, err := s.EnqueueUpstream()
@@ -171,7 +171,7 @@ func TestWebSocketSchedulerPublishesLiveQueuePositions(t *testing.T) {
 }
 
 func TestWebSocketSchedulerSlowStartRampsAndResets(t *testing.T) {
-	s := NewWebSocketScheduler(WebSocketSchedulerConfig{MaxClients: 10, MaxUpstreams: 10, MaxWaiting: 10, ConnectRPS: 8, SlowStartRPS: 1})
+	s := NewScheduler(SchedulerConfig{MaxClients: 10, MaxUpstreams: 10, MaxWaiting: 10, ConnectRPS: 8, SlowStartRPS: 1})
 	t.Cleanup(s.Close)
 
 	if got := s.Snapshot().EffectiveConnectRPS; got != 1 {

@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/rjpruitt16/aquifer/internal/env"
 )
 
 // InboundRateController decides the X-Aqueduct-Rps Aquifer advertises to
@@ -104,7 +106,7 @@ const (
 // NewInboundRateController returns nil unless AQUIFER_INBOUND_RPS_ENABLED is
 // true, so no loop runs and no header is sent by default.
 func NewInboundRateController() *InboundRateController {
-	if !envBool("AQUIFER_INBOUND_RPS_ENABLED", false) {
+	if !env.Bool("AQUIFER_INBOUND_RPS_ENABLED", false) {
 		return nil
 	}
 	benchmark := envFloat("AQUIFER_INBOUND_BENCHMARK_RPS", 400)

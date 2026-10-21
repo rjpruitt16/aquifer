@@ -14,6 +14,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/rjpruitt16/aquifer/internal/env"
 )
 
 const maxRetryAfterSeconds = 60
@@ -78,11 +80,11 @@ const defaultMaxSyncLagMS = 1000
 // warning to set it explicitly.
 func LoadAdmissionLimits() AdmissionLimits {
 	limits := AdmissionLimits{
-		MemoryLimitMB:     envInt64("AQUIFER_MEMORY_LIMIT_MB", autoMemoryLimitMB),
-		MaxBodyBytes:      envInt64("AQUIFER_MAX_BODY_BYTES", defaultMaxBodyBytes),
-		DBMaxBytes:        envInt64("AQUIFER_DB_MAX_BYTES", autoDBMaxBytes),
-		RetryAfterSeconds: int(envInt64("AQUIFER_RETRY_AFTER_SECONDS", 5)),
-		MaxSyncLagMS:      envInt64("AQUIFER_MAX_SYNC_LAG_MS", defaultMaxSyncLagMS),
+		MemoryLimitMB:     env.Int64("AQUIFER_MEMORY_LIMIT_MB", autoMemoryLimitMB),
+		MaxBodyBytes:      env.Int64("AQUIFER_MAX_BODY_BYTES", defaultMaxBodyBytes),
+		DBMaxBytes:        env.Int64("AQUIFER_DB_MAX_BYTES", autoDBMaxBytes),
+		RetryAfterSeconds: int(env.Int64("AQUIFER_RETRY_AFTER_SECONDS", 5)),
+		MaxSyncLagMS:      env.Int64("AQUIFER_MAX_SYNC_LAG_MS", defaultMaxSyncLagMS),
 	}
 	switch {
 	case limits.MemoryLimitMB == autoMemoryLimitMB:
@@ -145,19 +147,6 @@ func readIntFile(path string) (int64, bool) {
 	}
 	n, err := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
 	return n, err == nil
-}
-
-func envInt64(key string, def int64) int64 {
-	v := os.Getenv(key)
-	if v == "" {
-		return def
-	}
-	n, err := strconv.ParseInt(v, 10, 64)
-	if err != nil {
-		log.Printf("admission: invalid %s=%q, using default %d", key, v, def)
-		return def
-	}
-	return n
 }
 
 // AdmissionDecision is the result of an admission check on a new (non-duplicate) job.

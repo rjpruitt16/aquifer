@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/rjpruitt16/aquifer/internal/env"
 )
 
 const (
@@ -325,11 +327,11 @@ func codeListMatches(matchers []codeMatcher, status int) bool {
 func breakerCooldown(headers http.Header) time.Duration {
 	if raw := headers.Get("Retry-After"); raw != "" {
 		if secs, err := strconv.Atoi(raw); err == nil && secs > 0 {
-			multiplier := envInt64("AQUIFER_PROXY_BREAKER_RETRY_MULTIPLIER", defaultProxyBreakerRetryMultiplier)
+			multiplier := env.Int64("AQUIFER_PROXY_BREAKER_RETRY_MULTIPLIER", defaultProxyBreakerRetryMultiplier)
 			return time.Duration(secs) * time.Duration(multiplier) * time.Second
 		}
 	}
-	return time.Duration(envInt64("AQUIFER_PROXY_BREAKER_DEFAULT_COOLDOWN_SECONDS", defaultProxyBreakerCooldownSeconds)) * time.Second
+	return time.Duration(env.Int64("AQUIFER_PROXY_BREAKER_DEFAULT_COOLDOWN_SECONDS", defaultProxyBreakerCooldownSeconds)) * time.Second
 }
 
 // proxyDirectAttemptTimeout is how long AttemptDirect waits for a direct
@@ -338,5 +340,5 @@ func breakerCooldown(headers http.Header) time.Duration {
 // since the whole point of proxy mode is failing fast, not tying up the
 // caller's connection.
 func proxyDirectAttemptTimeout() time.Duration {
-	return time.Duration(envInt64("AQUIFER_PROXY_DIRECT_ATTEMPT_TIMEOUT_SECONDS", defaultProxyDirectAttemptTimeoutSecs)) * time.Second
+	return time.Duration(env.Int64("AQUIFER_PROXY_DIRECT_ATTEMPT_TIMEOUT_SECONDS", defaultProxyDirectAttemptTimeoutSecs)) * time.Second
 }

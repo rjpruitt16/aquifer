@@ -16,6 +16,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/rjpruitt16/aquifer/internal/nodeid"
 )
 
 func render(m *PrometheusMetrics, targets []TargetStats) string {
@@ -185,22 +187,22 @@ func TestNodeIDPrefersExplicitThenClusterThenFlyThenHostname(t *testing.T) {
 	env := map[string]string{}
 	getenv := func(k string) string { return env[k] }
 	host := func() (string, error) { return "box-1", nil }
-	if got := resolveNodeID(getenv, host); got != "box-1" {
+	if got := nodeid.Resolve(getenv, host); got != "box-1" {
 		t.Fatalf("got %q, want the hostname", got)
 	}
 	env["FLY_MACHINE_ID"] = "fly-1"
-	if got := resolveNodeID(getenv, host); got != "fly-1" {
+	if got := nodeid.Resolve(getenv, host); got != "fly-1" {
 		t.Fatalf("got %q", got)
 	}
 	env["AQUIFER_CLUSTER_SELF_ID"] = "a"
-	if got := resolveNodeID(getenv, host); got != "a" {
+	if got := nodeid.Resolve(getenv, host); got != "a" {
 		t.Fatalf("got %q", got)
 	}
 	env["AQUIFER_NODE_ID"] = "explicit"
-	if got := resolveNodeID(getenv, host); got != "explicit" {
+	if got := nodeid.Resolve(getenv, host); got != "explicit" {
 		t.Fatalf("got %q", got)
 	}
-	if got := resolveNodeID(func(string) string { return "" }, func() (string, error) { return "", errors.New("no") }); got != "unknown" {
+	if got := nodeid.Resolve(func(string) string { return "" }, func() (string, error) { return "", errors.New("no") }); got != "unknown" {
 		t.Fatalf("got %q", got)
 	}
 }

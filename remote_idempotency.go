@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"github.com/rjpruitt16/aquifer/internal/env"
 )
 
 const (
@@ -76,11 +77,11 @@ type RemoteIdempotencyConfig struct {
 }
 
 func LoadRemoteIdempotencyConfig() RemoteIdempotencyConfig {
-	timeoutMS := envInt64("AQUIFER_REMOTE_IDEMPOTENCY_TIMEOUT_MS", defaultRemoteIdempotencyTimeoutMS)
+	timeoutMS := env.Int64("AQUIFER_REMOTE_IDEMPOTENCY_TIMEOUT_MS", defaultRemoteIdempotencyTimeoutMS)
 	if timeoutMS <= 0 {
 		timeoutMS = defaultRemoteIdempotencyTimeoutMS
 	}
-	ttl := envInt64("AQUIFER_REMOTE_IDEMPOTENCY_TTL_SECONDS", defaultRemoteIdempotencyTTLSeconds)
+	ttl := env.Int64("AQUIFER_REMOTE_IDEMPOTENCY_TTL_SECONDS", defaultRemoteIdempotencyTTLSeconds)
 	if ttl <= 0 {
 		ttl = defaultRemoteIdempotencyTTLSeconds
 	}
@@ -92,18 +93,18 @@ func LoadRemoteIdempotencyConfig() RemoteIdempotencyConfig {
 	if resultPrefix == "" {
 		resultPrefix = defaultRemoteResultPrefix
 	}
-	maxBytes := envInt64("AQUIFER_REMOTE_RESULT_MAX_BYTES", defaultRemoteResultMaxBytes)
+	maxBytes := env.Int64("AQUIFER_REMOTE_RESULT_MAX_BYTES", defaultRemoteResultMaxBytes)
 	if maxBytes < 0 {
 		maxBytes = defaultRemoteResultMaxBytes
 	}
 
 	return RemoteIdempotencyConfig{
-		Enabled:        envBool("AQUIFER_REMOTE_IDEMPOTENCY_ENABLED", false) || strings.EqualFold(os.Getenv("AQUIFER_DRAIN_SINK"), "valkey"),
+		Enabled:        env.Bool("AQUIFER_REMOTE_IDEMPOTENCY_ENABLED", false) || strings.EqualFold(os.Getenv("AQUIFER_DRAIN_SINK"), "valkey"),
 		URL:            os.Getenv("AQUIFER_VALKEY_URL"),
 		Timeout:        time.Duration(timeoutMS) * time.Millisecond,
 		Prefix:         prefix,
 		TTLSeconds:     ttl,
-		ResultEnabled:  envBool("AQUIFER_REMOTE_RESULT_ENABLED", false),
+		ResultEnabled:  env.Bool("AQUIFER_REMOTE_RESULT_ENABLED", false),
 		ResultPrefix:   resultPrefix,
 		ResultMaxBytes: maxBytes,
 	}

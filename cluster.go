@@ -14,6 +14,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/rjpruitt16/aquifer/internal/env"
 )
 
 const (
@@ -105,7 +107,7 @@ func LoadClusterConfig() ClusterConfig {
 	if valkeyURL == "" {
 		valkeyURL = os.Getenv("AQUIFER_VALKEY_URL")
 	}
-	capacity := int(envInt64("AQUIFER_CLUSTER_MAX_ACTIVE_USERS", defaultClusterMaxActiveUsers))
+	capacity := int(env.Int64("AQUIFER_CLUSTER_MAX_ACTIVE_USERS", defaultClusterMaxActiveUsers))
 	if capacity <= 0 {
 		capacity = defaultClusterMaxActiveUsers
 	}
@@ -115,15 +117,15 @@ func LoadClusterConfig() ClusterConfig {
 	}
 
 	cfg := ClusterConfig{
-		Enabled:           envBool("AQUIFER_CLUSTER_ENABLED", false),
+		Enabled:           env.Bool("AQUIFER_CLUSTER_ENABLED", false),
 		Provider:          provider,
 		Self:              ClusterMember{ID: os.Getenv("AQUIFER_CLUSTER_SELF_ID"), Address: os.Getenv("AQUIFER_CLUSTER_SELF_ADDR"), State: string(LifecycleStateActive), Capacity: capacity},
 		Members:           parseClusterMembers(os.Getenv("AQUIFER_CLUSTER_MEMBERS")),
-		PruneTTL:          time.Duration(envInt64("AQUIFER_CLUSTER_PRUNE_TTL_SECONDS", defaultClusterPruneTTLSeconds)) * time.Second,
-		HeartbeatInterval: time.Duration(envInt64("AQUIFER_CLUSTER_HEARTBEAT_SECONDS", defaultClusterHeartbeatSeconds)) * time.Second,
-		InstanceTTL:       time.Duration(envInt64("AQUIFER_CLUSTER_INSTANCE_TTL_SECONDS", defaultClusterInstanceTTLSeconds)) * time.Second,
-		AssignmentIdle:    time.Duration(envInt64("AQUIFER_CLUSTER_ASSIGNMENT_IDLE_SECONDS", defaultClusterAssignmentIdleSeconds)) * time.Second,
-		RequestTimeout:    time.Duration(envInt64("AQUIFER_CLUSTER_VALKEY_TIMEOUT_MS", defaultClusterRequestTimeoutMillis)) * time.Millisecond,
+		PruneTTL:          time.Duration(env.Int64("AQUIFER_CLUSTER_PRUNE_TTL_SECONDS", defaultClusterPruneTTLSeconds)) * time.Second,
+		HeartbeatInterval: time.Duration(env.Int64("AQUIFER_CLUSTER_HEARTBEAT_SECONDS", defaultClusterHeartbeatSeconds)) * time.Second,
+		InstanceTTL:       time.Duration(env.Int64("AQUIFER_CLUSTER_INSTANCE_TTL_SECONDS", defaultClusterInstanceTTLSeconds)) * time.Second,
+		AssignmentIdle:    time.Duration(env.Int64("AQUIFER_CLUSTER_ASSIGNMENT_IDLE_SECONDS", defaultClusterAssignmentIdleSeconds)) * time.Second,
+		RequestTimeout:    time.Duration(env.Int64("AQUIFER_CLUSTER_VALKEY_TIMEOUT_MS", defaultClusterRequestTimeoutMillis)) * time.Millisecond,
 		ValkeyURL:         valkeyURL,
 		ValkeyPrefix:      prefix,
 	}

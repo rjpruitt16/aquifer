@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/rjpruitt16/aquifer/internal/env"
 	"github.com/rjpruitt16/aquifer/l8"
 )
 
@@ -28,6 +29,6 @@ type (
 func NewL8Registry(keyPath, trustDir string) *L8Registry {
 	return l8.NewRegistry(keyPath, trustDir,
 		l8.WithHTTPClient(&http.Client{Timeout: 5 * time.Second, Transport: dispatchClient.Transport}),
-		l8.WithSchemaValidation(envBool("AQUIFER_L8_SCHEMA_VALIDATION", false)),
+		l8.WithSchemaValidation(env.Bool("AQUIFER_L8_SCHEMA_VALIDATION", false)),
 	)
 }

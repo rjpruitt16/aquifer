@@ -10,6 +10,9 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/rjpruitt16/aquifer/internal/env"
+	"github.com/rjpruitt16/aquifer/internal/retry"
 )
 
 // Drain mode: opt-in, off by default. When an Aquifer instance goes
@@ -69,13 +72,13 @@ const (
 // ledger anyway."
 func LoadDrainConfig() DrainConfig {
 	cfg := DrainConfig{
-		Enabled:              envBool("AQUIFER_DRAIN_ENABLED", false),
-		TimerSeconds:         envInt64("AQUIFER_DRAIN_TIMER_SECONDS", defaultDrainTimerSeconds),
+		Enabled:              env.Bool("AQUIFER_DRAIN_ENABLED", false),
+		TimerSeconds:         env.Int64("AQUIFER_DRAIN_TIMER_SECONDS", defaultDrainTimerSeconds),
 		Sink:                 strings.ToLower(os.Getenv("AQUIFER_DRAIN_SINK")),
 		WebhookURL:           os.Getenv("AQUIFER_DRAIN_WEBHOOK_URL"),
-		BatchEnabled:         envBool("AQUIFER_DRAIN_BATCH_ENABLED", false),
-		BatchIntervalSeconds: envInt64("AQUIFER_DRAIN_BATCH_INTERVAL_SECONDS", defaultDrainBatchInterval),
-		BatchMaxEvents:       int(envInt64("AQUIFER_DRAIN_BATCH_MAX_EVENTS", defaultDrainBatchMax)),
+		BatchEnabled:         env.Bool("AQUIFER_DRAIN_BATCH_ENABLED", false),
+		BatchIntervalSeconds: env.Int64("AQUIFER_DRAIN_BATCH_INTERVAL_SECONDS", defaultDrainBatchInterval),
+		BatchMaxEvents:       int(env.Int64("AQUIFER_DRAIN_BATCH_MAX_EVENTS", defaultDrainBatchMax)),
 	}
 	if cfg.Sink == "" {
 		cfg.Sink = defaultDrainSink
@@ -89,22 +92,6 @@ func LoadDrainConfig() DrainConfig {
 		cfg.Enabled = false
 	}
 	return cfg
-}
-
-func envBool(key string, def bool) bool {
-	v := os.Getenv(key)
-	if v == "" {
-		return def
-	}
-	switch strings.ToLower(v) {
-	case "1", "true", "yes":
-		return true
-	case "0", "false", "no":
-		return false
-	default:
-		log.Printf("drain: invalid %s=%q, using default %v", key, v, def)
-		return def
-	}
 }
 
 // drainWatchdogLoop polls whether every worker has gone idle (Registry.workers
@@ -161,7 +148,7 @@ func (r *Registry) drainBatchLoop() {
 	}
 
 	for {
-		timer := time.NewTimer(withJitter(interval))
+		timer := time.NewTimer(retry.Jitter(interval))
 		select {
 		case <-timer.C:
 			r.flushDrainEventBatch("ledger_batch")

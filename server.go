@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/rjpruitt16/aquifer/internal/httpx"
 	"github.com/rjpruitt16/aquifer/l8"
 )
 
@@ -92,7 +93,7 @@ func (s *Server) Routes() http.Handler {
 
 func (s *Server) webSocket(w http.ResponseWriter, r *http.Request) {
 	if s.aquifer == nil || s.aquifer.webSockets == nil {
-		jsonError(w, "websocket proxy is disabled", http.StatusNotFound)
+		httpx.JSONError(w, "websocket proxy is disabled", http.StatusNotFound)
 		return
 	}
 	s.aquifer.webSockets.ServeHTTP(w, r)
@@ -112,12 +113,12 @@ func (s *Server) registerPoolMember(w http.ResponseWriter, r *http.Request) {
 		HeartbeatIntervalSeconds int     `json:"heartbeat_interval_seconds"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonError(w, "invalid json", http.StatusBadRequest)
+		httpx.JSONError(w, "invalid json", http.StatusBadRequest)
 		return
 	}
 
 	if err := s.aquifer.RegisterPoolMember(poolID, req.MemberID, req.Address, req.CapacityRPS, req.HeartbeatIntervalSeconds); err != nil {
-		jsonError(w, err.Error(), http.StatusBadRequest)
+		httpx.JSONError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -141,7 +142,7 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		jsonError(w, "invalid json", http.StatusBadRequest)
+		httpx.JSONError(w, "invalid json", http.StatusBadRequest)
 		return
 	}
 
@@ -152,7 +153,7 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 	// doesn't happen to set this.
 	req.AccountQueueMode = pacingHeader(r.Header, "Account-Queue")
 	if err := applyMaxRetriesHeader(r.Header, &req); err != nil {
-		jsonError(w, err.Error(), http.StatusBadRequest)
+		httpx.JSONError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	setInboundRPS(w, s.aquifer, req.UserID)
@@ -166,7 +167,7 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 	result, err := s.aquifer.Enqueue(req)
 	if err != nil {
 		if errors.Is(err, ErrAquiferDraining) {
-			writeNodeDraining(w, s.aquifer.RetryAfterSeconds())
+			httpx.WriteDraining(w, s.aquifer.RetryAfterSeconds())
 			return
 		}
 		var admissionErr *AdmissionRejectedError
@@ -186,7 +187,7 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		if writeSchemaMismatch(w, err) {
 			return
 		}
-		jsonError(w, err.Error(), http.StatusBadRequest)
+		httpx.JSONError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -206,7 +207,7 @@ func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	job, err := s.aquifer.GetJob(id)
 	if err != nil {
-		jsonError(w, "job not found", http.StatusNotFound)
+		httpx.JSONError(w, "job not found", http.StatusNotFound)
 		return
 	}
 
@@ -235,10 +236,10 @@ func (s *Server) getJobResult(w http.ResponseWriter, r *http.Request) {
 	result, err := s.aquifer.GetJobResult(q.Get("user_id"), q.Get("idempotent_key"), q.Get("idempotency_scope"))
 	if err != nil {
 		if errors.Is(err, ErrJobResultNotFound) {
-			jsonError(w, "job result not found", http.StatusNotFound)
+			httpx.JSONError(w, "job result not found", http.StatusNotFound)
 			return
 		}
-		jsonError(w, err.Error(), http.StatusBadRequest)
+		httpx.JSONError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -254,7 +255,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if s.aquifer.IsDraining() {
-		writeNodeDraining(w, s.aquifer.RetryAfterSeconds())
+		httpx.WriteDraining(w, s.aquifer.RetryAfterSeconds())
 		return
 	}
 	json.NewEncoder(w).Encode(map[string]string{"status": "ready"})
@@ -268,12 +269,12 @@ func (s *Server) wellKnownL8(w http.ResponseWriter, r *http.Request) {
 func (s *Server) l8Challenge(w http.ResponseWriter, r *http.Request) {
 	var req L8ChallengeReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonError(w, "invalid json", http.StatusBadRequest)
+		httpx.JSONError(w, "invalid json", http.StatusBadRequest)
 		return
 	}
 	resp, err := s.aquifer.HandleL8Challenge(req)
 	if err != nil {
-		jsonError(w, err.Error(), http.StatusBadRequest)
+		httpx.JSONError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -299,7 +300,7 @@ func (s *Server) streamJob(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	job, events, unsubscribe, err := s.aquifer.SubscribeJob(id)
 	if err != nil {
-		jsonError(w, "job not found", http.StatusNotFound)
+		httpx.JSONError(w, "job not found", http.StatusNotFound)
 		return
 	}
 	s.streamEvents(w, r, job, events, unsubscribe, nil)
@@ -320,7 +321,7 @@ func (s *Server) streamJob(w http.ResponseWriter, r *http.Request) {
 func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request, job *Job, events <-chan SSEEvent, unsubscribe func(), proxyFallback *ProxyFallbackInfo) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		jsonError(w, "streaming not supported", http.StatusInternalServerError)
+		httpx.JSONError(w, "streaming not supported", http.StatusInternalServerError)
 		return
 	}
 
@@ -397,12 +398,12 @@ func (s *Server) proxyJob(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		jsonError(w, "invalid json", http.StatusBadRequest)
+		httpx.JSONError(w, "invalid json", http.StatusBadRequest)
 		return
 	}
 	req.AccountQueueMode = pacingHeader(r.Header, "Account-Queue")
 	if err := applyMaxRetriesHeader(r.Header, &req); err != nil {
-		jsonError(w, err.Error(), http.StatusBadRequest)
+		httpx.JSONError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	setInboundRPS(w, s.aquifer, req.UserID)
@@ -417,7 +418,7 @@ func (s *Server) proxyJob(w http.ResponseWriter, r *http.Request) {
 
 	if outcome.Err != nil {
 		if errors.Is(outcome.Err, ErrAquiferDraining) {
-			writeNodeDraining(w, s.aquifer.RetryAfterSeconds())
+			httpx.WriteDraining(w, s.aquifer.RetryAfterSeconds())
 			return
 		}
 		var admissionErr *AdmissionRejectedError
@@ -445,7 +446,7 @@ func (s *Server) proxyJob(w http.ResponseWriter, r *http.Request) {
 		if writeSchemaMismatch(w, outcome.Err) {
 			return
 		}
-		jsonError(w, outcome.Err.Error(), http.StatusBadRequest)
+		httpx.JSONError(w, outcome.Err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -496,7 +497,7 @@ func (s *Server) proxyJob(w http.ResponseWriter, r *http.Request) {
 	// publish before anyone's listening for it.
 	_, events, unsubscribe, err := s.aquifer.SubscribeJob(outcome.Job.ID)
 	if err != nil {
-		jsonError(w, "job not found", http.StatusNotFound)
+		httpx.JSONError(w, "job not found", http.StatusNotFound)
 		return
 	}
 	queue, err := s.aquifer.Dispatch(outcome.Job, req.AccountQueueMode)
@@ -514,7 +515,7 @@ func (s *Server) proxyJob(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		jsonError(w, err.Error(), http.StatusBadRequest)
+		httpx.JSONError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	setQueueHeaders(w.Header(), queue)
@@ -529,17 +530,6 @@ func setQueueHeaders(headers http.Header, snapshot QueueSnapshot) {
 	setLoadHeader(headers, "Upstream-Backlog", fmt.Sprintf("%d", snapshot.UpstreamBacklog))
 	setLoadHeader(headers, "Queue-Backlog", fmt.Sprintf("%d", snapshot.QueueBacklog))
 	setLoadHeader(headers, "Admission-Pressure", fmt.Sprintf("%.3f", snapshot.AdmissionPressure))
-}
-
-func writeNodeDraining(w http.ResponseWriter, retryAfter int) {
-	if retryAfter <= 0 {
-		retryAfter = 1
-	}
-	w.Header().Set("Retry-After", fmt.Sprintf("%d", retryAfter))
-	w.Header().Set(nodeStateHeader, "draining")
-	w.Header().Set("X-Aquifer-Node-State", "draining")
-	w.Header().Set("Connection", "close")
-	jsonError(w, ErrAquiferDraining.Error(), http.StatusServiceUnavailable)
 }
 
 // relaySSE forwards a redirected region's own SSE response byte-for-byte
@@ -562,7 +552,7 @@ func (s *Server) relaySSE(w http.ResponseWriter, r *http.Request, resp *http.Res
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		jsonError(w, "streaming not supported", http.StatusInternalServerError)
+		httpx.JSONError(w, "streaming not supported", http.StatusInternalServerError)
 		return
 	}
 
@@ -621,7 +611,7 @@ func (s *Server) streamExistingJob(w http.ResponseWriter, r *http.Request, job *
 	}
 	_, events, unsubscribe, err := s.aquifer.SubscribeJob(job.ID)
 	if err != nil {
-		jsonError(w, "job not found", http.StatusNotFound)
+		httpx.JSONError(w, "job not found", http.StatusNotFound)
 		return
 	}
 	s.streamEvents(w, r, job, events, unsubscribe, nil)
@@ -634,7 +624,7 @@ func (s *Server) forwardClusterRequest(w http.ResponseWriter, r *http.Request, p
 			// is retrying, possibly on a new owner if this node stalled past the
 			// instance TTL. Accepting now would run the job twice.
 			w.Header().Set("Retry-After", "1")
-			jsonError(w, "forwarded request arrived after its sender's deadline; nothing was accepted. Retry with the same idempotent_key", http.StatusServiceUnavailable)
+			httpx.JSONError(w, "forwarded request arrived after its sender's deadline; nothing was accepted. Retry with the same idempotent_key", http.StatusServiceUnavailable)
 			return true
 		}
 		return false
@@ -652,7 +642,7 @@ func (s *Server) forwardClusterRequest(w http.ResponseWriter, r *http.Request, p
 
 	body, err := json.Marshal(req)
 	if err != nil {
-		jsonError(w, err.Error(), http.StatusBadRequest)
+		httpx.JSONError(w, err.Error(), http.StatusBadRequest)
 		return true
 	}
 
@@ -678,7 +668,7 @@ func (s *Server) forwardClusterRequest(w http.ResponseWriter, r *http.Request, p
 		target := strings.TrimRight(owner.Address, "/") + path
 		outbound, err := http.NewRequestWithContext(r.Context(), http.MethodPost, target, bytes.NewReader(body))
 		if err != nil {
-			jsonError(w, err.Error(), http.StatusBadRequest)
+			httpx.JSONError(w, err.Error(), http.StatusBadRequest)
 			return true
 		}
 		outbound.Header.Set("Content-Type", "application/json")
@@ -761,12 +751,6 @@ func (s *Server) trackLocalClusterRequest(w http.ResponseWriter, req JobRequest)
 	return func() {
 		s.aquifer.clusterRouter.CompleteLocalJob(clusterRoutingKey(req))
 	}
-}
-
-func jsonError(w http.ResponseWriter, msg string, code int) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
 // jsonErrorFields writes an error body that also identifies which limit was
