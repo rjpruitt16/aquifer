@@ -433,16 +433,31 @@ func (r *Registry) sweepNonces() {
 	for {
 		select {
 		case <-ticker.C:
-			now := time.Now()
-			r.nonces.Range(func(k, v any) bool {
-				if expiry, ok := v.(time.Time); ok && now.After(expiry) {
-					r.nonces.Delete(k)
-				}
-				return true
-			})
+			r.sweep(time.Now())
 		case <-r.stop:
 			return
 		}
+	}
+}
+
+// sweep drops expired nonces, negative-cache entries and cached schemas.
+// Receiver and target domains come from callers' URLs, so without it these
+// maps would grow with every distinct host a long-lived node ever sees.
+func (r *Registry) sweep(now time.Time) {
+	r.nonces.Range(func(k, v any) bool {
+		if expiry, ok := v.(time.Time); ok && now.After(expiry) {
+			r.nonces.Delete(k)
+		}
+		return true
+	})
+	r.notL8.Range(func(k, v any) bool {
+		if at, ok := v.(time.Time); ok && now.Sub(at) >= negativeTTL {
+			r.notL8.Delete(k)
+		}
+		return true
+	})
+	if r.schemas != nil {
+		r.schemas.sweep(now)
 	}
 }
 

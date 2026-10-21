@@ -171,6 +171,23 @@ func (c *schemaCache) load(domain string, entry *schemaEntry) {
 	entry.expiresAt = now.Add(schemaTTL)
 }
 
+// sweep deletes fetched entries that have expired. In-flight fetches are
+// left alone; get replaces an expired entry anyway, so this only bounds
+// memory for domains that stop being called.
+func (c *schemaCache) sweep(now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for domain, entry := range c.entries {
+		select {
+		case <-entry.ready:
+			if !now.Before(entry.expiresAt) {
+				delete(c.entries, domain)
+			}
+		default:
+		}
+	}
+}
+
 func (c *schemaCache) invalidateIfStale(domain, hash string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
