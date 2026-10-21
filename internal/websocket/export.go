@@ -179,6 +179,11 @@ type Exporter struct {
 	limit     int64
 	successes int
 	lastSweep time.Time
+	// claimCursor is where the next stale-message scan starts. XAUTOCLAIM
+	// looks at only about 10 x limit pending entries per call, so starting
+	// at 0-0 every time would never reach messages further down the
+	// pending list. The scan wraps to 0-0 when it reaches the end.
+	claimCursor string
 
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -418,20 +423,26 @@ func (e *Exporter) readGroup(ctx context.Context, id string, block time.Duration
 }
 
 func (e *Exporter) claimStale(ctx context.Context) ([]redis.XMessage, error) {
-	messages, _, err := e.client.XAutoClaim(ctx, &redis.XAutoClaimArgs{
+	start := e.claimCursor
+	if start == "" {
+		start = "0-0"
+	}
+	messages, next, err := e.client.XAutoClaim(ctx, &redis.XAutoClaimArgs{
 		Stream:   e.key,
 		Group:    webSocketExportGroup,
 		Consumer: e.consumer,
 		MinIdle:  webSocketExportClaimIdle,
-		Start:    "0-0",
+		Start:    start,
 		Count:    e.limit,
 	}).Result()
 	if errors.Is(err, redis.Nil) {
+		e.claimCursor = "0-0"
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("claim stale export messages: %w", err)
 	}
+	e.claimCursor = next
 	return messages, nil
 }
 

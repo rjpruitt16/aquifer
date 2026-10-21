@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 )
 
 func TestWebSocketExportConfigIsOffByDefault(t *testing.T) {
@@ -383,5 +385,54 @@ func TestWebSocketExportStopRemovesItsIdleConsumer(t *testing.T) {
 	}
 	if len(consumers) != 0 {
 		t.Fatalf("a stopped exporter with nothing pending should leave no consumer behind, got %+v", consumers)
+	}
+}
+
+// XAUTOCLAIM scans about 10 x COUNT pending entries per call. A message a
+// departed node left behind many entries another node is still working on
+// is only reached if each scan resumes where the last one stopped.
+func TestWebSocketExportClaimsStaleMessagesDeepInThePendingList(t *testing.T) {
+	store := exportTestStore(t)
+	ctx := context.Background()
+	key := store.exportKey()
+	if err := store.client.XGroupCreateMkStream(ctx, key, webSocketExportGroup, "0").Err(); err != nil {
+		t.Fatal(err)
+	}
+	add := func(id string) string {
+		return store.client.XAdd(ctx, &redis.XAddArgs{Stream: key, Values: map[string]any{
+			"session_id": "s", "stream_id": "1-" + id, "direction": "client",
+			"type": "command", "message_id": id, "recorded_at": "1",
+		}}).Val()
+	}
+	readAs := func(consumer string, count int64) {
+		if err := store.client.XReadGroup(ctx, &redis.XReadGroupArgs{
+			Group: webSocketExportGroup, Consumer: consumer, Streams: []string{key, ">"}, Count: count, Block: -1,
+		}).Err(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// 50 fresh entries a live node holds (not claimable yet), then one a
+	// departed node left two minutes ago.
+	for i := 0; i < 50; i++ {
+		add(fmt.Sprintf("busy-%d", i))
+	}
+	readAs("busy-node", 50)
+	stale := add("stale")
+	readAs("gone-node", 1)
+	if err := store.client.Do(ctx, "XCLAIM", key, webSocketExportGroup, "gone-node", "0", stale, "IDLE", "120000").Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	receiver := newExportReceiver(t, 0)
+	exporter, err := StartExport(store, ExportConfig{Enabled: true, URL: receiver.srv.URL, BatchSize: 1, MaxPending: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer exporter.Stop()
+
+	events := waitForExport(t, receiver, 1)
+	if events[0].MessageID != "stale" {
+		t.Fatalf("expected the stale message, got %+v", events[0])
 	}
 }
