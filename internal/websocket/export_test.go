@@ -1,7 +1,7 @@
 // Copyright 2026 Rahmi Pruitt
 // SPDX-License-Identifier: Apache-2.0
 
-package aquifer
+package websocket
 
 import (
 	"context"
@@ -21,18 +21,18 @@ import (
 func TestWebSocketExportConfigIsOffByDefault(t *testing.T) {
 	t.Setenv("AQUIFER_WS_EXPORT_ENABLED", "")
 	t.Setenv("AQUIFER_WS_EXPORT_URL", "https://receiver.example/batches")
-	if LoadWebSocketExportConfig().Enabled {
+	if LoadExportConfig().Enabled {
 		t.Fatal("export must be off unless AQUIFER_WS_EXPORT_ENABLED=true")
 	}
 
 	t.Setenv("AQUIFER_WS_EXPORT_ENABLED", "true")
 	t.Setenv("AQUIFER_WS_EXPORT_URL", "")
-	if LoadWebSocketExportConfig().Enabled {
+	if LoadExportConfig().Enabled {
 		t.Fatal("export without a URL must stay off")
 	}
 
 	t.Setenv("AQUIFER_WS_EXPORT_URL", "https://receiver.example/batches")
-	cfg := LoadWebSocketExportConfig()
+	cfg := LoadExportConfig()
 	if !cfg.Enabled || cfg.BatchSize != defaultWebSocketExportBatch || !cfg.IncludePayloads {
 		t.Fatalf("unexpected config %+v", cfg)
 	}
@@ -43,7 +43,7 @@ func TestWebSocketExportConfigIsOffByDefault(t *testing.T) {
 type exportReceiver struct {
 	srv       *httptest.Server
 	mu        sync.Mutex
-	events    []WebSocketExportEvent
+	events    []ExportEvent
 	requests  atomic.Int64
 	failFirst int64
 	auth      string
@@ -61,7 +61,7 @@ func newExportReceiver(t *testing.T, failFirst int64) *exportReceiver {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
-		var batch WebSocketExportBatch
+		var batch ExportBatch
 		if err := json.NewDecoder(req.Body).Decode(&batch); err != nil || batch.Schema != webSocketExportSchema {
 			w.WriteHeader(http.StatusBadRequest)
 			return
@@ -75,20 +75,20 @@ func newExportReceiver(t *testing.T, failFirst int64) *exportReceiver {
 	return r
 }
 
-func (r *exportReceiver) received() []WebSocketExportEvent {
+func (r *exportReceiver) received() []ExportEvent {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return append([]WebSocketExportEvent(nil), r.events...)
+	return append([]ExportEvent(nil), r.events...)
 }
 
-func exportTestStore(t *testing.T) *RedisWebSocketStreamStore {
+func exportTestStore(t *testing.T) *RedisStreamStore {
 	t.Helper()
 	rawURL := os.Getenv("AQUIFER_TEST_VALKEY_URL")
 	if rawURL == "" {
 		t.Skip("set AQUIFER_TEST_VALKEY_URL to run the real Valkey integration test")
 	}
 	prefix := fmt.Sprintf("aquifer-test:%d:", time.Now().UnixNano())
-	store, err := NewRedisWebSocketStreamStore(rawURL, prefix, 100, time.Minute, 1)
+	store, err := NewRedisStreamStore(rawURL, prefix, 100, time.Minute, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func exportTestStore(t *testing.T) *RedisWebSocketStreamStore {
 	return store
 }
 
-func waitForExport(t *testing.T, receiver *exportReceiver, want int) []WebSocketExportEvent {
+func waitForExport(t *testing.T, receiver *exportReceiver, want int) []ExportEvent {
 	t.Helper()
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
@@ -119,8 +119,8 @@ func waitForExport(t *testing.T, receiver *exportReceiver, want int) []WebSocket
 func TestWebSocketExportDeliversEveryMessageAndCleansUp(t *testing.T) {
 	store := exportTestStore(t)
 	receiver := newExportReceiver(t, 2) // the first two batches fail
-	cfg := WebSocketExportConfig{Enabled: true, URL: receiver.srv.URL, Token: "s3cret", BatchSize: 2, MaxPending: 1000, IncludePayloads: true}
-	exporter, err := StartWebSocketExport(store, cfg)
+	cfg := ExportConfig{Enabled: true, URL: receiver.srv.URL, Token: "s3cret", BatchSize: 2, MaxPending: 1000, IncludePayloads: true}
+	exporter, err := StartExport(store, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +129,7 @@ func TestWebSocketExportDeliversEveryMessageAndCleansUp(t *testing.T) {
 	ctx := context.Background()
 	ids := map[string]string{}
 	for i, session := range []string{"session-a", "session-b", "session-a"} {
-		message := WebSocketEnvelope{Type: "command", MessageID: fmt.Sprintf("m%d", i), Payload: json.RawMessage(fmt.Sprintf(`{"n":%d}`, i))}
+		message := Envelope{Type: "command", MessageID: fmt.Sprintf("m%d", i), Payload: json.RawMessage(fmt.Sprintf(`{"n":%d}`, i))}
 		id, err := store.Append(ctx, session, "client", message)
 		if err != nil {
 			t.Fatal(err)
@@ -170,14 +170,14 @@ func TestWebSocketExportDeliversEveryMessageAndCleansUp(t *testing.T) {
 func TestWebSocketExportResumesAfterRestart(t *testing.T) {
 	store := exportTestStore(t)
 	down := newExportReceiver(t, 1<<30) // never accepts
-	cfg := WebSocketExportConfig{Enabled: true, URL: down.srv.URL, BatchSize: 10, MaxPending: 1000, IncludePayloads: false}
-	exporter, err := StartWebSocketExport(store, cfg)
+	cfg := ExportConfig{Enabled: true, URL: down.srv.URL, BatchSize: 10, MaxPending: 1000, IncludePayloads: false}
+	exporter, err := StartExport(store, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
 	for i := 0; i < 3; i++ {
-		if _, err := store.Append(ctx, "session-r", "backend", WebSocketEnvelope{Type: "event", MessageID: fmt.Sprintf("r%d", i), Payload: json.RawMessage(`{"secret":true}`)}); err != nil {
+		if _, err := store.Append(ctx, "session-r", "backend", Envelope{Type: "event", MessageID: fmt.Sprintf("r%d", i), Payload: json.RawMessage(`{"secret":true}`)}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -190,7 +190,7 @@ func TestWebSocketExportResumesAfterRestart(t *testing.T) {
 	// acknowledged.
 	up := newExportReceiver(t, 0)
 	cfg.URL = up.srv.URL
-	restarted, err := StartWebSocketExport(store, cfg)
+	restarted, err := StartExport(store, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +206,7 @@ func TestWebSocketExportResumesAfterRestart(t *testing.T) {
 func TestWebSocketAppendWithoutExportWritesNoExportStream(t *testing.T) {
 	store := exportTestStore(t)
 	ctx := context.Background()
-	if _, err := store.Append(ctx, "session-x", "client", WebSocketEnvelope{Type: "command", MessageID: "x1"}); err != nil {
+	if _, err := store.Append(ctx, "session-x", "client", Envelope{Type: "command", MessageID: "x1"}); err != nil {
 		t.Fatal(err)
 	}
 	if n := store.client.Exists(ctx, store.exportKey()).Val(); n != 0 {
@@ -239,7 +239,7 @@ func TestWebSocketExportSplitsBatchesBySizeAndHandles413(t *testing.T) {
 	var batchSizes []int
 	var delivered []string
 	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		var batch WebSocketExportBatch
+		var batch ExportBatch
 		json.NewDecoder(req.Body).Decode(&batch)
 		mu.Lock()
 		defer mu.Unlock()
@@ -270,11 +270,11 @@ func TestWebSocketExportSplitsBatchesBySizeAndHandles413(t *testing.T) {
 	}
 	store.EnableExport(1000)
 	for _, id := range []string{"a", "b", "huge", "c", "d", "e"} {
-		if _, err := store.Append(ctx, "session-big", "client", WebSocketEnvelope{Type: "command", MessageID: id, Payload: json.RawMessage(`{"x":1}`)}); err != nil {
+		if _, err := store.Append(ctx, "session-big", "client", Envelope{Type: "command", MessageID: id, Payload: json.RawMessage(`{"x":1}`)}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	exporter, err := StartWebSocketExport(store, WebSocketExportConfig{Enabled: true, URL: receiver.URL, BatchSize: 6, MaxPending: 1000, MaxBatchBytes: 1 << 20, IncludePayloads: true})
+	exporter, err := StartExport(store, ExportConfig{Enabled: true, URL: receiver.URL, BatchSize: 6, MaxPending: 1000, MaxBatchBytes: 1 << 20, IncludePayloads: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,7 +310,7 @@ func TestWebSocketExportCapsBatchBytes(t *testing.T) {
 	var sizes []int
 	delivered := 0
 	counting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		var batch WebSocketExportBatch
+		var batch ExportBatch
 		json.NewDecoder(req.Body).Decode(&batch)
 		mu.Lock()
 		sizes = append(sizes, len(batch.Events))
@@ -329,11 +329,11 @@ func TestWebSocketExportCapsBatchBytes(t *testing.T) {
 	// three don't.
 	payload := json.RawMessage(fmt.Sprintf(`{"blob":%q}`, strings.Repeat("x", 400)))
 	for i := 0; i < 4; i++ {
-		if _, err := store.Append(ctx, "session-bytes", "client", WebSocketEnvelope{Type: "command", MessageID: fmt.Sprintf("m%d", i), Payload: payload}); err != nil {
+		if _, err := store.Append(ctx, "session-bytes", "client", Envelope{Type: "command", MessageID: fmt.Sprintf("m%d", i), Payload: payload}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	exporter, err := StartWebSocketExport(store, WebSocketExportConfig{Enabled: true, URL: counting.URL, BatchSize: 10, MaxPending: 1000, MaxBatchBytes: 1500, IncludePayloads: true})
+	exporter, err := StartExport(store, ExportConfig{Enabled: true, URL: counting.URL, BatchSize: 10, MaxPending: 1000, MaxBatchBytes: 1500, IncludePayloads: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -362,12 +362,12 @@ func TestWebSocketExportCapsBatchBytes(t *testing.T) {
 func TestWebSocketExportStopRemovesItsIdleConsumer(t *testing.T) {
 	store := exportTestStore(t)
 	receiver := newExportReceiver(t, 0)
-	exporter, err := StartWebSocketExport(store, WebSocketExportConfig{Enabled: true, URL: receiver.srv.URL, BatchSize: 10, MaxPending: 1000, IncludePayloads: true})
+	exporter, err := StartExport(store, ExportConfig{Enabled: true, URL: receiver.srv.URL, BatchSize: 10, MaxPending: 1000, IncludePayloads: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	if _, err := store.Append(ctx, "session-c", "client", WebSocketEnvelope{Type: "command", MessageID: "c1"}); err != nil {
+	if _, err := store.Append(ctx, "session-c", "client", Envelope{Type: "command", MessageID: "c1"}); err != nil {
 		t.Fatal(err)
 	}
 	waitForExport(t, receiver, 1)

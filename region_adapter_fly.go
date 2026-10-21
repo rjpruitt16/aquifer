@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/rjpruitt16/aquifer/internal/env"
 )
 
 const (
@@ -74,7 +76,7 @@ func NewFlyRegionAdapter() *FlyRegionAdapter {
 		port = "8080"
 	}
 
-	pollInterval := time.Duration(envInt64("AQUIFER_FLY_POLL_INTERVAL_SECONDS", defaultFlyPollIntervalSeconds)) * time.Second
+	pollInterval := time.Duration(env.Int64("AQUIFER_FLY_POLL_INTERVAL_SECONDS", defaultFlyPollIntervalSeconds)) * time.Second
 
 	appName := os.Getenv("FLY_APP_NAME")
 	a := &FlyRegionAdapter{

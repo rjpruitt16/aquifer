@@ -1,13 +1,15 @@
 // Copyright 2026 Rahmi Pruitt
 // SPDX-License-Identifier: Apache-2.0
 
-package aquifer
+package websocket
 
 import (
 	"log"
 	"os"
 	"strconv"
 	"time"
+
+	"github.com/rjpruitt16/aquifer/internal/env"
 )
 
 const (
@@ -24,7 +26,7 @@ const (
 	defaultWebSocketStreamTTL        = 24 * time.Hour
 )
 
-type WebSocketConfig struct {
+type Config struct {
 	Enabled          bool
 	RedisURL         string
 	StreamPrefix     string
@@ -36,11 +38,11 @@ type WebSocketConfig struct {
 	MaxMessageBytes  int64
 	HandshakeTimeout time.Duration
 	ReconnectMax     time.Duration
-	Scheduler        WebSocketSchedulerConfig
+	Scheduler        SchedulerConfig
 }
 
-func LoadWebSocketConfig() WebSocketConfig {
-	return WebSocketConfig{
+func LoadConfig() Config {
+	return Config{
 		Enabled:          webSocketEnabled(),
 		RedisURL:         os.Getenv("AQUIFER_VALKEY_URL"),
 		StreamPrefix:     defaultString(os.Getenv("AQUIFER_WS_STREAM_PREFIX"), defaultWebSocketStreamPrefix),
@@ -52,7 +54,7 @@ func LoadWebSocketConfig() WebSocketConfig {
 		MaxMessageBytes:  positiveEnvInt64("AQUIFER_WS_MAX_MESSAGE_BYTES", defaultWebSocketMaxMessageBytes),
 		HandshakeTimeout: time.Duration(positiveEnvInt64("AQUIFER_WS_HANDSHAKE_TIMEOUT_SECONDS", int64(defaultWebSocketHandshakeTimeout/time.Second))) * time.Second,
 		ReconnectMax:     time.Duration(positiveEnvInt64("AQUIFER_WS_RECONNECT_MAX_SECONDS", int64(defaultWebSocketReconnectMax/time.Second))) * time.Second,
-		Scheduler: WebSocketSchedulerConfig{
+		Scheduler: SchedulerConfig{
 			MaxClients:   int(positiveEnvInt64("AQUIFER_WS_MAX_CLIENT_CONNECTIONS", defaultWebSocketMaxClients)),
 			MaxUpstreams: int(positiveEnvInt64("AQUIFER_WS_MAX_UPSTREAM_CONNECTIONS", defaultWebSocketMaxUpstreams)),
 			MaxWaiting:   int(positiveEnvInt64("AQUIFER_WS_MAX_WAITING_CONNECTIONS", defaultWebSocketMaxWaiting)),
@@ -64,13 +66,13 @@ func LoadWebSocketConfig() WebSocketConfig {
 
 func webSocketEnabled() bool {
 	if raw := os.Getenv("AQUIFER_WS_ENABLED"); raw != "" {
-		return envBool("AQUIFER_WS_ENABLED", true)
+		return env.Bool("AQUIFER_WS_ENABLED", true)
 	}
 	return os.Getenv("AQUIFER_VALKEY_URL") != ""
 }
 
 func positiveEnvInt64(key string, fallback int64) int64 {
-	value := envInt64(key, fallback)
+	value := env.Int64(key, fallback)
 	if value <= 0 {
 		log.Printf("websocket: %s must be positive, using default %d", key, fallback)
 		return fallback

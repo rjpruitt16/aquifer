@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/rjpruitt16/aquifer/internal/env"
 )
 
 const (
@@ -65,7 +67,7 @@ func (g *redirectGate) Trip(cooldown time.Duration) {
 }
 
 func redirectGateCooldown() time.Duration {
-	return time.Duration(envInt64("AQUIFER_REDIRECT_GATE_COOLDOWN_SECONDS", defaultRedirectGateCooldownSeconds)) * time.Second
+	return time.Duration(env.Int64("AQUIFER_REDIRECT_GATE_COOLDOWN_SECONDS", defaultRedirectGateCooldownSeconds)) * time.Second
 }
 
 var (
@@ -208,7 +210,7 @@ func (e *RedirectExhaustedError) Error() string {
 }
 
 func redirectExhaustedRetryAfterSeconds() int64 {
-	return envInt64("AQUIFER_REDIRECT_EXHAUSTED_RETRY_AFTER_SECONDS", defaultRedirectExhaustedRetryAfterSeconds)
+	return env.Int64("AQUIFER_REDIRECT_EXHAUSTED_RETRY_AFTER_SECONDS", defaultRedirectExhaustedRetryAfterSeconds)
 }
 
 // attemptRedirect is called from AttemptDirect's local-fallback points

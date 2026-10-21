@@ -6,10 +6,11 @@ package aquifer
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"net/url"
-	"os"
 	"strings"
 	"time"
+
+	"github.com/rjpruitt16/aquifer/internal/env"
+	"github.com/rjpruitt16/aquifer/internal/urlpolicy"
 )
 
 type Status string
@@ -169,48 +170,10 @@ func (r *JobRequest) Validate() string {
 		return "url and pool_id are mutually exclusive — a job dispatches to one or the other"
 	case r.Method == "":
 		return "method is required"
-	case r.URL != "" && !domainAllowed(r.URL):
+	case r.URL != "" && !urlpolicy.Allowed(r.URL):
 		return "url domain is not in the configured allowlist (AQUIFER_ALLOWED_URL_DOMAINS)"
 	}
 	return ""
-}
-
-// domainAllowed reports whether url's host is permitted to be dispatched to,
-// per AQUIFER_ALLOWED_URL_DOMAINS (comma-separated hostnames). Defense-in-
-// depth against the open-relay/SSRF risk already documented in API.md's
-// POST /jobs warning: this doesn't replace "run Aquifer on a private network,
-// put authorization in front" — it's a second, narrower layer Aquifer itself
-// can enforce (which destinations, not who's allowed to call). Unset/empty
-// (the default) means unrestricted, identical to today's behavior — this is
-// opt-in, matching every other feature flag in this codebase. Pool-routed
-// jobs have no caller-supplied URL (PoolRegistry addresses are trusted
-// server-side config, not request input) and are never checked here.
-//
-// A host is allowed if it exactly matches an entry, or is a subdomain of one
-// (e.g. "api.example.com" matches an allowlisted "example.com") — standard
-// allowlist semantics, not a novel scheme.
-func domainAllowed(rawURL string) bool {
-	allowlist := os.Getenv("AQUIFER_ALLOWED_URL_DOMAINS")
-	if allowlist == "" {
-		return true
-	}
-
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return false
-	}
-	host := u.Hostname()
-
-	for _, allowed := range strings.Split(allowlist, ",") {
-		allowed = strings.TrimSpace(allowed)
-		if allowed == "" {
-			continue
-		}
-		if host == allowed || strings.HasSuffix(host, "."+allowed) {
-			return true
-		}
-	}
-	return false
 }
 
 const (
@@ -231,7 +194,7 @@ const (
 )
 
 func sharedIdempotencyEnabled() bool {
-	return envBool("AQUIFER_SHARED_IDEMPOTENCY_ENABLED", false)
+	return env.Bool("AQUIFER_SHARED_IDEMPOTENCY_ENABLED", false)
 }
 
 // dedupHash is the one place an idempotency identity is derived. The shared

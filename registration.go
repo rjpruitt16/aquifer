@@ -9,6 +9,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/rjpruitt16/aquifer/internal/env"
 )
 
 // External registration: opt-in, off by default. When AQUIFER_REGISTRY_URL
@@ -66,7 +68,7 @@ func LoadRegistrationConfig() RegistrationConfig {
 	return RegistrationConfig{
 		URL:             os.Getenv("AQUIFER_REGISTRY_URL"),
 		Port:            port,
-		IntervalSeconds: envInt64("AQUIFER_REGISTRY_INTERVAL_SECONDS", defaultRegistrationIntervalSeconds),
+		IntervalSeconds: env.Int64("AQUIFER_REGISTRY_INTERVAL_SECONDS", defaultRegistrationIntervalSeconds),
 		ReservedFor:     strings.TrimSpace(os.Getenv("AQUIFER_REGISTRY_RESERVED_FOR")),
 		Role:            strings.ToLower(strings.TrimSpace(os.Getenv("AQUIFER_REGISTRY_ROLE"))),
 		Pools:           parsePools(os.Getenv("AQUIFER_REGISTRY_POOLS")),

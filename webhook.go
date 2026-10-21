@@ -11,6 +11,8 @@ import (
 	"math"
 	"net/http"
 	"time"
+
+	"github.com/rjpruitt16/aquifer/internal/retry"
 )
 
 const webhookMaxRetries = 4
@@ -95,7 +97,7 @@ func deliverWithRetryContext(ctx context.Context, rawURL string, payload map[str
 	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
 	if err != nil {
 		if attempt < webhookMaxRetries {
-			backoff := withJitter(time.Duration(math.Pow(2, float64(attempt))) * time.Second)
+			backoff := retry.Jitter(time.Duration(math.Pow(2, float64(attempt))) * time.Second)
 			log.Printf("[Webhook] error delivering to %s, retry %d/%d in %s: %v", rawURL, attempt+1, webhookMaxRetries, backoff, err)
 			if !sleepBeforeRetryContext(ctx, backoff) {
 				return false
@@ -110,7 +112,7 @@ func deliverWithRetryContext(ctx context.Context, rawURL string, payload map[str
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		if attempt < webhookMaxRetries {
-			backoff := withJitter(time.Duration(math.Pow(2, float64(attempt))) * time.Second)
+			backoff := retry.Jitter(time.Duration(math.Pow(2, float64(attempt))) * time.Second)
 			log.Printf("[Webhook] %d from %s, retry %d/%d in %s", resp.StatusCode, rawURL, attempt+1, webhookMaxRetries, backoff)
 			if !sleepBeforeRetryContext(ctx, backoff) {
 				return false

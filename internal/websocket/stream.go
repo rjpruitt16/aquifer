@@ -1,10 +1,12 @@
 // Copyright 2026 Rahmi Pruitt
 // SPDX-License-Identifier: Apache-2.0
 
-package aquifer
+package websocket
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,25 +25,25 @@ const (
 	defaultWebSocketReadBatch       = 100
 )
 
-type WebSocketStreamEvent struct {
+type StreamEvent struct {
 	StreamID   string
 	Direction  string
-	Envelope   WebSocketEnvelope
+	Envelope   Envelope
 	RecordedAt int64
 }
 
-type WebSocketStreamStore interface {
-	Append(ctx context.Context, sessionID, direction string, message WebSocketEnvelope) (string, error)
-	ReadAfter(ctx context.Context, sessionID, after string, count int64, block time.Duration) ([]WebSocketStreamEvent, error)
+type StreamStore interface {
+	Append(ctx context.Context, sessionID, direction string, message Envelope) (string, error)
+	ReadAfter(ctx context.Context, sessionID, after string, count int64, block time.Duration) ([]StreamEvent, error)
 	// Follow signals when sessionID's transcript may have entries after
 	// cursor, so a live session reads only when there is something to read.
-	Follow(ctx context.Context, sessionID, cursor string) (WebSocketFollow, error)
+	Follow(ctx context.Context, sessionID, cursor string) (Follow, error)
 	CheckCursor(ctx context.Context, sessionID, after string) error
 	Ping(ctx context.Context) error
 	Close() error
 }
 
-type RedisWebSocketStreamStore struct {
+type RedisStreamStore struct {
 	client    *redis.Client
 	follower  *streamFollower
 	prefix    string
@@ -52,10 +54,10 @@ type RedisWebSocketStreamStore struct {
 	exportMaxLen int64
 }
 
-// NewRedisWebSocketStreamStore connects the transcript store. Live sessions
+// NewRedisStreamStore connects the transcript store. Live sessions
 // learn about new entries through readerShards shared pub/sub connections
 // (see streamFollower), so Valkey connections don't grow with sessions.
-func NewRedisWebSocketStreamStore(rawURL, prefix string, maxEvents int64, ttl time.Duration, readerShards int) (*RedisWebSocketStreamStore, error) {
+func NewRedisStreamStore(rawURL, prefix string, maxEvents int64, ttl time.Duration, readerShards int) (*RedisStreamStore, error) {
 	if rawURL == "" {
 		return nil, errors.New("AQUIFER_VALKEY_URL is required when WebSockets are enabled")
 	}
@@ -81,7 +83,7 @@ func NewRedisWebSocketStreamStore(rawURL, prefix string, maxEvents int64, ttl ti
 	// races when the follower opens its dedicated connections concurrently.
 	opts.MaintNotificationsConfig = &maintnotifications.Config{Mode: maintnotifications.ModeDisabled}
 	client := redis.NewClient(opts)
-	return &RedisWebSocketStreamStore{
+	return &RedisStreamStore{
 		client:    client,
 		follower:  newStreamFollower(client, readerShards),
 		prefix:    prefix,
@@ -107,7 +109,7 @@ func normalizeWebSocketRedisURL(raw string) (string, error) {
 	return u.String(), nil
 }
 
-func (s *RedisWebSocketStreamStore) Append(ctx context.Context, sessionID, direction string, message WebSocketEnvelope) (string, error) {
+func (s *RedisStreamStore) Append(ctx context.Context, sessionID, direction string, message Envelope) (string, error) {
 	if sessionID == "" {
 		return "", errors.New("websocket session_id is required")
 	}
@@ -170,7 +172,7 @@ func (s *RedisWebSocketStreamStore) Append(ctx context.Context, sessionID, direc
 	return id, nil
 }
 
-func (s *RedisWebSocketStreamStore) ReadAfter(ctx context.Context, sessionID, after string, count int64, block time.Duration) ([]WebSocketStreamEvent, error) {
+func (s *RedisStreamStore) ReadAfter(ctx context.Context, sessionID, after string, count int64, block time.Duration) ([]StreamEvent, error) {
 	if count <= 0 {
 		count = defaultWebSocketReadBatch
 	}
@@ -189,7 +191,7 @@ func (s *RedisWebSocketStreamStore) ReadAfter(ctx context.Context, sessionID, af
 		return nil, fmt.Errorf("read websocket events: %w", err)
 	}
 
-	var events []WebSocketStreamEvent
+	var events []StreamEvent
 	for _, stream := range streams {
 		for _, raw := range stream.Messages {
 			event, err := decodeWebSocketStreamEvent(raw)
@@ -202,7 +204,7 @@ func (s *RedisWebSocketStreamStore) ReadAfter(ctx context.Context, sessionID, af
 	return events, nil
 }
 
-func (s *RedisWebSocketStreamStore) CheckCursor(ctx context.Context, sessionID, after string) error {
+func (s *RedisStreamStore) CheckCursor(ctx context.Context, sessionID, after string) error {
 	if after == "" || after == "0-0" {
 		return nil
 	}
@@ -223,31 +225,31 @@ func (s *RedisWebSocketStreamStore) CheckCursor(ctx context.Context, sessionID, 
 	return nil
 }
 
-func (s *RedisWebSocketStreamStore) Ping(ctx context.Context) error {
+func (s *RedisStreamStore) Ping(ctx context.Context) error {
 	return s.client.Ping(ctx).Err()
 }
 
-func (s *RedisWebSocketStreamStore) Follow(ctx context.Context, sessionID, _ string) (WebSocketFollow, error) {
+func (s *RedisStreamStore) Follow(ctx context.Context, sessionID, _ string) (Follow, error) {
 	if sessionID == "" {
 		return nil, errors.New("websocket session_id is required")
 	}
 	return s.follower.follow(ctx, s.notifyChannel(sessionID))
 }
 
-func (s *RedisWebSocketStreamStore) notifyChannel(sessionID string) string {
+func (s *RedisStreamStore) notifyChannel(sessionID string) string {
 	return s.streamKey(sessionID) + ":notify"
 }
 
-func (s *RedisWebSocketStreamStore) Close() error {
+func (s *RedisStreamStore) Close() error {
 	s.follower.close()
 	return s.client.Close()
 }
 
-func (s *RedisWebSocketStreamStore) streamKey(sessionID string) string {
-	return s.prefix + hashKey(sessionID)
+func (s *RedisStreamStore) streamKey(sessionID string) string {
+	return s.prefix + hashSessionID(sessionID)
 }
 
-func decodeWebSocketStreamEvent(raw redis.XMessage) (WebSocketStreamEvent, error) {
+func decodeWebSocketStreamEvent(raw redis.XMessage) (StreamEvent, error) {
 	value := func(name string) string {
 		v, ok := raw.Values[name]
 		if !ok || v == nil {
@@ -258,18 +260,18 @@ func decodeWebSocketStreamEvent(raw redis.XMessage) (WebSocketStreamEvent, error
 
 	generation, err := strconv.ParseInt(defaultString(value("generation"), "0"), 10, 64)
 	if err != nil {
-		return WebSocketStreamEvent{}, fmt.Errorf("decode websocket event %s generation: %w", raw.ID, err)
+		return StreamEvent{}, fmt.Errorf("decode websocket event %s generation: %w", raw.ID, err)
 	}
 	recordedAt, err := strconv.ParseInt(defaultString(value("recorded_at"), "0"), 10, 64)
 	if err != nil {
-		return WebSocketStreamEvent{}, fmt.Errorf("decode websocket event %s recorded_at: %w", raw.ID, err)
+		return StreamEvent{}, fmt.Errorf("decode websocket event %s recorded_at: %w", raw.ID, err)
 	}
 
-	event := WebSocketStreamEvent{
+	event := StreamEvent{
 		StreamID:   raw.ID,
 		Direction:  value("direction"),
 		RecordedAt: recordedAt,
-		Envelope: WebSocketEnvelope{
+		Envelope: Envelope{
 			Type:       value("type"),
 			MessageID:  value("message_id"),
 			CausedBy:   value("caused_by"),
@@ -278,7 +280,7 @@ func decodeWebSocketStreamEvent(raw redis.XMessage) (WebSocketStreamEvent, error
 	}
 	if payload := value("payload"); payload != "" {
 		if !json.Valid([]byte(payload)) {
-			return WebSocketStreamEvent{}, fmt.Errorf("decode websocket event %s payload: invalid json", raw.ID)
+			return StreamEvent{}, fmt.Errorf("decode websocket event %s payload: invalid json", raw.ID)
 		}
 		event.Envelope.Payload = json.RawMessage(payload)
 	}
@@ -324,4 +326,10 @@ func defaultString(value, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+// hashSessionID keeps raw session IDs out of Valkey key names.
+func hashSessionID(sessionID string) string {
+	h := sha256.Sum256([]byte(sessionID))
+	return hex.EncodeToString(h[:])
 }
