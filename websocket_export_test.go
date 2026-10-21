@@ -319,18 +319,25 @@ func TestWebSocketExportCapsBatchBytes(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer counting.Close()
-	exporter, err := StartWebSocketExport(store, WebSocketExportConfig{Enabled: true, URL: counting.URL, BatchSize: 10, MaxPending: 1000, MaxBatchBytes: 1500, IncludePayloads: true})
-	if err != nil {
+	// Preload the export stream so the exporter's first read has all four.
+	ctx := context.Background()
+	if err := store.client.XGroupCreateMkStream(ctx, store.exportKey(), webSocketExportGroup, "0").Err(); err != nil {
 		t.Fatal(err)
 	}
-	defer exporter.Stop()
-	ctx := context.Background()
-	payload := json.RawMessage(fmt.Sprintf(`{"blob":%q}`, string(make([]byte, 400))))
+	store.EnableExport(1000)
+	// About 550 encoded bytes per event: two fit under the 1500-byte cap,
+	// three don't.
+	payload := json.RawMessage(fmt.Sprintf(`{"blob":%q}`, strings.Repeat("x", 400)))
 	for i := 0; i < 4; i++ {
 		if _, err := store.Append(ctx, "session-bytes", "client", WebSocketEnvelope{Type: "command", MessageID: fmt.Sprintf("m%d", i), Payload: payload}); err != nil {
 			t.Fatal(err)
 		}
 	}
+	exporter, err := StartWebSocketExport(store, WebSocketExportConfig{Enabled: true, URL: counting.URL, BatchSize: 10, MaxPending: 1000, MaxBatchBytes: 1500, IncludePayloads: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer exporter.Stop()
 	if !waitUntil(15*time.Second, func() bool {
 		mu.Lock()
 		defer mu.Unlock()
@@ -340,10 +347,15 @@ func TestWebSocketExportCapsBatchBytes(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
+	sawPair := false
 	for _, n := range sizes {
 		if n > 2 {
-			t.Fatalf("a 1500-byte cap should fit at most two ~700-byte messages per batch, got batches %v", sizes)
+			t.Fatalf("a 1500-byte cap should fit at most two ~550-byte messages per batch, got batches %v", sizes)
 		}
+		sawPair = sawPair || n == 2
+	}
+	if !sawPair {
+		t.Fatalf("the cap should still pack two messages into a batch, got batches %v", sizes)
 	}
 }
 
