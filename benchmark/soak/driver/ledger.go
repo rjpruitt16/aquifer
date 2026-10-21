@@ -78,6 +78,14 @@ type Counters struct {
 	Lost                     uint64 `json:"lost"`
 	LostInFlushWindow        uint64 `json:"lost_within_flush_window_of_kill"`
 	Stuck                    uint64 `json:"stuck_over_24h"`
+	// LostInLine is gateway mode's lost: accepted into the gateway's line,
+	// then never seen again, on the gateway, a backend, or as a webhook.
+	LostInLine uint64 `json:"lost_in_gateway_line"`
+	// Gateway mode: jobs that finished while their caller was still on the
+	// gateway's line stream. The instance sends no webhook for those (the
+	// result already reached the caller), so the stream is the record.
+	CompletedOnStream uint64 `json:"completed_on_stream"`
+	FailedOnStream    uint64 `json:"failed_on_stream"`
 }
 
 type ledgerState struct {
@@ -215,6 +223,17 @@ func (l *ledger) nearRestart(t int64, window int64) bool {
 // webhook records a delivered webhook. It returns the job's end-to-end time
 // (accept to webhook) when known, and whether this was a duplicate delivery.
 func (l *ledger) webhook(seq uint64, status string, now time.Time) (e2e time.Duration, hasE2E, dup bool) {
+	return l.finish(seq, status, now, false)
+}
+
+// finishedOnStream records a job whose result came back on the gateway's
+// line stream instead of as a webhook.
+func (l *ledger) finishedOnStream(seq uint64, status string, now time.Time) (dup bool) {
+	_, _, dup = l.finish(seq, status, now, true)
+	return dup
+}
+
+func (l *ledger) finish(seq uint64, status string, now time.Time, onStream bool) (e2e time.Duration, hasE2E, dup bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	c := &l.s.Counters
@@ -225,9 +244,14 @@ func (l *ledger) webhook(seq uint64, status string, now time.Time) (e2e time.Dur
 		}
 		return 0, false, true
 	}
-	if status == "failed" {
+	switch {
+	case onStream && status == "failed":
+		c.FailedOnStream++
+	case onStream:
+		c.CompletedOnStream++
+	case status == "failed":
 		c.Failed++
-	} else {
+	default:
 		c.Completed++
 	}
 	p, ok := l.s.Outstanding[seq]
@@ -320,6 +344,13 @@ func (l *ledger) resolve(seq uint64, status string, now time.Time) (closed strin
 			c.TerminalNoWebhook++
 			closeAs("")
 		}
+	case "unknown":
+		// Gateway mode: a job accepted into the line whose id was never
+		// seen and that the gateway no longer knows.
+		if now.Sub(time.UnixMilli(p.AcceptedAt)) > lostInLineAfter {
+			c.LostInLine++
+			closeAs("lost_in_gateway_line")
+		}
 	case "":
 		if p.SeenTerminal != 0 {
 			c.TerminalNoWebhook++ // finished, then expired from the store
@@ -398,4 +429,14 @@ func (l *ledger) save() error {
 		return fmt.Errorf("save ledger: %w", err)
 	}
 	return os.Rename(tmp, l.path)
+}
+
+// setJobID records the instance's id for a job accepted into a gateway's
+// line, once the gateway names it.
+func (l *ledger) setJobID(seq uint64, id string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if p, ok := l.s.Outstanding[seq]; ok && p.JobID == "" {
+		p.JobID = id
+	}
 }

@@ -35,32 +35,34 @@ func logf(format string, args ...any) { log.Printf(format, args...) }
 var jobIDRe = regexp.MustCompile(`"job_id"\s*:\s*"([^"]+)"`)
 
 type config struct {
-	Target      string        `json:"target"`
-	Supervisor  string        `json:"supervisor"`
-	Self        string        `json:"self"`
-	DataDir     string        `json:"-"`
-	Rate        int           `json:"steady_rate"`
-	BurstRate   int           `json:"burst_rate"`
-	BurstEvery  time.Duration `json:"-"`
-	BurstFor    time.Duration `json:"-"`
-	RampHourUTC int           `json:"ramp_hour_utc"`
-	RampSteps   []int         `json:"ramp_steps"`
-	RampStep    time.Duration `json:"-"`
-	KillMin     time.Duration `json:"-"`
-	KillMax     time.Duration `json:"-"`
-	RebootEvery time.Duration `json:"-"`
-	Users       int           `json:"users"`
-	Chaos       bool          `json:"chaos"`
-	PeakHourUTC int           `json:"combined_peak_hour_utc"`
-	Phases      string        `json:"storm_phases,omitempty"`
-	Receivers   int           `json:"storm_receivers,omitempty"`
-	BodyKB      int           `json:"storm_body_kb,omitempty"`
-	NoWebhook   bool          `json:"storm_no_webhook,omitempty"`
-	Nodes       string        `json:"cluster_nodes,omitempty"`
-	Scenarios   string        `json:"cluster_scenarios,omitempty"`
-	Valkey      bool          `json:"cluster_valkey,omitempty"`
-	Name        string        `json:"name"`
-	WS          wsConfig      `json:"websocket"`
+	Target       string        `json:"target"`
+	Supervisor   string        `json:"supervisor"`
+	Self         string        `json:"self"`
+	DataDir      string        `json:"-"`
+	Rate         int           `json:"steady_rate"`
+	BurstRate    int           `json:"burst_rate"`
+	BurstEvery   time.Duration `json:"-"`
+	BurstFor     time.Duration `json:"-"`
+	RampHourUTC  int           `json:"ramp_hour_utc"`
+	RampSteps    []int         `json:"ramp_steps"`
+	RampStep     time.Duration `json:"-"`
+	KillMin      time.Duration `json:"-"`
+	KillMax      time.Duration `json:"-"`
+	RebootEvery  time.Duration `json:"-"`
+	Users        int           `json:"users"`
+	Chaos        bool          `json:"chaos"`
+	PeakHourUTC  int           `json:"combined_peak_hour_utc"`
+	Phases       string        `json:"storm_phases,omitempty"`
+	Receivers    int           `json:"storm_receivers,omitempty"`
+	BodyKB       int           `json:"storm_body_kb,omitempty"`
+	NoWebhook    bool          `json:"storm_no_webhook,omitempty"`
+	Nodes        string        `json:"cluster_nodes,omitempty"`
+	Scenarios    string        `json:"cluster_scenarios,omitempty"`
+	Valkey       bool          `json:"cluster_valkey,omitempty"`
+	Backends     string        `json:"gateway_backends,omitempty"`
+	WebhookChaos bool          `json:"webhook_chaos"`
+	Name         string        `json:"name"`
+	WS           wsConfig      `json:"websocket"`
 }
 
 // window counts one minute of activity.
@@ -142,16 +144,26 @@ func main() {
 	flag.BoolVar(&cfg.NoWebhook, "no-webhook", false, "storm test: jobs carry no webhook_url; a job is done when its receiver first answers 2xx, or when Aquifer reports it failed (needs -receivers)")
 	flag.StringVar(&cfg.Nodes, "nodes", envOr("SOAK_NODES", ""), "cluster test: id=target|supervisor,... spread load over these Aquifer nodes instead of -target")
 	flag.StringVar(&cfg.Scenarios, "scenarios", "", "cluster test: failures in order, after:action[:nodes][:for], e.g. 30m:kill:a,25m:hold:b:5m,25m:freeze:c:20s,25m:valkey:5m,20m:end")
+	flag.StringVar(&cfg.Backends, "backends", envOr("SOAK_BACKENDS", ""), "gateway mode: id=target|supervisor,... the instances behind a gateway (Canalis) named by -nodes. Load goes only to -nodes; job status is checked here; scenarios can name these too")
+	flag.BoolVar(&cfg.WebhookChaos, "webhook-chaos", true, "let the webhook receiver misbehave with -chaos (false keeps it healthy, so every job's webhook is the record of it finishing)")
 	flag.BoolVar(&cfg.Valkey, "valkey", false, "cluster test: run the nodes' Valkey here (valkey-server on :6379) so a scenario can take it down")
 	flag.Parse()
-	var nodes []*clusterNode
+	if cfg.Backends != "" && cfg.Nodes == "" {
+		log.Fatal("-backends (SOAK_BACKENDS) needs -nodes (SOAK_NODES): the gateway nodes load goes to")
+	}
+	var nodes, backends []*clusterNode
 	var plan []scenario
 	if cfg.Nodes != "" {
 		var err error
 		if nodes, err = parseNodes(cfg.Nodes); err != nil {
 			log.Fatal(err)
 		}
-		if plan, err = parseScenarios(cfg.Scenarios, nodes); err != nil {
+		if cfg.Backends != "" {
+			if backends, err = parseBackends(cfg.Backends); err != nil {
+				log.Fatal(err)
+			}
+		}
+		if plan, err = parseScenarios(cfg.Scenarios, append(append([]*clusterNode{}, nodes...), backends...)); err != nil {
 			log.Fatal(err)
 		}
 		// Status pages and per-minute target stats follow the first node.
@@ -200,6 +212,7 @@ func main() {
 	d.ledger.failedIsTerminal = cfg.NoWebhook
 	if len(nodes) > 0 {
 		d.cluster = newCluster(nodes, plan, cfg.Valkey)
+		d.cluster.addBackends(backends)
 		if d.cluster.valkey != nil {
 			if err := d.cluster.valkey.start(); err != nil {
 				log.Fatalf("valkey: %v", err)
@@ -247,7 +260,9 @@ func main() {
 		// Aquifer reports results to stays healthy so it doesn't blur them.
 		if d.storm == nil {
 			go d.upstream.schedule(10*time.Minute, d.events, stop)
-			go d.webhook.schedule(10*time.Minute, d.events, stop)
+			if cfg.WebhookChaos {
+				go d.webhook.schedule(10*time.Minute, d.events, stop)
+			}
 		}
 		if cfg.WS.Enabled {
 			go d.wsUpstream.schedule(10*time.Minute, d.events, stop)
@@ -349,6 +364,26 @@ func (d *driver) submit() {
 		return
 	}
 	now := time.Now()
+	if id, ok := lineAccept(status, rb); ok && d.cluster.isGateway() {
+		d.ledger.acceptedOn(seq, id, lineNode, now)
+		d.cluster.lined.Add(1)
+		d.win.accepted.Add(1)
+		if outcome := lineOutcome(rb); outcome != "" {
+			// It finished while we listened: no webhook will follow.
+			switch {
+			case d.ledger.finishedOnStream(seq, outcome, now):
+				d.win.dups.Add(1)
+			case outcome == "failed":
+				d.win.failed.Add(1)
+			default:
+				d.win.completed.Add(1)
+			}
+			d.win.e2e.add(now.Sub(start))
+			return
+		}
+		d.win.accept.add(now.Sub(start))
+		return
+	}
 	// 200 is the existing job for a key already accepted: in a cluster
 	// test, the answer to a 504 retried with the same key.
 	if status == 200 && d.cluster == nil {
@@ -561,7 +596,7 @@ func (d *driver) checkLoop(stop <-chan struct{}) {
 			go func() {
 				defer wg.Done()
 				for seq := range work {
-					status := d.jobStatus(batch[seq])
+					status := d.jobStatus(seq, batch[seq])
 					if d.ledger.resolve(seq, status, time.Now()) == "failed" && d.storm != nil {
 						d.storm.recordFailed(seq)
 					}
@@ -592,7 +627,10 @@ func (d *driver) post(body string) (status int, owner string, rb []byte, err err
 }
 
 // jobStatus asks the node that kept the job. Any other node would 404.
-func (d *driver) jobStatus(p pending) string {
+func (d *driver) jobStatus(seq uint64, p pending) string {
+	if d.cluster.isGateway() {
+		return d.gatewayJobStatus(seq, p)
+	}
 	target := d.cfg.Target
 	if d.cluster != nil {
 		target = d.cluster.targetFor(p.Node)

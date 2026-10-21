@@ -136,8 +136,11 @@ type cluster struct {
 	byID   map[string]*clusterNode
 	plan   []scenario
 	valkey *valkeyProc
+	// backends are the instances behind a gateway (gateway.go); nil otherwise.
+	backends []*clusterNode
 
 	retried504 atomic.Int64 // 504 (slow owner) retried with the same key
+	lined      atomic.Int64 // gateway mode: jobs accepted into the gateway's line
 	failovers  atomic.Int64 // connection errors retried on another node
 	gateway    atomic.Int64 // 502/504 we couldn't turn into an accept
 
@@ -318,13 +321,15 @@ func (c *cluster) status(d *driver) map[string]any {
 	}
 	c.mu.Unlock()
 	return map[string]any{
-		"nodes":          nodes,
-		"plan":           c.plan,
-		"scenarios":      results,
-		"retried_504s":   c.retried504.Load(),
-		"failovers":      c.failovers.Load(),
-		"gateway_errors": c.gateway.Load(),
-		"valkey_running": c.valkey != nil && c.valkey.running(),
+		"nodes":                      nodes,
+		"plan":                       c.plan,
+		"scenarios":                  results,
+		"retried_504s":               c.retried504.Load(),
+		"failovers":                  c.failovers.Load(),
+		"gateway_errors":             c.gateway.Load(),
+		"valkey_running":             c.valkey != nil && c.valkey.running(),
+		"backends":                   backendIDs(c.backends),
+		"accepted_into_gateway_line": c.lined.Load(),
 	}
 }
 
@@ -346,6 +351,9 @@ func subCounters(a, b Counters) Counters {
 		Lost:                     a.Lost - b.Lost,
 		LostInFlushWindow:        a.LostInFlushWindow - b.LostInFlushWindow,
 		Stuck:                    a.Stuck - b.Stuck,
+		LostInLine:               a.LostInLine - b.LostInLine,
+		CompletedOnStream:        a.CompletedOnStream - b.CompletedOnStream,
+		FailedOnStream:           a.FailedOnStream - b.FailedOnStream,
 	}
 }
 
