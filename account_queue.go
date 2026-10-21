@@ -417,7 +417,7 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 						log.Printf("[AccountQueue] panic executing job %s: %v", j.ID, r)
 						q.store.UpdateStatus(j.ID, StatusFailed)
 						q.metrics.JobFailed(j.UserID, q.upstream, "internal panic")
-						observeJobFinished(q.metrics, j, q.upstream, "failed")
+						observeJobFinished(q.metrics, j, q.upstream, "failed", 0)
 						if !j.isWebhookDeliveryJob() && j.WebhookURL != "" {
 							q.enqueueWebhook(j.ID, j.UserID, j.WebhookURL, j.webhookMaxRetries(), map[string]any{
 								"job_id": j.ID,
@@ -656,9 +656,9 @@ func execute(ctx context.Context, job *Job, dispatchURL, upstream string, store 
 		return jobDoneMsg{}
 	}
 	if err != nil {
-		observeDispatch(metrics, upstream, 0)
+		observeDispatch(metrics, job, upstream, 0)
 	} else {
-		observeDispatch(metrics, upstream, resp.StatusCode)
+		observeDispatch(metrics, job, upstream, resp.StatusCode)
 	}
 
 	var reason string
@@ -692,7 +692,7 @@ func execute(ctx context.Context, job *Job, dispatchURL, upstream string, store 
 			},
 		})
 		metrics.JobCompleted(job.UserID, upstream, time.Since(startedAt).Milliseconds())
-		observeJobFinished(metrics, job, upstream, "completed")
+		observeJobFinished(metrics, job, upstream, "completed", resp.StatusCode)
 		if !job.isWebhookDeliveryJob() && job.WebhookURL != "" && !streamed {
 			payload := map[string]any{
 				"job_id":          job.ID,
@@ -770,7 +770,7 @@ func failJob(job *Job, upstream, reason string, responseStatus int, body []byte,
 	if reason == "execution_deadline_exceeded" {
 		outcome = "expired"
 	}
-	observeJobFinished(metrics, job, upstream, outcome)
+	observeJobFinished(metrics, job, upstream, outcome, responseStatus)
 	if !job.isWebhookDeliveryJob() && job.WebhookURL != "" && !streamed {
 		payload := map[string]any{
 			"job_id":          job.ID,
@@ -859,7 +859,7 @@ func failExpiredJob(job *Job, upstream string, store JobStore, broker *Broker, m
 		"job_id": job.ID, "reason": reason,
 	}})
 	metrics.JobFailed(job.UserID, upstream, reason)
-	observeJobFinished(metrics, job, upstream, "expired")
+	observeJobFinished(metrics, job, upstream, "expired", 0)
 	if !job.isWebhookDeliveryJob() && job.WebhookURL != "" {
 		payload := map[string]any{"job_id": job.ID, "status": "failed", "reason": reason}
 		if resultKey != "" {

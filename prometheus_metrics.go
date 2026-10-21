@@ -107,35 +107,21 @@ func (m *PrometheusMetrics) tenantLocked(userID string) string {
 	return "other"
 }
 
-func (m *PrometheusMetrics) countJob(userID, upstream, outcome string) {
+// Jobs are counted from JobFinished, which leaves out Aquifer's internal
+// completion-webhook jobs (JobCompleted and JobFailed fire for those too).
+// WebhookDelivered and WebhookFailed are registration pings and drain-mode
+// ledger flushes, not completion webhooks; those come from
+// WebhookJobFinished.
+func (m *PrometheusMetrics) JobQueued(userID, upstream string)                      {}
+func (m *PrometheusMetrics) JobDispatched(userID, upstream string)                  {}
+func (m *PrometheusMetrics) JobCompleted(userID, upstream string, durationMs int64) {}
+func (m *PrometheusMetrics) JobFailed(userID, upstream string, reason string)       {}
+func (m *PrometheusMetrics) WebhookDelivered(url string, attempt int)               {}
+func (m *PrometheusMetrics) WebhookFailed(url string, attempts int)                 {}
+
+func (m *PrometheusMetrics) WebhookJobFinished(outcome string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.jobs[[3]string{upstream, outcome, m.tenantLocked(userID)}]++
-}
-
-func (m *PrometheusMetrics) JobQueued(userID, upstream string)     {}
-func (m *PrometheusMetrics) JobDispatched(userID, upstream string) {}
-func (m *PrometheusMetrics) JobCompleted(userID, upstream string, durationMs int64) {
-	m.countJob(userID, upstream, "completed")
-}
-
-func (m *PrometheusMetrics) JobFailed(userID, upstream string, reason string) {
-	outcome := "failed"
-	if reason == "execution_deadline_exceeded" {
-		outcome = "expired"
-	}
-	m.countJob(userID, upstream, outcome)
-}
-
-func (m *PrometheusMetrics) WebhookDelivered(url string, attempt int) {
-	m.mu.Lock()
-	m.webhooks["delivered"]++
-	m.mu.Unlock()
-}
-
-func (m *PrometheusMetrics) WebhookFailed(url string, attempts int) {
-	m.mu.Lock()
-	m.webhooks["failed"]++
+	m.webhooks[outcome]++
 	m.mu.Unlock()
 }
 
@@ -161,6 +147,7 @@ func (m *PrometheusMetrics) JobWaited(userID, upstream string, wait time.Duratio
 func (m *PrometheusMetrics) JobFinished(userID, upstream, outcome string, total time.Duration) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.jobs[[3]string{upstream, outcome, m.tenantLocked(userID)}]++
 	key := [2]string{upstream, outcome}
 	h := m.duration[key]
 	if h == nil {
@@ -293,7 +280,7 @@ func (m *PrometheusMetrics) Write(w io.Writer, nodeID string, targets []TargetSt
 		fmt.Fprintf(w, "aquifer_admission_rejected_total{reason=%s} %g\n", quote(reason), m.rejected[reason])
 	}
 
-	help(w, "aquifer_webhooks_total", "counter", "Completion webhooks, by outcome.")
+	help(w, "aquifer_webhooks_total", "counter", "Completion webhooks that finished, by outcome (delivered, or failed after its retries).")
 	for _, outcome := range sortedKeys(m.webhooks) {
 		fmt.Fprintf(w, "aquifer_webhooks_total{outcome=%s} %g\n", quote(outcome), m.webhooks[outcome])
 	}

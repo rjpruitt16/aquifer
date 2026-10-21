@@ -26,10 +26,15 @@ func render(m *PrometheusMetrics, targets []TargetStats) string {
 
 func TestMetricsCountJobsAttemptsAndRejectionsWithoutTenantLabels(t *testing.T) {
 	m := newPrometheusMetrics(false, maxTenantLabels)
+	m.JobFinished("alice", "api.example.com", "completed", time.Second)
+	m.JobFinished("bob", "api.example.com", "completed", time.Second)
+	m.JobFinished("alice", "api.example.com", "failed", time.Second)
+	m.JobFinished("alice", "api.example.com", "expired", time.Second)
+	// These fire for internal webhook jobs and registration pings too, so
+	// they mustn't move the job or webhook counts.
 	m.JobCompleted("alice", "api.example.com", 12)
-	m.JobCompleted("bob", "api.example.com", 12)
-	m.JobFailed("alice", "api.example.com", "upstream returned 503")
-	m.JobFailed("alice", "api.example.com", "execution_deadline_exceeded")
+	m.WebhookDelivered("http://registry/register", 1)
+	m.WebhookJobFinished("delivered")
 	m.DispatchAttempt("api.example.com", 200)
 	m.DispatchAttempt("api.example.com", 429)
 	m.DispatchAttempt("api.example.com", 503)
@@ -48,6 +53,7 @@ func TestMetricsCountJobsAttemptsAndRejectionsWithoutTenantLabels(t *testing.T) 
 		`aquifer_dispatch_attempts_total{target="api.example.com",status_class="5xx"} 1`,
 		`aquifer_dispatch_attempts_total{target="api.example.com",status_class="error"} 1`,
 		`aquifer_admission_rejected_total{reason="queue_fair_share"} 1`,
+		`aquifer_webhooks_total{outcome="delivered"} 1`,
 		`aquifer_queue_wait_seconds_bucket{target="api.example.com",le="0.25"} 0`,
 		`aquifer_queue_wait_seconds_bucket{target="api.example.com",le="0.5"} 1`,
 		`aquifer_queue_wait_seconds_bucket{target="api.example.com",le="+Inf"} 1`,
@@ -64,9 +70,8 @@ func TestMetricsCountJobsAttemptsAndRejectionsWithoutTenantLabels(t *testing.T) 
 
 func TestMetricsEachFamilyIsContiguous(t *testing.T) {
 	m := newPrometheusMetrics(true, maxTenantLabels)
-	m.JobCompleted("alice", "a.example.com", 1)
-	m.JobCompleted("bob", "b.example.com", 1)
 	m.JobFinished("alice", "a.example.com", "completed", time.Second)
+	m.JobFinished("bob", "b.example.com", "completed", time.Second)
 	// Prometheus rejects a family whose lines are split up by another one.
 	seen := map[string]bool{}
 	last := ""
@@ -88,7 +93,7 @@ func TestMetricsEachFamilyIsContiguous(t *testing.T) {
 func TestMetricsTenantLabelsAreOptInAndCapped(t *testing.T) {
 	m := newPrometheusMetrics(true, 2)
 	for _, user := range []string{"alice", "bob", "carol", "dave"} {
-		m.JobCompleted(user, "api.example.com", 1)
+		m.JobFinished(user, "api.example.com", "completed", time.Second)
 	}
 	out := render(m, nil)
 	for _, want := range []string{
@@ -207,7 +212,7 @@ func TestMetricsEndpointThroughARealServer(t *testing.T) {
 	var nodeIDs []string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
-		nodeIDs = append(nodeIDs, r.Header.Get("X-Aqueduct-Node-Id"))
+		nodeIDs = append(nodeIDs, r.URL.Path+"="+r.Header.Get("X-Aqueduct-Node-Id"))
 		mu.Unlock()
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -225,7 +230,7 @@ func TestMetricsEndpointThroughARealServer(t *testing.T) {
 	srv := NewServer(app).Routes()
 
 	for i, user := range []string{"alice", "bob", "alice"} {
-		body, _ := json.Marshal(JobRequest{UserID: user, IdempotentKey: "k" + string(rune('0'+i)), URL: backend.URL + "/work", Method: "POST"})
+		body, _ := json.Marshal(JobRequest{UserID: user, IdempotentKey: "k" + string(rune('0'+i)), URL: backend.URL + "/work", Method: "POST", WebhookURL: backend.URL + "/hook"})
 		rec := httptest.NewRecorder()
 		srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/jobs", bytes.NewReader(body)))
 		if rec.Code != http.StatusCreated {
@@ -243,7 +248,7 @@ func TestMetricsEndpointThroughARealServer(t *testing.T) {
 		}
 		body, _ := io.ReadAll(rec.Body)
 		out = string(body)
-		if strings.Contains(out, `outcome="completed"} 3`) {
+		if strings.Contains(out, `aquifer_webhooks_total{outcome="delivered"} 3`) {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -256,6 +261,9 @@ func TestMetricsEndpointThroughARealServer(t *testing.T) {
 		`aquifer_job_duration_seconds_count{target="` + target + `",outcome="completed"} 3`,
 		`aquifer_active_queues{target="` + target + `"} 0`,
 		`aquifer_node_info{node_id="` + NodeID() + `"} 1`,
+		// The three completion webhooks go to the same host, as internal
+		// jobs of Aquifer's own: they're webhooks, not jobs or attempts.
+		`aquifer_webhooks_total{outcome="delivered"} 3`,
 	} {
 		if !strings.Contains(out, want+"\n") {
 			t.Errorf("missing %q in:\n%s", want, out)
@@ -263,8 +271,21 @@ func TestMetricsEndpointThroughARealServer(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(nodeIDs) != 3 || nodeIDs[0] == "" || nodeIDs[0] != NodeID() {
-		t.Fatalf("backend should see this node's id on every dispatch, got %v", nodeIDs)
+	// Every job and webhook carries the node's id. (Aquifer's own L8
+	// discovery fetch of /.well-known/l8 isn't a dispatch.)
+	dispatched := 0
+	for _, seen := range nodeIDs {
+		path, id, _ := strings.Cut(seen, "=")
+		if path != "/work" && path != "/hook" {
+			continue
+		}
+		dispatched++
+		if id != NodeID() {
+			t.Fatalf("%s arrived with node id %q, want %q", path, id, NodeID())
+		}
+	}
+	if dispatched != 6 {
+		t.Fatalf("want 3 jobs and 3 webhooks, saw %v", nodeIDs)
 	}
 }
 
@@ -274,5 +295,27 @@ func TestMetricsIs404WithACustomAdapter(t *testing.T) {
 	srv.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("got %d, want 404", rec.Code)
+	}
+}
+
+// A receiver that turns a webhook down (401) ends its delivery job without
+// a retry, and that's a failed webhook, not a delivered one.
+func TestARejectedWebhookIsNotDelivered(t *testing.T) {
+	m := newPrometheusMetrics(false, maxTenantLabels)
+	hook := &Job{Kind: jobKindWebhookDelivery}
+	observeJobFinished(m, hook, "https://app.example", "completed", 200)
+	observeJobFinished(m, hook, "https://app.example", "completed", 401)
+	observeJobFinished(m, hook, "https://app.example", "failed", 503)
+	out := render(m, nil)
+	for _, want := range []string{
+		`aquifer_webhooks_total{outcome="delivered"} 1`,
+		`aquifer_webhooks_total{outcome="failed"} 2`,
+	} {
+		if !strings.Contains(out, want+"\n") {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "aquifer_jobs_total{") {
+		t.Errorf("webhook jobs aren't jobs:\n%s", out)
 	}
 }

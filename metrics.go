@@ -60,6 +60,13 @@ type DispatchMetrics interface {
 	DispatchAttempt(upstream string, status int)
 }
 
+// WebhookJobMetrics learns how each completion webhook ended. Aquifer
+// delivers those as internal jobs of their own, so they're kept out of
+// JobTimingMetrics and DispatchMetrics. outcome is "delivered" or "failed".
+type WebhookJobMetrics interface {
+	WebhookJobFinished(outcome string)
+}
+
 // AdmissionMetrics learns why Aquifer refused jobs (429): "memory",
 // "db_size", "sync_lag", "upstream_queue", "queue_fair_share", ...
 type AdmissionMetrics interface {
@@ -80,14 +87,29 @@ func observeJobWaited(metrics MetricsAdapter, job *Job, upstream string) {
 	}
 }
 
-func observeJobFinished(metrics MetricsAdapter, job *Job, upstream, outcome string) {
-	if t, ok := metrics.(JobTimingMetrics); ok && !job.isWebhookDeliveryJob() {
+// observeJobFinished reports a job reaching a terminal state. status is
+// the target's final response status (0 if none). A completion webhook is
+// delivered only on a 2xx: Aquifer finishes a webhook job on any answer it
+// won't retry, a receiver's 401 or 403 included, and that's a webhook the
+// receiver turned down, not one that arrived.
+func observeJobFinished(metrics MetricsAdapter, job *Job, upstream, outcome string, status int) {
+	if job.isWebhookDeliveryJob() {
+		if w, ok := metrics.(WebhookJobMetrics); ok {
+			if outcome == "completed" && status >= 200 && status < 300 {
+				w.WebhookJobFinished("delivered")
+			} else {
+				w.WebhookJobFinished("failed")
+			}
+		}
+		return
+	}
+	if t, ok := metrics.(JobTimingMetrics); ok {
 		t.JobFinished(job.UserID, upstream, outcome, sinceCreated(job, time.Now()))
 	}
 }
 
-func observeDispatch(metrics MetricsAdapter, upstream string, status int) {
-	if d, ok := metrics.(DispatchMetrics); ok {
+func observeDispatch(metrics MetricsAdapter, job *Job, upstream string, status int) {
+	if d, ok := metrics.(DispatchMetrics); ok && !job.isWebhookDeliveryJob() {
 		d.DispatchAttempt(upstream, status)
 	}
 }

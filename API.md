@@ -483,7 +483,7 @@ Prometheus text format, on the same port as `/health`. The `aquifer` binary serv
 | `aquifer_queue_wait_seconds` | histogram | `target` | Submission to first dispatch: time spent waiting in Aquifer |
 | `aquifer_job_duration_seconds` | histogram | `target`, `outcome` | Submission to terminal state: end to end |
 | `aquifer_admission_rejected_total` | counter | `reason` | Jobs refused with `429`: `memory`, `db_size`, `sync_lag`, `upstream_queue`, `queue_fair_share`, ... |
-| `aquifer_webhooks_total` | counter | `outcome` | Completion webhooks `delivered` or `failed` |
+| `aquifer_webhooks_total` | counter | `outcome` | Completion webhooks `delivered` (the receiver answered 2xx), or `failed`: refused with an answer Aquifer doesn't retry, such as `401`, or out of retries. They aren't counted in the job metrics above. |
 | `aquifer_active_queues` | gauge | `target` | Queues with work waiting (one per tenant with account queues on) |
 | `aquifer_backlog_jobs` | gauge | `target` | Jobs queued or in flight |
 | `aquifer_flow_rate_rps` | gauge | `target` | Sum of the active queues' current rates, after the target API's pacing headers |
