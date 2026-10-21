@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/rjpruitt16/aquifer/l8"
 )
 
 type Server struct {
@@ -280,7 +282,7 @@ func (s *Server) l8Challenge(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) l8Spec(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
-	w.Write([]byte(l8SpecDocument))
+	w.Write([]byte(l8.SpecDocument))
 }
 
 // ProxyFallbackInfo carries the one extra SSE event proxy mode's fallback

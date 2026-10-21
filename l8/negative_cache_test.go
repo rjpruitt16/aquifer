@@ -1,7 +1,7 @@
 // Copyright 2026 Rahmi Pruitt
 // SPDX-License-Identifier: Apache-2.0
 
-package aquifer
+package l8
 
 import (
 	"net/http"
@@ -25,7 +25,7 @@ func TestEnsureTrustRemembersNonL8Receivers(t *testing.T) {
 	defer receiver.Close()
 
 	dir := t.TempDir()
-	l8 := NewL8Registry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"))
+	l8 := NewRegistry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"))
 	defer l8.Close()
 
 	for i := 0; i < 20; i++ {

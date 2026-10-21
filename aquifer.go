@@ -7,6 +7,8 @@ import (
 	"errors"
 	"sync/atomic"
 	"time"
+
+	"github.com/rjpruitt16/aquifer/l8"
 )
 
 var ErrJobNotFound = errors.New("job not found")
@@ -312,7 +314,7 @@ func (a *Aquifer) Health() map[string]any {
 	}
 	h := map[string]any{
 		"status":        status,
-		"l8_protocol":   l8Version,
+		"l8_protocol":   l8.Version,
 		"l8_public_key": a.l8.PubB64,
 		"admission":     a.AdmissionSnapshot(),
 		"queues":        a.registry.QueueSnapshot(),

@@ -27,7 +27,7 @@ Shared contracts that must stay identical across Aquifer and Spillway: `X-Aquedu
 - `aquifer.go` (`PrepareJob`, `Enqueue`), `server.go` (HTTP routes), `proxy.go` (`/proxy`), `account_queue.go` (`execute`, `makeRequest`: the single target API dispatch path).
 - `job.go`: `JobRequest`, `Job`, validation, `dedupHash` (the only place idempotency hashes are derived).
 - `store.go` (SQLite), `pebble_store.go`, `remote_idempotency.go` (Valkey), `cluster.go` (`clusterRoutingKey`).
-- `l8.go`, `l8_encrypt.go`, `l8_schema.go`: L8 handshake, signing, payload encryption, request-schema validation.
+- `l8/` (public package `github.com/rjpruitt16/aquifer/l8`): L8 handshake, signing, payload encryption, request-schema validation. `l8_compat.go` keeps the old root names (`NewL8Registry`, `L8Registry`, ...) as aliases.
 - `API.md` is the endpoint and env-var reference; `README.md` is the overview.
 
 ## Cross-repo changes and CI

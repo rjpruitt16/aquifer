@@ -1,7 +1,7 @@
 // Copyright 2026 Rahmi Pruitt
 // SPDX-License-Identifier: Apache-2.0
 
-package aquifer
+package l8
 
 import (
 	"bytes"
@@ -21,11 +21,11 @@ import (
 )
 
 const (
-	l8SchemaTTL         = 10 * time.Minute
-	l8SchemaNegativeTTL = time.Minute
+	schemaTTL         = 10 * time.Minute
+	schemaNegativeTTL = time.Minute
 	// A target API whose X-Aqueduct-Schema-Hash header disagrees with its own
 	// /.well-known/l8 would otherwise force a metadata refetch per response.
-	l8SchemaMinRefetchAge = 10 * time.Second
+	schemaMinRefetchAge = 10 * time.Second
 )
 
 // SchemaMismatchError means a job body failed the JSON Schema its target API
@@ -40,7 +40,7 @@ func (e *SchemaMismatchError) Error() string {
 	return fmt.Sprintf("request body does not match the schema the upstream advertises for %s", e.Route)
 }
 
-type l8SchemaEntry struct {
+type schemaEntry struct {
 	ready     chan struct{}
 	hash      string
 	routes    map[string]*jsonschema.Schema
@@ -48,21 +48,21 @@ type l8SchemaEntry struct {
 	expiresAt time.Time
 }
 
-type l8SchemaCache struct {
+type schemaCache struct {
 	enabled       bool
-	fetch         func(domain string) (*L8Meta, error)
+	fetch         func(domain string) (*Meta, error)
 	minRefetchAge time.Duration
 
 	mu      sync.Mutex
-	entries map[string]*l8SchemaEntry
+	entries map[string]*schemaEntry
 }
 
-func newL8SchemaCache() *l8SchemaCache {
-	return &l8SchemaCache{
-		enabled:       envBool("AQUIFER_L8_SCHEMA_VALIDATION", false),
-		fetch:         fetchL8Meta,
-		minRefetchAge: l8SchemaMinRefetchAge,
-		entries:       map[string]*l8SchemaEntry{},
+func newSchemaCache(enabled bool, fetch func(string) (*Meta, error)) *schemaCache {
+	return &schemaCache{
+		enabled:       enabled,
+		fetch:         fetch,
+		minRefetchAge: schemaMinRefetchAge,
+		entries:       map[string]*schemaEntry{},
 	}
 }
 
@@ -70,7 +70,7 @@ func newL8SchemaCache() *l8SchemaCache {
 // rawURL advertises for method+path in its /.well-known/l8 request_schemas.
 // Returns nil when validation is disabled, the target API advertises nothing,
 // or its metadata can't be fetched -- L8 stays opt-in and degrades open.
-func (r *L8Registry) ValidateRequestBody(rawURL, method, body string) error {
+func (r *Registry) ValidateRequestBody(rawURL, method, body string) error {
 	if r == nil || r.schemas == nil || !r.schemas.enabled {
 		return nil
 	}
@@ -79,7 +79,7 @@ func (r *L8Registry) ValidateRequestBody(rawURL, method, body string) error {
 		return nil
 	}
 	entry := r.schemas.get(domain)
-	route := l8RouteKey(method, rawURL)
+	route := routeKey(method, rawURL)
 	schema, ok := entry.routes[route]
 	if !ok {
 		return nil
@@ -108,7 +108,7 @@ func (r *L8Registry) ValidateRequestBody(rawURL, method, body string) error {
 // header. A hash that differs from the cached one means the target API changed
 // its contract: drop the cached schemas and the L8 trust for that domain so
 // the next request refetches metadata and re-runs the handshake.
-func (r *L8Registry) ObserveSchemaHash(rawURL, hash string) {
+func (r *Registry) ObserveSchemaHash(rawURL, hash string) {
 	if r == nil || r.schemas == nil || !r.schemas.enabled || hash == "" {
 		return
 	}
@@ -121,7 +121,7 @@ func (r *L8Registry) ObserveSchemaHash(rawURL, hash string) {
 	os.Remove(filepath.Join(r.trustDir, sanitizeDomain(domain)+".json"))
 }
 
-func (c *l8SchemaCache) get(domain string) *l8SchemaEntry {
+func (c *schemaCache) get(domain string) *schemaEntry {
 	c.mu.Lock()
 	entry, ok := c.entries[domain]
 	if ok {
@@ -139,7 +139,7 @@ func (c *l8SchemaCache) get(domain string) *l8SchemaEntry {
 	}
 	// One fetch per domain at a time; concurrent callers wait on ready
 	// instead of all hitting /.well-known/l8 at once.
-	entry = &l8SchemaEntry{ready: make(chan struct{})}
+	entry = &schemaEntry{ready: make(chan struct{})}
 	c.entries[domain] = entry
 	c.mu.Unlock()
 
@@ -148,10 +148,10 @@ func (c *l8SchemaCache) get(domain string) *l8SchemaEntry {
 	return entry
 }
 
-func (c *l8SchemaCache) load(domain string, entry *l8SchemaEntry) {
+func (c *schemaCache) load(domain string, entry *schemaEntry) {
 	now := time.Now()
 	entry.fetchedAt = now
-	entry.expiresAt = now.Add(l8SchemaNegativeTTL)
+	entry.expiresAt = now.Add(schemaNegativeTTL)
 
 	meta, err := c.fetch(domain)
 	if err != nil || len(meta.RequestSchemas) == 0 {
@@ -168,10 +168,10 @@ func (c *l8SchemaCache) load(domain string, entry *l8SchemaEntry) {
 	}
 	entry.hash = meta.SchemaHash
 	entry.routes = routes
-	entry.expiresAt = now.Add(l8SchemaTTL)
+	entry.expiresAt = now.Add(schemaTTL)
 }
 
-func (c *l8SchemaCache) invalidateIfStale(domain, hash string) bool {
+func (c *schemaCache) invalidateIfStale(domain, hash string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	entry, ok := c.entries[domain]
@@ -201,7 +201,7 @@ func compileRouteSchemas(raw map[string]json.RawMessage) (map[string]*jsonschema
 
 	routes := make(map[string]*jsonschema.Schema, len(raw))
 	for route, doc := range raw {
-		key, ok := normalizeL8Route(route)
+		key, ok := normalizeRoute(route)
 		if !ok {
 			return nil, fmt.Errorf("route %q must look like \"POST /path\"", route)
 		}
@@ -218,7 +218,7 @@ func compileRouteSchemas(raw map[string]json.RawMessage) (map[string]*jsonschema
 	return routes, nil
 }
 
-func normalizeL8Route(route string) (string, bool) {
+func normalizeRoute(route string) (string, bool) {
 	method, path, ok := strings.Cut(strings.TrimSpace(route), " ")
 	path = strings.TrimSpace(path)
 	if !ok || method == "" || !strings.HasPrefix(path, "/") {
@@ -227,7 +227,7 @@ func normalizeL8Route(route string) (string, bool) {
 	return strings.ToUpper(method) + " " + path, true
 }
 
-func l8RouteKey(method, rawURL string) string {
+func routeKey(method, rawURL string) string {
 	path := "/"
 	if u, err := url.Parse(rawURL); err == nil && u.Path != "" {
 		path = u.Path
