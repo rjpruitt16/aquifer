@@ -87,10 +87,15 @@ func observeJobWaited(metrics MetricsAdapter, job *Job, upstream string) {
 	}
 }
 
-func observeJobFinished(metrics MetricsAdapter, job *Job, upstream, outcome string) {
+// observeJobFinished reports a job reaching a terminal state. status is
+// the target's final response status (0 if none). A completion webhook is
+// delivered only on a 2xx: Aquifer finishes a webhook job on any answer it
+// won't retry, a receiver's 401 or 403 included, and that's a webhook the
+// receiver turned down, not one that arrived.
+func observeJobFinished(metrics MetricsAdapter, job *Job, upstream, outcome string, status int) {
 	if job.isWebhookDeliveryJob() {
 		if w, ok := metrics.(WebhookJobMetrics); ok {
-			if outcome == "completed" {
+			if outcome == "completed" && status >= 200 && status < 300 {
 				w.WebhookJobFinished("delivered")
 			} else {
 				w.WebhookJobFinished("failed")

@@ -297,3 +297,25 @@ func TestMetricsIs404WithACustomAdapter(t *testing.T) {
 		t.Fatalf("got %d, want 404", rec.Code)
 	}
 }
+
+// A receiver that turns a webhook down (401) ends its delivery job without
+// a retry, and that's a failed webhook, not a delivered one.
+func TestARejectedWebhookIsNotDelivered(t *testing.T) {
+	m := newPrometheusMetrics(false, maxTenantLabels)
+	hook := &Job{Kind: jobKindWebhookDelivery}
+	observeJobFinished(m, hook, "https://app.example", "completed", 200)
+	observeJobFinished(m, hook, "https://app.example", "completed", 401)
+	observeJobFinished(m, hook, "https://app.example", "failed", 503)
+	out := render(m, nil)
+	for _, want := range []string{
+		`aquifer_webhooks_total{outcome="delivered"} 1`,
+		`aquifer_webhooks_total{outcome="failed"} 2`,
+	} {
+		if !strings.Contains(out, want+"\n") {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "aquifer_jobs_total{") {
+		t.Errorf("webhook jobs aren't jobs:\n%s", out)
+	}
+}
