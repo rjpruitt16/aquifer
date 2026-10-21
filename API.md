@@ -569,7 +569,7 @@ A client that vanishes without closing its connection (a dropped network, a slee
 }
 ```
 
-**Failed** (the job used up its own retries; `max_retries` defaults to 4)
+**Failed**: the completion webhook for a job that failed. The job's own target API call used up its retries (`max_retries`, 4 by default); this is not about retrying the webhook, which is covered below.
 ```json
 {
   "job_id": "a3f9...",
