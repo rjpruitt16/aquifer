@@ -50,6 +50,7 @@ const (
 	// long, so the group's consumer list doesn't grow with every deploy.
 	webSocketExportStaleConsumer = time.Hour
 	webSocketExportSweepEvery    = 10 * time.Minute
+	webSocketExportGrowAfter     = 10
 )
 
 type WebSocketExportConfig struct {
@@ -169,9 +170,12 @@ type WebSocketExporter struct {
 	consumer string
 	cfg      WebSocketExportConfig
 	http     *http.Client
-	// limit is the batch size for the next read: BatchSize, halved after a
-	// 413 until a batch goes through.
+	// limit is the batch size for the next read. A 413 halves it; it
+	// doubles back toward BatchSize after webSocketExportGrowAfter
+	// successful batches in a row, so a receiver with a smaller body limit
+	// settles near its limit instead of getting a 413 on every batch.
 	limit     int64
+	successes int
 	lastSweep time.Time
 
 	cancel context.CancelFunc
@@ -342,9 +346,11 @@ func (e *WebSocketExporter) exportOnce(ctx context.Context) (int, error) {
 		var tooLarge errBatchTooLarge
 		switch {
 		case errors.As(err, &tooLarge) && len(batch.Events) > 1:
-			// The receiver can't take this much at once: halve and retry.
+			// The receiver can't take this much at once: halve and retry
+			// right away (no backoff; the receiver answered fine).
 			e.limit = max(1, int64(len(batch.Events)/2))
-			return 0, err
+			e.successes = 0
+			return 0, nil
 		case errors.As(err, &tooLarge):
 			// One message the receiver will never accept. Dropping it is
 			// better than blocking every message behind it; it stays in its
@@ -361,7 +367,13 @@ func (e *WebSocketExporter) exportOnce(ctx context.Context) (int, error) {
 	if _, err := pipe.Exec(ctx); err != nil {
 		return 0, fmt.Errorf("acknowledge exported batch: %w", err)
 	}
-	e.limit = e.cfg.BatchSize
+	if e.limit < e.cfg.BatchSize {
+		e.successes++
+		if e.successes >= webSocketExportGrowAfter {
+			e.limit = min(e.cfg.BatchSize, e.limit*2)
+			e.successes = 0
+		}
+	}
 	return len(batch.Events), nil
 }
 

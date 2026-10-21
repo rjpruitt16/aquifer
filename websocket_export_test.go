@@ -236,7 +236,12 @@ func TestWebSocketExportSplitsBatchesBySizeAndHandles413(t *testing.T) {
 	var mu sync.Mutex
 	var batchSizes []int
 	var delivered []string
+	// The first POST waits until every message is appended, so the first
+	// batch is guaranteed to hold all six.
+	appended := make(chan struct{})
+	var first sync.Once
 	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		first.Do(func() { <-appended })
 		var batch WebSocketExportBatch
 		json.NewDecoder(req.Body).Decode(&batch)
 		mu.Lock()
@@ -271,24 +276,23 @@ func TestWebSocketExportSplitsBatchesBySizeAndHandles413(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	close(appended)
 
-	if !waitUntil(20*time.Second, func() bool {
+	snapshot := func() ([]string, []int) {
 		mu.Lock()
 		defer mu.Unlock()
-		return len(delivered) == 5
-	}) {
-		mu.Lock()
-		t.Fatalf("expected every message but huge to arrive; got %v (batches %v)", delivered, batchSizes)
+		return append([]string(nil), delivered...), append([]int(nil), batchSizes...)
 	}
-	if !waitUntil(15*time.Second, func() bool { return store.client.XLen(ctx, store.exportKey()).Val() == 0 }) {
+	// Retrying a 413 needs no backoff, so this finishes quickly.
+	if !waitUntil(10*time.Second, func() bool { got, _ := snapshot(); return len(got) == 5 }) {
+		got, sizes := snapshot()
+		t.Fatalf("expected every message but huge to arrive; got %v (batches %v)", got, sizes)
+	}
+	if !waitUntil(10*time.Second, func() bool { return store.client.XLen(ctx, store.exportKey()).Val() == 0 }) {
 		t.Fatal("the skipped message should be acknowledged too, so it doesn't block the stream")
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	for _, n := range batchSizes[1:] {
-		if n > batchSizes[0] {
-			t.Fatalf("after a 413 batches should only shrink until one goes through, got %v", batchSizes)
-		}
+	if _, sizes := snapshot(); len(sizes) == 0 || sizes[0] != 6 {
+		t.Fatalf("the first batch should hold all six messages, got %v", sizes)
 	}
 }
 
