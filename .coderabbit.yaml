@@ -1,0 +1,17 @@
+# CodeRabbit settings for this repository. inheritance keeps the
+# organization's settings and adds these instructions on top.
+inheritance: true
+reviews:
+  path_instructions:
+    - path: "**/*.go"
+      instructions: |
+        Treat anything that can make memory, goroutines/processes, file descriptors or Valkey/Redis data grow without a bound as a **major** finding, and title it "Possible memory leak". This project runs long-lived servers that were soak-tested for a week, and a leak would mean repeating that test. For each one, say what grows, what would bound it, and which test or metric would show it.
+        Look for:
+        - maps, slices or caches that only grow: no eviction, TTL or size cap;
+        - per-session, per-user or per-queue state that isn't removed on disconnect, error or idle paths;
+        - goroutines with no exit path (no ctx.Done, closed channel or stop signal), or started per request without a bound;
+        - time.Ticker/time.Timer never stopped, time.After in long loops, context.WithCancel/WithTimeout whose cancel isn't called;
+        - unbuffered or buffered channels that can block a sender forever;
+        - HTTP response bodies, connections, files or Pebble/SQLite iterators not closed;
+        - Valkey keys or streams written without an expiry or MAXLEN, and consumer-group pending entries never acknowledged;
+        - sync.Pool misuse, or large buffers retained by slicing a big array.
