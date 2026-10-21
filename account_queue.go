@@ -656,9 +656,9 @@ func execute(ctx context.Context, job *Job, dispatchURL, upstream string, store 
 		return jobDoneMsg{}
 	}
 	if err != nil {
-		observeDispatch(metrics, upstream, 0)
+		observeDispatch(metrics, job, upstream, 0)
 	} else {
-		observeDispatch(metrics, upstream, resp.StatusCode)
+		observeDispatch(metrics, job, upstream, resp.StatusCode)
 	}
 
 	var reason string
