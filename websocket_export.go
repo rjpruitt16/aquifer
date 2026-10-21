@@ -10,7 +10,9 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -36,12 +38,18 @@ import (
 
 const (
 	defaultWebSocketExportBatch      = 500
+	defaultWebSocketExportBatchBytes = 4 << 20 // under Lambda's 6 MB request limit
 	defaultWebSocketExportMaxPending = 1_000_000
 	webSocketExportGroup             = "aquifer-export"
 	webSocketExportClaimIdle         = time.Minute
 	webSocketExportRequestTimeout    = 10 * time.Second
 	webSocketExportMaxBackoff        = 30 * time.Second
 	webSocketExportSchema            = "aquifer.websocket_batch.v1"
+	// Consumers that left the group (a node that was replaced or renamed)
+	// are removed once they have nothing pending and have been idle this
+	// long, so the group's consumer list doesn't grow with every deploy.
+	webSocketExportStaleConsumer = time.Hour
+	webSocketExportSweepEvery    = 10 * time.Minute
 )
 
 type WebSocketExportConfig struct {
@@ -50,6 +58,9 @@ type WebSocketExportConfig struct {
 	// Token is sent as "Authorization: Bearer <token>" when set.
 	Token     string
 	BatchSize int64
+	// MaxBatchBytes caps one request's encoded size; a single message
+	// larger than this is still sent alone.
+	MaxBatchBytes int
 	// MaxPending caps the export stream (approximately). While the receiver is
 	// unreachable, messages past the cap are dropped from export; they stay in
 	// their session transcripts for the replay window.
@@ -66,6 +77,7 @@ func LoadWebSocketExportConfig() WebSocketExportConfig {
 		URL:             strings.TrimSpace(os.Getenv("AQUIFER_WS_EXPORT_URL")),
 		Token:           os.Getenv("AQUIFER_WS_EXPORT_TOKEN"),
 		BatchSize:       positiveEnvInt64("AQUIFER_WS_EXPORT_BATCH", defaultWebSocketExportBatch),
+		MaxBatchBytes:   int(positiveEnvInt64("AQUIFER_WS_EXPORT_MAX_BATCH_BYTES", defaultWebSocketExportBatchBytes)),
 		MaxPending:      positiveEnvInt64("AQUIFER_WS_EXPORT_MAX_PENDING", defaultWebSocketExportMaxPending),
 		IncludePayloads: envBool("AQUIFER_WS_EXPORT_PAYLOADS", true),
 	}
@@ -73,7 +85,39 @@ func LoadWebSocketExportConfig() WebSocketExportConfig {
 		log.Printf("websocket export: AQUIFER_WS_EXPORT_ENABLED is set but AQUIFER_WS_EXPORT_URL is empty; export stays off")
 		cfg.Enabled = false
 	}
+	if cfg.Enabled {
+		if err := checkWebSocketExportURL(cfg.URL, envBool("AQUIFER_WS_EXPORT_ALLOW_INSECURE", false)); err != nil {
+			log.Printf("websocket export: %v; export stays off", err)
+			cfg.Enabled = false
+		}
+	}
 	return cfg
+}
+
+// checkWebSocketExportURL requires https, so the bearer token and the
+// transcripts aren't sent in cleartext. http is allowed for loopback, or
+// anywhere when AQUIFER_WS_EXPORT_ALLOW_INSECURE=true (a private network
+// you trust).
+func checkWebSocketExportURL(raw string, allowInsecure bool) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return fmt.Errorf("AQUIFER_WS_EXPORT_URL %q isn't an absolute URL", raw)
+	}
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+		host := u.Hostname()
+		if allowInsecure || host == "localhost" {
+			return nil
+		}
+		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+			return nil
+		}
+		return fmt.Errorf("AQUIFER_WS_EXPORT_URL must use https (http is allowed for loopback, or with AQUIFER_WS_EXPORT_ALLOW_INSECURE=true)")
+	default:
+		return fmt.Errorf("AQUIFER_WS_EXPORT_URL must be an http(s) URL")
+	}
 }
 
 // WebSocketExportEvent is one exported transcript message.
@@ -125,6 +169,10 @@ type WebSocketExporter struct {
 	consumer string
 	cfg      WebSocketExportConfig
 	http     *http.Client
+	// limit is the batch size for the next read: BatchSize, halved after a
+	// 413 until a batch goes through.
+	limit     int64
+	lastSweep time.Time
 
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -133,14 +181,22 @@ type WebSocketExporter struct {
 
 // StartWebSocketExport turns export on for store and starts the exporter.
 func StartWebSocketExport(store *RedisWebSocketStreamStore, cfg WebSocketExportConfig) (*WebSocketExporter, error) {
-	store.EnableExport(cfg.MaxPending)
+	if cfg.MaxBatchBytes <= 0 {
+		cfg.MaxBatchBytes = defaultWebSocketExportBatchBytes
+	}
 	exporter := &WebSocketExporter{
 		client:   store.client,
 		key:      store.exportKey(),
 		consumer: NodeID(),
 		cfg:      cfg,
-		http:     &http.Client{Timeout: webSocketExportRequestTimeout},
-		done:     make(chan struct{}),
+		http: &http.Client{
+			Timeout: webSocketExportRequestTimeout,
+			// Never follow a redirect: it could send the token elsewhere, or
+			// downgrade to http. A 3xx counts as a failed batch.
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
+		limit: cfg.BatchSize,
+		done:  make(chan struct{}),
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	exporter.cancel = cancel
@@ -148,13 +204,17 @@ func StartWebSocketExport(store *RedisWebSocketStreamStore, cfg WebSocketExportC
 		cancel()
 		return nil, err
 	}
+	// Only now: without the group, Appends would fill the export stream
+	// with nothing reading it.
+	store.EnableExport(cfg.MaxPending)
 	go exporter.run(ctx)
 	log.Printf("websocket export: sending transcripts to %s as %s", cfg.URL, exporter.consumer)
 	return exporter, nil
 }
 
 // Stop ends the exporter. Messages not yet acknowledged stay in the export
-// stream and are sent after the next start.
+// stream and are sent after the next start. With nothing pending, this
+// node's consumer is removed from the group.
 func (e *WebSocketExporter) Stop() {
 	if e == nil {
 		return
@@ -162,7 +222,40 @@ func (e *WebSocketExporter) Stop() {
 	e.once.Do(func() {
 		e.cancel()
 		<-e.done
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if pending, err := e.consumerPending(ctx, e.consumer); err == nil && pending == 0 {
+			e.client.XGroupDelConsumer(ctx, e.key, webSocketExportGroup, e.consumer)
+		}
 	})
+}
+
+func (e *WebSocketExporter) consumerPending(ctx context.Context, name string) (int64, error) {
+	consumers, err := e.client.XInfoConsumers(ctx, e.key, webSocketExportGroup).Result()
+	if err != nil {
+		return 0, err
+	}
+	for _, consumer := range consumers {
+		if consumer.Name == name {
+			return consumer.Pending, nil
+		}
+	}
+	return 0, nil
+}
+
+// sweepConsumers removes other nodes' consumers that have nothing pending
+// and have been idle for an hour. Consumers with pending messages are kept:
+// claimStale moves those messages to a live node first.
+func (e *WebSocketExporter) sweepConsumers(ctx context.Context) {
+	consumers, err := e.client.XInfoConsumers(ctx, e.key, webSocketExportGroup).Result()
+	if err != nil {
+		return
+	}
+	for _, consumer := range consumers {
+		if consumer.Name != e.consumer && consumer.Pending == 0 && consumer.Idle > webSocketExportStaleConsumer {
+			e.client.XGroupDelConsumer(ctx, e.key, webSocketExportGroup, consumer.Name)
+		}
+	}
 }
 
 func (e *WebSocketExporter) ensureGroup(ctx context.Context) error {
@@ -178,6 +271,10 @@ func (e *WebSocketExporter) run(ctx context.Context) {
 	defer close(e.done)
 	backoff := time.Second
 	for ctx.Err() == nil {
+		if time.Since(e.lastSweep) > webSocketExportSweepEvery {
+			e.sweepConsumers(ctx)
+			e.lastSweep = time.Now()
+		}
 		// exportOnce waits up to a second for new messages, so an idle
 		// exporter isn't a busy loop.
 		if _, err := e.exportOnce(ctx); err == nil {
@@ -220,17 +317,41 @@ func (e *WebSocketExporter) exportOnce(ctx context.Context) (int, error) {
 		return 0, nil
 	}
 
+	// Fill the batch up to MaxBatchBytes. Messages that don't fit stay
+	// pending and lead the next batch. Entries that can't be decoded are
+	// acknowledged with the batch and dropped.
 	batch := WebSocketExportBatch{Schema: webSocketExportSchema, NodeID: e.consumer}
 	ids := make([]string, 0, len(messages))
+	size := 0
 	for _, message := range messages {
-		ids = append(ids, message.ID)
 		event, ok := e.event(message)
-		if ok {
-			batch.Events = append(batch.Events, event)
+		if !ok {
+			ids = append(ids, message.ID)
+			continue
 		}
+		encoded, _ := json.Marshal(event)
+		if len(batch.Events) > 0 && size+len(encoded) > e.cfg.MaxBatchBytes {
+			break
+		}
+		batch.Events = append(batch.Events, event)
+		ids = append(ids, message.ID)
+		size += len(encoded)
 	}
 	if len(batch.Events) > 0 {
-		if err := e.post(ctx, batch); err != nil {
+		err := e.post(ctx, batch)
+		var tooLarge errBatchTooLarge
+		switch {
+		case errors.As(err, &tooLarge) && len(batch.Events) > 1:
+			// The receiver can't take this much at once: halve and retry.
+			e.limit = max(1, int64(len(batch.Events)/2))
+			return 0, err
+		case errors.As(err, &tooLarge):
+			// One message the receiver will never accept. Dropping it is
+			// better than blocking every message behind it; it stays in its
+			// session transcript for the replay window.
+			log.Printf("websocket export: receiver refused one message as too large (session %s, stream %s); skipping it",
+				batch.Events[0].SessionID, batch.Events[0].StreamID)
+		case err != nil:
 			return 0, err
 		}
 	}
@@ -240,7 +361,14 @@ func (e *WebSocketExporter) exportOnce(ctx context.Context) (int, error) {
 	if _, err := pipe.Exec(ctx); err != nil {
 		return 0, fmt.Errorf("acknowledge exported batch: %w", err)
 	}
+	e.limit = e.cfg.BatchSize
 	return len(batch.Events), nil
+}
+
+type errBatchTooLarge struct{ events int }
+
+func (err errBatchTooLarge) Error() string {
+	return fmt.Sprintf("receiver answered 413 to a batch of %d", err.events)
 }
 
 func (e *WebSocketExporter) readGroup(ctx context.Context, id string, block time.Duration) ([]redis.XMessage, error) {
@@ -248,7 +376,7 @@ func (e *WebSocketExporter) readGroup(ctx context.Context, id string, block time
 		Group:    webSocketExportGroup,
 		Consumer: e.consumer,
 		Streams:  []string{e.key, id},
-		Count:    e.cfg.BatchSize,
+		Count:    e.limit,
 		Block:    block,
 	}
 	if block == 0 {
@@ -282,7 +410,7 @@ func (e *WebSocketExporter) claimStale(ctx context.Context) ([]redis.XMessage, e
 		Consumer: e.consumer,
 		MinIdle:  webSocketExportClaimIdle,
 		Start:    "0-0",
-		Count:    e.cfg.BatchSize,
+		Count:    e.limit,
 	}).Result()
 	if errors.Is(err, redis.Nil) {
 		return nil, nil
@@ -343,6 +471,9 @@ func (e *WebSocketExporter) post(ctx context.Context, batch WebSocketExportBatch
 		return fmt.Errorf("send batch of %d: %w", len(batch.Events), err)
 	}
 	defer response.Body.Close()
+	if response.StatusCode == http.StatusRequestEntityTooLarge {
+		return errBatchTooLarge{events: len(batch.Events)}
+	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return fmt.Errorf("receiver answered %d to a batch of %d", response.StatusCode, len(batch.Events))
 	}

@@ -211,3 +211,148 @@ func TestWebSocketAppendWithoutExportWritesNoExportStream(t *testing.T) {
 		t.Fatal("export is off, so Append must not write the export stream")
 	}
 }
+
+func TestWebSocketExportURLMustBeHTTPS(t *testing.T) {
+	for raw, ok := range map[string]bool{
+		"https://inlet.example/_inlet/websocket-events": true,
+		"http://localhost:9000/batches":                 true,
+		"http://127.0.0.1:9000/batches":                 true,
+		"http://[::1]:9000/batches":                     true,
+		"http://inlet.example/batches":                  false,
+		"ftp://inlet.example/batches":                   false,
+		"/relative":                                     false,
+	} {
+		if err := checkWebSocketExportURL(raw, false); (err == nil) != ok {
+			t.Errorf("%s: expected ok=%v, got %v", raw, ok, err)
+		}
+	}
+	if err := checkWebSocketExportURL("http://inlet.internal/batches", true); err != nil {
+		t.Fatalf("AQUIFER_WS_EXPORT_ALLOW_INSECURE should allow http: %v", err)
+	}
+}
+
+func TestWebSocketExportSplitsBatchesBySizeAndHandles413(t *testing.T) {
+	store := exportTestStore(t)
+	var mu sync.Mutex
+	var batchSizes []int
+	var delivered []string
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		var batch WebSocketExportBatch
+		json.NewDecoder(req.Body).Decode(&batch)
+		mu.Lock()
+		defer mu.Unlock()
+		batchSizes = append(batchSizes, len(batch.Events))
+		// Takes at most two messages at a time, and never "huge".
+		for _, event := range batch.Events {
+			if event.MessageID == "huge" {
+				w.WriteHeader(http.StatusRequestEntityTooLarge)
+				return
+			}
+		}
+		if len(batch.Events) > 2 {
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			return
+		}
+		for _, event := range batch.Events {
+			delivered = append(delivered, event.MessageID)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer receiver.Close()
+
+	exporter, err := StartWebSocketExport(store, WebSocketExportConfig{Enabled: true, URL: receiver.URL, BatchSize: 6, MaxPending: 1000, MaxBatchBytes: 1 << 20, IncludePayloads: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer exporter.Stop()
+	ctx := context.Background()
+	for _, id := range []string{"a", "b", "huge", "c", "d", "e"} {
+		if _, err := store.Append(ctx, "session-big", "client", WebSocketEnvelope{Type: "command", MessageID: id, Payload: json.RawMessage(`{"x":1}`)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if !waitUntil(20*time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(delivered) == 5
+	}) {
+		mu.Lock()
+		t.Fatalf("expected every message but huge to arrive; got %v (batches %v)", delivered, batchSizes)
+	}
+	if !waitUntil(15*time.Second, func() bool { return store.client.XLen(ctx, store.exportKey()).Val() == 0 }) {
+		t.Fatal("the skipped message should be acknowledged too, so it doesn't block the stream")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, n := range batchSizes[1:] {
+		if n > batchSizes[0] {
+			t.Fatalf("after a 413 batches should only shrink until one goes through, got %v", batchSizes)
+		}
+	}
+}
+
+func TestWebSocketExportCapsBatchBytes(t *testing.T) {
+	store := exportTestStore(t)
+	var mu sync.Mutex
+	var sizes []int
+	delivered := 0
+	counting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		var batch WebSocketExportBatch
+		json.NewDecoder(req.Body).Decode(&batch)
+		mu.Lock()
+		sizes = append(sizes, len(batch.Events))
+		delivered += len(batch.Events)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer counting.Close()
+	exporter, err := StartWebSocketExport(store, WebSocketExportConfig{Enabled: true, URL: counting.URL, BatchSize: 10, MaxPending: 1000, MaxBatchBytes: 1500, IncludePayloads: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer exporter.Stop()
+	ctx := context.Background()
+	payload := json.RawMessage(fmt.Sprintf(`{"blob":%q}`, string(make([]byte, 400))))
+	for i := 0; i < 4; i++ {
+		if _, err := store.Append(ctx, "session-bytes", "client", WebSocketEnvelope{Type: "command", MessageID: fmt.Sprintf("m%d", i), Payload: payload}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !waitUntil(15*time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return delivered == 4
+	}) {
+		t.Fatal("not every message was exported")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, n := range sizes {
+		if n > 2 {
+			t.Fatalf("a 1500-byte cap should fit at most two ~700-byte messages per batch, got batches %v", sizes)
+		}
+	}
+}
+
+func TestWebSocketExportStopRemovesItsIdleConsumer(t *testing.T) {
+	store := exportTestStore(t)
+	receiver := newExportReceiver(t, 0)
+	exporter, err := StartWebSocketExport(store, WebSocketExportConfig{Enabled: true, URL: receiver.srv.URL, BatchSize: 10, MaxPending: 1000, IncludePayloads: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if _, err := store.Append(ctx, "session-c", "client", WebSocketEnvelope{Type: "command", MessageID: "c1"}); err != nil {
+		t.Fatal(err)
+	}
+	waitForExport(t, receiver, 1)
+	exporter.Stop()
+	consumers, err := store.client.XInfoConsumers(ctx, store.exportKey(), webSocketExportGroup).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(consumers) != 0 {
+		t.Fatalf("a stopped exporter with nothing pending should leave no consumer behind, got %+v", consumers)
+	}
+}

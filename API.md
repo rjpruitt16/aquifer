@@ -318,7 +318,11 @@ Off by default. With `AQUIFER_WS_EXPORT_ENABLED=true`, Aquifer copies every reco
 - Each recorded message is also added to one shared export stream in Valkey (`{AQUIFER_WS_STREAM_PREFIX}export`), atomically with the transcript entry, so nothing recorded is missed.
 - A background exporter on every node reads that stream through one consumer group. It POSTs batches to `AQUIFER_WS_EXPORT_URL`, and acknowledges and deletes each batch from the export stream only after a **2xx**. A failed batch is retried with backoff. A node that stops leaves its batch for the next start, and another node takes over messages left unacknowledged for a minute.
 - Delivery is at least once. Drop repeats by `session_id` + `stream_id`. `stream_id` is the transcript entry's ID, the same cursor clients replay from.
-- While the receiver is down, the export stream holds up to `AQUIFER_WS_EXPORT_MAX_PENDING` messages, approximately. Beyond that the oldest are dropped from export; they stay in their session transcripts for the replay window.
+- **Order is kept within a batch, not across batches.** A retried batch can arrive after a newer one, especially with several nodes. Order a session's messages by `stream_id`.
+- Batches are capped at `AQUIFER_WS_EXPORT_MAX_BATCH_BYTES`. A **413** halves the batch until it goes through. A single message the receiver still refuses with 413 is logged and skipped, so it can't block the messages behind it; it stays in its session transcript for the replay window.
+- The URL must be `https`, so the token and transcripts aren't sent in cleartext. `http` is allowed for loopback, or anywhere with `AQUIFER_WS_EXPORT_ALLOW_INSECURE=true` on a private network you trust. Redirects aren't followed. Otherwise export stays off and a warning is logged.
+- While the receiver is down, the export stream holds up to `AQUIFER_WS_EXPORT_MAX_PENDING` messages, approximately. Beyond that the oldest are dropped from export; they stay in their session transcripts for the replay window. The cap counts messages, not bytes: allow Valkey `maxmemory` for `AQUIFER_WS_EXPORT_MAX_PENDING` × average message size on top of the transcripts, or lower the cap.
+- A node that stops with nothing pending leaves the consumer group. Consumers of nodes that are gone are removed once they've been idle for an hour with nothing pending.
 - The two writes run in one script on two keys, so this needs one Valkey primary, not a sharded Redis Cluster, the same as cluster coordination.
 
 Batch body (`Content-Type: application/json`, `Authorization: Bearer <AQUIFER_WS_EXPORT_TOKEN>` when set):
@@ -349,6 +353,8 @@ Batch body (`Content-Type: application/json`, `Authorization: Bearer <AQUIFER_WS
 | `AQUIFER_WS_EXPORT_URL` | _(none)_ | Receiver for batches; export stays off without it |
 | `AQUIFER_WS_EXPORT_TOKEN` | _(none)_ | Sent as a bearer token |
 | `AQUIFER_WS_EXPORT_BATCH` | `500` | Messages per batch |
+| `AQUIFER_WS_EXPORT_MAX_BATCH_BYTES` | `4194304` | Encoded size cap per batch (4 MiB, under Lambda's 6 MB request limit) |
+| `AQUIFER_WS_EXPORT_ALLOW_INSECURE` | `false` | Allow an `http` URL that isn't loopback |
 | `AQUIFER_WS_EXPORT_MAX_PENDING` | `1000000` | Approximate cap on messages waiting for export |
 | `AQUIFER_WS_EXPORT_PAYLOADS` | `true` | `false` exports everything but `payload` |
 
