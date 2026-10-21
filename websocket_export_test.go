@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -290,6 +292,11 @@ func TestWebSocketExportSplitsBatchesBySizeAndHandles413(t *testing.T) {
 	}
 	if !waitUntil(10*time.Second, func() bool { return store.client.XLen(ctx, store.exportKey()).Val() == 0 }) {
 		t.Fatal("the skipped message should be acknowledged too, so it doesn't block the stream")
+	}
+	got, _ := snapshot()
+	sort.Strings(got)
+	if strings.Join(got, ",") != "a,b,c,d,e" {
+		t.Fatalf("expected exactly a, b, c, d and e once each, got %v", got)
 	}
 	if _, sizes := snapshot(); len(sizes) == 0 || sizes[0] != 6 {
 		t.Fatalf("the first batch should hold all six messages, got %v", sizes)
