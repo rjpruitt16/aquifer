@@ -19,9 +19,15 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+
+	"github.com/rjpruitt16/aquifer/l8"
 )
 
-type l8TestReceiver struct {
+// Aquifer's webhook deliveries are signed, and encrypted for receivers that
+// ask for it. These tests drive Aquifer's delivery paths against an L8
+// receiver; the protocol itself is tested in the l8 package.
+
+type testReceiver struct {
 	*httptest.Server
 	signPriv ed25519.PrivateKey
 	encPriv  *ecdh.PrivateKey
@@ -34,15 +40,15 @@ type receivedDelivery struct {
 	body   []byte
 }
 
-func newL8TestReceiver(t *testing.T, encrypt bool) *l8TestReceiver {
+func newTestReceiver(t *testing.T, encrypt bool) *testReceiver {
 	t.Helper()
 	signPub, signPriv, _ := ed25519.GenerateKey(rand.Reader)
 	encPriv, _ := ecdh.X25519().GenerateKey(rand.Reader)
-	rcv := &l8TestReceiver{signPriv: signPriv, encPriv: encPriv, encrypt: encrypt, got: make(chan receivedDelivery, 1)}
+	rcv := &testReceiver{signPriv: signPriv, encPriv: encPriv, encrypt: encrypt, got: make(chan receivedDelivery, 1)}
 	rcv.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/.well-known/l8":
-			meta := L8Meta{
+			meta := l8.Meta{
 				ProtocolVersion:   "0.2",
 				ServiceName:       "receiver",
 				PublicKey:         base64.StdEncoding.EncodeToString(signPub),
@@ -50,15 +56,15 @@ func newL8TestReceiver(t *testing.T, encrypt bool) *l8TestReceiver {
 				Capabilities:      []string{"signed_payloads"},
 			}
 			if encrypt {
-				meta.Capabilities = append(meta.Capabilities, l8EncryptionCapability)
+				meta.Capabilities = append(meta.Capabilities, l8.EncryptionCapability)
 				meta.EncryptionPublicKey = base64.StdEncoding.EncodeToString(encPriv.PublicKey().Bytes())
 			}
 			json.NewEncoder(w).Encode(meta)
 		case "/l8/challenge":
-			var req L8ChallengeReq
+			var req l8.ChallengeRequest
 			json.NewDecoder(r.Body).Decode(&req)
 			sig := ed25519.Sign(signPriv, []byte(req.ChallengeID+":"+req.Nonce))
-			json.NewEncoder(w).Encode(L8ChallengeResp{
+			json.NewEncoder(w).Encode(l8.ChallengeResponse{
 				ChallengeID: req.ChallengeID, Nonce: req.Nonce,
 				ReceiverSignature: base64.StdEncoding.EncodeToString(sig),
 				ReceiverPublicKey: base64.StdEncoding.EncodeToString(signPub),
@@ -72,7 +78,7 @@ func newL8TestReceiver(t *testing.T, encrypt bool) *l8TestReceiver {
 	return rcv
 }
 
-func newTestL8Registry(t *testing.T) *L8Registry {
+func newTestRegistry(t *testing.T) *l8.Registry {
 	t.Helper()
 	dir := t.TempDir()
 	r := NewL8Registry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"))
@@ -90,51 +96,16 @@ func verifyL8Signature(t *testing.T, sender ed25519.PublicKey, h http.Header, bo
 	}
 }
 
-func TestL8PayloadRoundTripAndTamperDetection(t *testing.T) {
-	receiver, _ := ecdh.X25519().GenerateKey(rand.Reader)
-	plaintext := []byte(`{"job_id":"j1","body":"secret"}`)
-
-	sealed, headers, err := sealL8Payload(receiver.PublicKey(), plaintext, "d1", 100)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if bytes.Contains(sealed, []byte("secret")) {
-		t.Fatal("ciphertext leaks plaintext")
-	}
-	eph, nonce := headers["X-L8-Ephemeral-Key"], headers["X-L8-Nonce"]
-
-	got, err := openL8Payload(receiver, sealed, eph, nonce, "d1", 100)
-	if err != nil || !bytes.Equal(got, plaintext) {
-		t.Fatalf("round trip failed: %q, %v", got, err)
-	}
-
-	tampered := append([]byte{}, sealed...)
-	tampered[0] ^= 1
-	if _, err := openL8Payload(receiver, tampered, eph, nonce, "d1", 100); err == nil {
-		t.Fatal("tampered ciphertext must not decrypt")
-	}
-	if _, err := openL8Payload(receiver, sealed, eph, nonce, "d2", 100); err == nil {
-		t.Fatal("ciphertext must be bound to its delivery id")
-	}
-	if _, err := openL8Payload(receiver, sealed, eph, nonce, "d1", 101); err == nil {
-		t.Fatal("ciphertext must be bound to its timestamp")
-	}
-	other, _ := ecdh.X25519().GenerateKey(rand.Reader)
-	if _, err := openL8Payload(other, sealed, eph, nonce, "d1", 100); err == nil {
-		t.Fatal("a different receiver key must not decrypt")
-	}
-}
-
 func TestWebhookDeliveryEncryptedThenSigned(t *testing.T) {
-	rcv := newL8TestReceiver(t, true)
-	l8 := newTestL8Registry(t)
+	rcv := newTestReceiver(t, true)
+	registry := newTestRegistry(t)
 	payload := map[string]any{"job_id": "j1", "status": "completed", "body": "secret"}
 
-	if !deliverWithRetryContext(context.Background(), rcv.URL+"/hook", payload, webhookMaxRetries, l8, NoopMetricsAdapter{}) {
+	if !deliverWithRetryContext(context.Background(), rcv.URL+"/hook", payload, webhookMaxRetries, registry, NoopMetricsAdapter{}) {
 		t.Fatal("delivery failed")
 	}
 	d := <-rcv.got
-	if d.header.Get("X-L8-Encryption") != l8EncryptionAlgorithm || d.header.Get("Content-Type") != l8EncryptedContentType {
+	if d.header.Get("X-L8-Encryption") != l8.EncryptionAlgorithm || d.header.Get("Content-Type") != l8.EncryptedContentType {
 		t.Fatalf("expected encrypted delivery, got headers %v", d.header)
 	}
 	if d.header.Get("X-L8-Content-Type") != "application/json" {
@@ -143,10 +114,10 @@ func TestWebhookDeliveryEncryptedThenSigned(t *testing.T) {
 	if bytes.Contains(d.body, []byte("secret")) {
 		t.Fatal("body travelled in plaintext")
 	}
-	verifyL8Signature(t, l8.publicKey, d.header, d.body)
+	verifyL8Signature(t, registry.PublicKey(), d.header, d.body)
 
 	ts, _ := strconv.ParseInt(d.header.Get("X-L8-Timestamp"), 10, 64)
-	plain, err := openL8Payload(rcv.encPriv, d.body, d.header.Get("X-L8-Ephemeral-Key"), d.header.Get("X-L8-Nonce"), d.header.Get("X-L8-Delivery-Id"), ts)
+	plain, err := l8.OpenPayload(rcv.encPriv, d.body, d.header.Get("X-L8-Ephemeral-Key"), d.header.Get("X-L8-Nonce"), d.header.Get("X-L8-Delivery-Id"), ts)
 	if err != nil {
 		t.Fatalf("receiver could not decrypt: %v", err)
 	}
@@ -157,25 +128,25 @@ func TestWebhookDeliveryEncryptedThenSigned(t *testing.T) {
 }
 
 func TestWebhookDeliveryWithoutEncryptionCapabilityStaysPlaintext(t *testing.T) {
-	rcv := newL8TestReceiver(t, false)
-	l8 := newTestL8Registry(t)
+	rcv := newTestReceiver(t, false)
+	registry := newTestRegistry(t)
 
-	if !deliverWithRetryContext(context.Background(), rcv.URL+"/hook", map[string]any{"body": "visible"}, webhookMaxRetries, l8, NoopMetricsAdapter{}) {
+	if !deliverWithRetryContext(context.Background(), rcv.URL+"/hook", map[string]any{"body": "visible"}, webhookMaxRetries, registry, NoopMetricsAdapter{}) {
 		t.Fatal("delivery failed")
 	}
 	d := <-rcv.got
 	if d.header.Get("X-L8-Encryption") != "" || !bytes.Contains(d.body, []byte("visible")) {
 		t.Fatalf("expected signed plaintext, got %v %s", d.header, d.body)
 	}
-	verifyL8Signature(t, l8.publicKey, d.header, d.body)
+	verifyL8Signature(t, registry.PublicKey(), d.header, d.body)
 }
 
 func TestQueuedWebhookJobIsEncrypted(t *testing.T) {
-	rcv := newL8TestReceiver(t, true)
-	l8 := newTestL8Registry(t)
+	rcv := newTestReceiver(t, true)
+	registry := newTestRegistry(t)
 	job := &Job{ID: "w1", Method: "POST", URL: rcv.URL + "/hook", Body: `{"body":"secret"}`, Headers: map[string]string{"Content-Type": "application/json"}}
 
-	resp, err := makeRequest(context.Background(), job, job.URL, 0, 0, 0, 0, 0, l8)
+	resp, err := makeRequest(context.Background(), job, job.URL, 0, 0, 0, 0, 0, registry)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,20 +155,5 @@ func TestQueuedWebhookJobIsEncrypted(t *testing.T) {
 	if d.header.Get("X-L8-Encryption") == "" || bytes.Contains(d.body, []byte("secret")) {
 		t.Fatalf("queued webhook delivery was not encrypted: %v %s", d.header, d.body)
 	}
-	verifyL8Signature(t, l8.publicKey, d.header, d.body)
-}
-
-func TestTrustReloadKeepsEncryptionKey(t *testing.T) {
-	rcv := newL8TestReceiver(t, true)
-	dir := t.TempDir()
-	first := NewL8Registry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"))
-	first.EnsureTrust(rcv.URL)
-	first.Close()
-
-	reloaded := NewL8Registry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"))
-	defer reloaded.Close()
-	value, ok := reloaded.trusts.Load(rcv.URL)
-	if !ok || value.(*l8Peer).encryption == nil {
-		t.Fatal("encryption key not restored from the trust file")
-	}
+	verifyL8Signature(t, registry.PublicKey(), d.header, d.body)
 }

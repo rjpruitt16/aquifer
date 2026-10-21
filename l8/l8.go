@@ -1,7 +1,7 @@
 // Copyright 2026 Rahmi Pruitt
 // SPDX-License-Identifier: Apache-2.0
 
-package aquifer
+package l8
 
 import (
 	"bytes"
@@ -25,14 +25,14 @@ import (
 )
 
 const (
-	l8Version      = "0.2"
-	l8NonceTTL     = 5 * time.Minute
-	l8MetaMaxBytes = 1 << 20
+	Version      = "0.2"
+	nonceTTL     = 5 * time.Minute
+	metaMaxBytes = 1 << 20
 )
 
 // ---- wire types ----
 
-type L8Meta struct {
+type Meta struct {
 	ProtocolVersion   string   `json:"protocol_version"`
 	ServiceName       string   `json:"service_name"`
 	PublicKey         string   `json:"public_key"`
@@ -47,7 +47,7 @@ type L8Meta struct {
 	EncryptionPublicKey string `json:"encryption_public_key,omitempty"`
 }
 
-type L8ChallengeReq struct {
+type ChallengeRequest struct {
 	ChallengeID     string `json:"challenge_id"`
 	Nonce           string `json:"nonce"`
 	Timestamp       int64  `json:"timestamp"`
@@ -55,7 +55,7 @@ type L8ChallengeReq struct {
 	Signature       string `json:"signature"`
 }
 
-type L8ChallengeResp struct {
+type ChallengeResponse struct {
 	ChallengeID       string `json:"challenge_id"`
 	Nonce             string `json:"nonce"`
 	ReceiverSignature string `json:"receiver_signature"`
@@ -63,7 +63,7 @@ type L8ChallengeResp struct {
 }
 
 // on-disk trust file — one per trusted domain, named {domain}.json
-type l8TrustFile struct {
+type trustFile struct {
 	Domain          string   `json:"domain"`
 	PublicKey       string   `json:"public_key"`
 	ValidatedAt     int64    `json:"validated_at"`
@@ -75,47 +75,90 @@ type l8TrustFile struct {
 
 // ---- registry ----
 
-type L8Registry struct {
+type Registry struct {
 	privateKey ed25519.PrivateKey
 	publicKey  ed25519.PublicKey
 	PubB64     string // exported so server can embed in responses
 
 	trustDir string
-	trusts   sync.Map // domain -> *l8Peer (in-memory, loaded from disk on start)
+	trusts   sync.Map // domain -> *peer (in-memory, loaded from disk on start)
 	// notL8 remembers receivers that don't speak L8 (domain -> time.Time of
-	// the failed probe) for l8NegativeTTL. Without it every webhook to such
+	// the failed probe) for negativeTTL. Without it every webhook to such
 	// a receiver cost an extra GET /.well-known/l8.
-	notL8 sync.Map
-	nonces   sync.Map // nonce -> time.Time expiry
-	schemas  *l8SchemaCache
+	notL8   sync.Map
+	nonces  sync.Map // nonce -> time.Time expiry
+	schemas *schemaCache
+
+	// client makes the handshake and metadata requests.
+	client *http.Client
 
 	closeOnce sync.Once
 	stop      chan struct{}
 	done      chan struct{}
 }
 
-func NewL8Registry(keyPath, trustDir string) *L8Registry {
+// Option configures a Registry.
+type Option func(*options)
+
+type options struct {
+	client              *http.Client
+	schemaValidation    bool
+	schemaMinRefetchAge time.Duration
+}
+
+// WithHTTPClient sets the client used for handshakes and metadata requests.
+// The default is a client with a 5 second timeout.
+func WithHTTPClient(client *http.Client) Option {
+	return func(o *options) { o.client = client }
+}
+
+// WithSchemaValidation turns on validating request bodies against the
+// request schemas a receiver advertises (L8 0.2). Off by default.
+func WithSchemaValidation(enabled bool) Option {
+	return func(o *options) { o.schemaValidation = enabled }
+}
+
+// WithSchemaMinRefetchAge sets how soon a changed X-Aqueduct-Schema-Hash may
+// trigger another fetch of a receiver's schemas (default 10 s), so a
+// receiver flapping its hash can't cause a fetch per response.
+func WithSchemaMinRefetchAge(age time.Duration) Option {
+	return func(o *options) { o.schemaMinRefetchAge = age }
+}
+
+// NewRegistry loads this sender's Ed25519 key from keyPath (creating it if
+// missing) and the trusted receivers saved in trustDir (default "l8-trust").
+// Call Close when done.
+func NewRegistry(keyPath, trustDir string, opts ...Option) *Registry {
+	o := options{client: &http.Client{Timeout: 5 * time.Second}, schemaMinRefetchAge: schemaMinRefetchAge}
+	for _, opt := range opts {
+		opt(&o)
+	}
 	pub, priv := loadOrGenKey(keyPath)
 	if trustDir == "" {
 		trustDir = "l8-trust"
 	}
 	os.MkdirAll(trustDir, 0700)
 
-	r := &L8Registry{
+	r := &Registry{
 		privateKey: priv,
 		publicKey:  pub,
 		PubB64:     base64.StdEncoding.EncodeToString(pub),
 		trustDir:   trustDir,
-		schemas:    newL8SchemaCache(),
+		client:     o.client,
 		stop:       make(chan struct{}),
 		done:       make(chan struct{}),
 	}
+	r.schemas = newSchemaCache(o.schemaValidation, r.fetchMeta)
+	r.schemas.minRefetchAge = o.schemaMinRefetchAge
 	r.loadTrustsFromDisk()
 	go r.sweepNonces()
 	return r
 }
 
-func (r *L8Registry) Close() {
+// PublicKey is this sender's Ed25519 key; receivers verify X-L8-Signature with it.
+func (r *Registry) PublicKey() ed25519.PublicKey { return r.publicKey }
+
+func (r *Registry) Close() {
 	r.closeOnce.Do(func() {
 		close(r.stop)
 		<-r.done
@@ -158,9 +201,9 @@ func loadOrGenKey(path string) (ed25519.PublicKey, ed25519.PrivateKey) {
 	return pub, priv
 }
 
-func (r *L8Registry) Meta(host string) L8Meta {
-	return L8Meta{
-		ProtocolVersion:   l8Version,
+func (r *Registry) Meta(host string) Meta {
+	return Meta{
+		ProtocolVersion:   Version,
 		ServiceName:       "aquifer",
 		PublicKey:         r.PubB64,
 		ChallengeEndpoint: "/l8/challenge",
@@ -171,15 +214,15 @@ func (r *L8Registry) Meta(host string) L8Meta {
 }
 
 // HandleChallenge verifies the sender's ownership proof and returns Aquifer's signed response.
-func (r *L8Registry) HandleChallenge(req L8ChallengeReq) (*L8ChallengeResp, error) {
+func (r *Registry) HandleChallenge(req ChallengeRequest) (*ChallengeResponse, error) {
 	age := time.Since(time.Unix(req.Timestamp, 0))
 	if age < 0 {
 		age = -age
 	}
-	if age > l8NonceTTL {
+	if age > nonceTTL {
 		return nil, fmt.Errorf("timestamp expired")
 	}
-	if _, used := r.nonces.LoadOrStore(req.Nonce, time.Now().Add(l8NonceTTL)); used {
+	if _, used := r.nonces.LoadOrStore(req.Nonce, time.Now().Add(nonceTTL)); used {
 		return nil, fmt.Errorf("nonce already used")
 	}
 
@@ -197,7 +240,7 @@ func (r *L8Registry) HandleChallenge(req L8ChallengeReq) (*L8ChallengeResp, erro
 	}
 
 	ourSig := ed25519.Sign(r.privateKey, msg)
-	return &L8ChallengeResp{
+	return &ChallengeResponse{
 		ChallengeID:       req.ChallengeID,
 		Nonce:             req.Nonce,
 		ReceiverSignature: base64.StdEncoding.EncodeToString(ourSig),
@@ -207,7 +250,7 @@ func (r *L8Registry) HandleChallenge(req L8ChallengeReq) (*L8ChallengeResp, erro
 
 // EnsureTrust runs the L8 handshake with the webhook domain if not already trusted.
 // Silently does nothing if the receiver doesn't support L8 — delivery still proceeds unsigned.
-func (r *L8Registry) EnsureTrust(webhookURL string) {
+func (r *Registry) EnsureTrust(webhookURL string) {
 	domain := extractDomain(webhookURL)
 	if domain == "" {
 		return
@@ -215,11 +258,11 @@ func (r *L8Registry) EnsureTrust(webhookURL string) {
 	if _, ok := r.trusts.Load(domain); ok {
 		return
 	}
-	if at, ok := r.notL8.Load(domain); ok && time.Since(at.(time.Time)) < l8NegativeTTL {
+	if at, ok := r.notL8.Load(domain); ok && time.Since(at.(time.Time)) < negativeTTL {
 		return
 	}
 
-	meta, err := fetchL8Meta(domain)
+	meta, err := r.fetchMeta(domain)
 	if err != nil {
 		r.notL8.Store(domain, time.Now())
 		return
@@ -236,7 +279,7 @@ func (r *L8Registry) EnsureTrust(webhookURL string) {
 		challengeURL = meta.ChallengeEndpoint
 	}
 
-	reqBody, _ := json.Marshal(L8ChallengeReq{
+	reqBody, _ := json.Marshal(ChallengeRequest{
 		ChallengeID:     challengeID,
 		Nonce:           nonce,
 		Timestamp:       time.Now().Unix(),
@@ -244,14 +287,14 @@ func (r *L8Registry) EnsureTrust(webhookURL string) {
 		Signature:       base64.StdEncoding.EncodeToString(sig),
 	})
 
-	resp, err := l8Client.Post(challengeURL, "application/json", bytes.NewReader(reqBody))
+	resp, err := r.client.Post(challengeURL, "application/json", bytes.NewReader(reqBody))
 	if err != nil {
 		log.Printf("[L8] challenge to %s failed: %v", domain, err)
 		return
 	}
 	defer resp.Body.Close()
 
-	var cr L8ChallengeResp
+	var cr ChallengeResponse
 	if err := json.NewDecoder(resp.Body).Decode(&cr); err != nil || cr.ReceiverSignature == "" {
 		log.Printf("[L8] invalid challenge response from %s", domain)
 		return
@@ -268,13 +311,13 @@ func (r *L8Registry) EnsureTrust(webhookURL string) {
 		return
 	}
 
-	r.trusts.Store(domain, &l8Peer{signing: ed25519.PublicKey(receiverPub), encryption: parseEncryptionKey(meta.Capabilities, meta.EncryptionPublicKey)})
+	r.trusts.Store(domain, &peer{signing: ed25519.PublicKey(receiverPub), encryption: parseEncryptionKey(meta.Capabilities, meta.EncryptionPublicKey)})
 	r.saveTrustToDisk(domain, ed25519.PublicKey(receiverPub), meta)
 	log.Printf("[L8] trust established with %s", domain)
 }
 
 // IsTrusted returns true if the L8 handshake has been completed for this webhook domain.
-func (r *L8Registry) IsTrusted(webhookURL string) bool {
+func (r *Registry) IsTrusted(webhookURL string) bool {
 	domain := extractDomain(webhookURL)
 	if domain == "" {
 		return false
@@ -284,7 +327,7 @@ func (r *L8Registry) IsTrusted(webhookURL string) bool {
 }
 
 // signHeaders returns the X-L8-* signature headers for the exact bytes sent.
-func (r *L8Registry) signHeaders(body []byte, deliveryID string, ts int64) map[string]string {
+func (r *Registry) signHeaders(body []byte, deliveryID string, ts int64) map[string]string {
 	h := sha256.Sum256(body)
 	msg := fmt.Sprintf("%s.%d.%s", deliveryID, ts, base64.StdEncoding.EncodeToString(h[:]))
 	sig := ed25519.Sign(r.privateKey, []byte(msg))
@@ -298,8 +341,8 @@ func (r *L8Registry) signHeaders(body []byte, deliveryID string, ts int64) map[s
 
 // ---- disk persistence ----
 
-func (r *L8Registry) saveTrustToDisk(domain string, pub ed25519.PublicKey, meta *L8Meta) {
-	tf := l8TrustFile{
+func (r *Registry) saveTrustToDisk(domain string, pub ed25519.PublicKey, meta *Meta) {
+	tf := trustFile{
 		Domain:              domain,
 		PublicKey:           base64.StdEncoding.EncodeToString(pub),
 		ValidatedAt:         time.Now().Unix(),
@@ -314,7 +357,7 @@ func (r *L8Registry) saveTrustToDisk(domain string, pub ed25519.PublicKey, meta 
 	}
 }
 
-func (r *L8Registry) loadTrustsFromDisk() {
+func (r *Registry) loadTrustsFromDisk() {
 	entries, err := os.ReadDir(r.trustDir)
 	if err != nil {
 		return
@@ -327,7 +370,7 @@ func (r *L8Registry) loadTrustsFromDisk() {
 		if err != nil {
 			continue
 		}
-		var tf l8TrustFile
+		var tf trustFile
 		if err := json.Unmarshal(data, &tf); err != nil || tf.Domain == "" || tf.PublicKey == "" {
 			continue
 		}
@@ -335,35 +378,32 @@ func (r *L8Registry) loadTrustsFromDisk() {
 		if err != nil || len(pub) != ed25519.PublicKeySize {
 			continue
 		}
-		r.trusts.Store(tf.Domain, &l8Peer{signing: ed25519.PublicKey(pub), encryption: parseEncryptionKey(tf.Capabilities, tf.EncryptionPublicKey)})
+		r.trusts.Store(tf.Domain, &peer{signing: ed25519.PublicKey(pub), encryption: parseEncryptionKey(tf.Capabilities, tf.EncryptionPublicKey)})
 		log.Printf("[L8] loaded trust for %s", tf.Domain)
 	}
 }
 
 // ---- helpers ----
 
-// l8NegativeTTL is how long a receiver without L8 metadata is left alone
+// negativeTTL is how long a receiver without L8 metadata is left alone
 // before Aquifer probes it again (it may have added L8 since).
-const l8NegativeTTL = 5 * time.Minute
+const negativeTTL = 5 * time.Minute
 
-// l8Client shares dispatchClient's pooled transport with a shorter timeout.
-var l8Client = &http.Client{Timeout: 5 * time.Second, Transport: dispatchClient.Transport}
-
-func fetchL8Meta(baseURL string) (*L8Meta, error) {
-	resp, err := l8Client.Get(baseURL + "/.well-known/l8")
+func (r *Registry) fetchMeta(baseURL string) (*Meta, error) {
+	resp, err := r.client.Get(baseURL + "/.well-known/l8")
 	if err != nil {
 		return nil, err
 	}
 	// Drain what's left so the connection goes back to the pool.
 	defer func() {
-		io.Copy(io.Discard, io.LimitReader(resp.Body, l8MetaMaxBytes))
+		io.Copy(io.Discard, io.LimitReader(resp.Body, metaMaxBytes))
 		resp.Body.Close()
 	}()
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("/.well-known/l8 returned %d", resp.StatusCode)
 	}
-	var meta L8Meta
-	if err := json.NewDecoder(io.LimitReader(resp.Body, l8MetaMaxBytes)).Decode(&meta); err != nil {
+	var meta Meta
+	if err := json.NewDecoder(io.LimitReader(resp.Body, metaMaxBytes)).Decode(&meta); err != nil {
 		return nil, err
 	}
 	if meta.PublicKey == "" || meta.ChallengeEndpoint == "" {
@@ -385,7 +425,7 @@ func sanitizeDomain(domain string) string {
 	return strings.ReplaceAll(s, ":", "_")
 }
 
-func (r *L8Registry) sweepNonces() {
+func (r *Registry) sweepNonces() {
 	defer close(r.done)
 
 	ticker := time.NewTicker(time.Minute)
@@ -393,21 +433,36 @@ func (r *L8Registry) sweepNonces() {
 	for {
 		select {
 		case <-ticker.C:
-			now := time.Now()
-			r.nonces.Range(func(k, v any) bool {
-				if expiry, ok := v.(time.Time); ok && now.After(expiry) {
-					r.nonces.Delete(k)
-				}
-				return true
-			})
+			r.sweep(time.Now())
 		case <-r.stop:
 			return
 		}
 	}
 }
 
-// l8SpecDocument is served at GET /l8-spec so agents and developers can discover the protocol.
-const l8SpecDocument = `# L8 Protocol — v0.2
+// sweep drops expired nonces, negative-cache entries and cached schemas.
+// Receiver and target domains come from callers' URLs, so without it these
+// maps would grow with every distinct host a long-lived node ever sees.
+func (r *Registry) sweep(now time.Time) {
+	r.nonces.Range(func(k, v any) bool {
+		if expiry, ok := v.(time.Time); ok && now.After(expiry) {
+			r.nonces.Delete(k)
+		}
+		return true
+	})
+	r.notL8.Range(func(k, v any) bool {
+		if at, ok := v.(time.Time); ok && now.Sub(at) >= negativeTTL {
+			r.notL8.Delete(k)
+		}
+		return true
+	})
+	if r.schemas != nil {
+		r.schemas.sweep(now)
+	}
+}
+
+// SpecDocument is served at GET /l8-spec so agents and developers can discover the protocol.
+const SpecDocument = `# L8 Protocol — v0.2
 
 L8 is a lightweight challenge-response handshake for trustless webhook delivery.
 No shared secrets. No central authority. Ownership is proven once via Ed25519 signatures.

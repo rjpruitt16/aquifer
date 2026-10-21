@@ -9,9 +9,12 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"github.com/rjpruitt16/aquifer/l8"
 )
 
 const chatSchemaV1 = `{"type":"object","required":["model","messages"],"properties":{"model":{"type":"string"},"messages":{"type":"array"}}}`
@@ -49,6 +52,19 @@ func (u *schemaUpstream) set(schema, hash string) {
 	u.mu.Lock()
 	u.schema, u.hash = schema, hash
 	u.mu.Unlock()
+}
+
+// testAquiferWithL8 is testAquiferWithLimits with an L8 registry built from
+// opts, for tests that need L8 settings the environment doesn't cover.
+func testAquiferWithL8(t *testing.T, opts ...l8.Option) (*Aquifer, *Store) {
+	t.Helper()
+	dir := t.TempDir()
+	registry := l8.NewRegistry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"), opts...)
+	t.Cleanup(registry.Close)
+	app, store := testAquiferWithLimits(t, AdmissionLimits{})
+	app.l8 = registry
+	app.registry.l8 = registry
+	return app, store
 }
 
 func schemaJob(url, body string) JobRequest {
@@ -97,38 +113,10 @@ func TestSchemaValidationRejectsMismatch(t *testing.T) {
 	}
 }
 
-func TestSchemaHashChangeRefetches(t *testing.T) {
-	t.Setenv("AQUIFER_L8_SCHEMA_VALIDATION", "true")
-	up := newSchemaUpstream(t, chatSchemaV1, "sha256:v1")
-	app, _ := testAquiferWithLimits(t, AdmissionLimits{})
-	app.l8.schemas.minRefetchAge = 0
-	url := up.URL + "/v1/chat"
-
-	v2Body := `{"model":"m","input":"hi"}`
-	if err := app.l8.ValidateRequestBody(url, "POST", v2Body); err == nil {
-		t.Fatal("v2 body should fail the v1 schema")
-	}
-
-	up.set(chatSchemaV2, "sha256:v2")
-	app.l8.ObserveSchemaHash(url, "sha256:v1")
-	if err := app.l8.ValidateRequestBody(url, "POST", v2Body); err == nil {
-		t.Fatal("an unchanged hash must not trigger a refetch")
-	}
-
-	app.l8.ObserveSchemaHash(url, "sha256:v2")
-	if err := app.l8.ValidateRequestBody(url, "POST", v2Body); err != nil {
-		t.Fatalf("expected refetched v2 schema to accept body, got %v", err)
-	}
-	if n := up.metaFetchs.Load(); n != 2 {
-		t.Fatalf("expected exactly one refetch, got %d fetches", n)
-	}
-}
-
 func TestSchemaHashHeaderObservedOnDispatch(t *testing.T) {
 	t.Setenv("AQUIFER_L8_SCHEMA_VALIDATION", "true")
 	up := newSchemaUpstream(t, chatSchemaV1, "sha256:v1")
-	app, _ := testAquiferWithLimits(t, AdmissionLimits{})
-	app.l8.schemas.minRefetchAge = 0
+	app, _ := testAquiferWithL8(t, l8.WithSchemaValidation(true), l8.WithSchemaMinRefetchAge(0))
 	url := up.URL + "/v1/chat"
 	if err := app.l8.ValidateRequestBody(url, "POST", `{"model":"m","messages":[]}`); err != nil {
 		t.Fatal(err)
