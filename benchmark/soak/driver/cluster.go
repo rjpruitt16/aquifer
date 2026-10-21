@@ -351,6 +351,9 @@ func subCounters(a, b Counters) Counters {
 		Lost:                     a.Lost - b.Lost,
 		LostInFlushWindow:        a.LostInFlushWindow - b.LostInFlushWindow,
 		Stuck:                    a.Stuck - b.Stuck,
+		LostInLine:               a.LostInLine - b.LostInLine,
+		CompletedOnStream:        a.CompletedOnStream - b.CompletedOnStream,
+		FailedOnStream:           a.FailedOnStream - b.FailedOnStream,
 	}
 }
 

@@ -174,3 +174,36 @@ func TestAJobThatFinishesOnTheLineStreamIsDone(t *testing.T) {
 		t.Fatal("a webhook after the stream said completed is a duplicate")
 	}
 }
+
+func TestScenarioDeltasIncludeTheGatewayCounters(t *testing.T) {
+	a := Counters{LostInLine: 3, CompletedOnStream: 10, FailedOnStream: 2}
+	b := Counters{LostInLine: 1, CompletedOnStream: 4}
+	if d := subCounters(a, b); d.LostInLine != 2 || d.CompletedOnStream != 6 || d.FailedOnStream != 2 {
+		t.Fatalf("delta %+v", d)
+	}
+}
+
+// One stalled supervisor marks only that node down, and doesn't hold up the
+// rest of the minute's sample past the deadline.
+func TestNodeSnapshotsDontWaitOnAStalledNode(t *testing.T) {
+	ok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"rss_bytes":104857600,"open_fds":12,"pebble_bytes":1048576,"restarts":1}`)
+	}))
+	defer ok.Close()
+	release := make(chan struct{})
+	stalled := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-release }))
+	defer stalled.Close()
+	defer close(release)
+
+	start := time.Now()
+	got := nodeSnapshots([]*clusterNode{{ID: "a", Supervisor: ok.URL}, {ID: "b", Supervisor: stalled.URL}})
+	if took := time.Since(start); took > 7*time.Second {
+		t.Fatalf("took %v; the stalled node should be cut off at the deadline", took)
+	}
+	if got["a"].Down || got["a"].RSSMB != 100 || got["a"].OpenFDs != 12 {
+		t.Fatalf("a: %+v", got["a"])
+	}
+	if !got["b"].Down {
+		t.Fatalf("b should be down: %+v", got["b"])
+	}
+}

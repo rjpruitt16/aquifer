@@ -148,6 +148,9 @@ func main() {
 	flag.BoolVar(&cfg.WebhookChaos, "webhook-chaos", true, "let the webhook receiver misbehave with -chaos (false keeps it healthy, so every job's webhook is the record of it finishing)")
 	flag.BoolVar(&cfg.Valkey, "valkey", false, "cluster test: run the nodes' Valkey here (valkey-server on :6379) so a scenario can take it down")
 	flag.Parse()
+	if cfg.Backends != "" && cfg.Nodes == "" {
+		log.Fatal("-backends (SOAK_BACKENDS) needs -nodes (SOAK_NODES): the gateway nodes load goes to")
+	}
 	var nodes, backends []*clusterNode
 	var plan []scenario
 	if cfg.Nodes != "" {

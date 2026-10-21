@@ -118,6 +118,9 @@ type nodeHour struct {
 	StoreMBEnd float64 `json:"store_mb_end"`
 	Restarts   float64 `json:"restarts_total"`
 	DownMins   int     `json:"minutes_supervisor_unreachable,omitempty"`
+	// DownAtEnd: the hour's last sample couldn't reach the node, so the
+	// _end values are from earlier in the hour.
+	DownAtEnd bool `json:"down_at_end,omitempty"`
 }
 
 type wsHour struct {
@@ -273,20 +276,7 @@ func (o *observer) observe(now time.Time, secs float64) {
 		m.TargetError = "supervisor: " + err.Error()
 	}
 	if d.cluster != nil {
-		m.Nodes = map[string]nodeStats{}
-		for _, n := range d.cluster.allNodes() {
-			st, err := fetchJSON(c, n.Supervisor+"/stats")
-			if err != nil {
-				m.Nodes[n.ID] = nodeStats{Down: true}
-				continue
-			}
-			m.Nodes[n.ID] = nodeStats{
-				RSSMB:    num(st, "rss_bytes") / (1 << 20),
-				OpenFDs:  num(st, "open_fds"),
-				StoreMB:  num(st, "pebble_bytes") / (1 << 20),
-				Restarts: num(st, "restarts"),
-			}
-		}
+		m.Nodes = nodeSnapshots(d.cluster.allNodes())
 	}
 	if h, err := fetchJSON(c, d.cfg.Target+"/health"); err == nil {
 		if q, ok := h["queues"].(map[string]any); ok {
@@ -379,6 +369,7 @@ func (o *observer) summarizeHour(start time.Time) hour {
 				h.Nodes = map[string]nodeHour{}
 			}
 			nh := h.Nodes[id]
+			nh.DownAtEnd = s.Down
 			if s.Down {
 				nh.DownMins++
 			} else {
@@ -714,4 +705,34 @@ func (o *observer) wsStatus() any {
 		"backend_mode":    o.d.wsUpstream.modeName(),
 		"ledger":          o.d.wsLedger.view(),
 	}
+}
+
+// nodeSnapshots reads every node's supervisor stats at once, so one stalled
+// node can't hold up the minute's sample: a node that doesn't answer within
+// the deadline is marked down.
+func nodeSnapshots(nodes []*clusterNode) map[string]nodeStats {
+	c := &http.Client{Timeout: 5 * time.Second}
+	out := make(map[string]nodeStats, len(nodes))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for _, n := range nodes {
+		wg.Add(1)
+		go func(n *clusterNode) {
+			defer wg.Done()
+			s := nodeStats{Down: true}
+			if st, err := fetchJSON(c, n.Supervisor+"/stats"); err == nil {
+				s = nodeStats{
+					RSSMB:    num(st, "rss_bytes") / (1 << 20),
+					OpenFDs:  num(st, "open_fds"),
+					StoreMB:  num(st, "pebble_bytes") / (1 << 20),
+					Restarts: num(st, "restarts"),
+				}
+			}
+			mu.Lock()
+			out[n.ID] = s
+			mu.Unlock()
+		}(n)
+	}
+	wg.Wait()
+	return out
 }
