@@ -309,7 +309,54 @@ The transcript is a **replay window**, not a durable log. It is built for reconn
 - **Not guaranteed:** history older than the window. Once entries are trimmed (by count or TTL), a client whose cursor points before them gets **409** and must resynchronize from your application's own state. Aquifer never skips events silently, but it does not keep them forever.
 - **Valkey is the storage.** Durability is whatever your Valkey provides: persistence (AOF/RDB), replication, and its `maxmemory` policy. With an eviction policy, Valkey can drop whole transcripts under memory pressure, which also surfaces as **409**. Size `maxmemory` for sessions × `AQUIFER_WS_STREAM_MAX_EVENTS` × message size, or use `noeviction` and accept failed writes when it is full: new handshakes get **503**, a client whose command can't be recorded is disconnected (it can reconnect from its cursor), and a backend whose event can't be recorded is disconnected and reconnected.
 
-If you need every message kept beyond the window (audit, analytics, replay from the beginning), record it in your own durable store from the backend, or follow the durable-transcript extension in the issue tracker.
+If you need every message kept beyond the window (audit, analytics, replay from the beginning), turn on transcript export below, or record messages in your own durable store from the backend.
+
+#### Keeping transcripts longer: export
+
+Off by default. With `AQUIFER_WS_EXPORT_ENABLED=true`, Aquifer copies every recorded message to a receiver you run, such as [Inlet](https://github.com/rjpruitt16/inlet), which writes them to a Kafka topic. The Valkey transcript and its replay window don't change.
+
+- Each recorded message is also added to one shared export stream in Valkey (`{AQUIFER_WS_STREAM_PREFIX}export`), atomically with the transcript entry, so nothing recorded is missed.
+- A background exporter on every node reads that stream through one consumer group. It POSTs batches to `AQUIFER_WS_EXPORT_URL`, and acknowledges and deletes each batch from the export stream only after a **2xx**. A failed batch is retried with backoff. A node that stops leaves its batch for the next start, and another node takes over messages left unacknowledged for a minute.
+- Delivery is at least once. Drop repeats by `session_id` + `stream_id`. `stream_id` is the transcript entry's ID, the same cursor clients replay from.
+- **Order is kept within a batch, not across batches.** A retried batch can arrive after a newer one, especially with several nodes. Order a session's messages by `stream_id`.
+- Batches are capped at `AQUIFER_WS_EXPORT_MAX_BATCH_BYTES`. A **413** halves the batch until it goes through. A single message the receiver still refuses with 413 is logged and skipped, so it can't block the messages behind it; it stays in its session transcript for the replay window.
+- The URL must be `https`, so the token and transcripts aren't sent in cleartext. `http` is allowed for loopback, or anywhere with `AQUIFER_WS_EXPORT_ALLOW_INSECURE=true` on a private network you trust. Redirects aren't followed. Otherwise export stays off and a warning is logged.
+- While the receiver is down, the export stream holds up to `AQUIFER_WS_EXPORT_MAX_PENDING` messages, approximately. Beyond that the oldest are dropped from export; they stay in their session transcripts for the replay window. The cap counts messages, not bytes: allow Valkey `maxmemory` for `AQUIFER_WS_EXPORT_MAX_PENDING` × average message size on top of the transcripts, or lower the cap.
+- A node that stops with nothing pending leaves the consumer group. Consumers of nodes that are gone are removed once they've been idle for an hour with nothing pending.
+- The two writes run in one script on two keys, so this needs one Valkey primary, not a sharded Redis Cluster, the same as cluster coordination.
+
+Batch body (`Content-Type: application/json`, `Authorization: Bearer <AQUIFER_WS_EXPORT_TOKEN>` when set):
+
+```json
+{
+  "schema": "aquifer.websocket_batch.v1",
+  "node_id": "aquifer-iad-1",
+  "events": [
+    {
+      "session_id": "4d9c...",
+      "stream_id": "1792541234567-0",
+      "direction": "client",
+      "type": "command",
+      "message_id": "m-17",
+      "caused_by": "",
+      "generation": 3,
+      "payload": {"action": "subscribe"},
+      "recorded_at": 1792541234567
+    }
+  ]
+}
+```
+
+| Env var | Default | Description |
+|---|---|---|
+| `AQUIFER_WS_EXPORT_ENABLED` | `false` | Turns export on |
+| `AQUIFER_WS_EXPORT_URL` | _(none)_ | Receiver for batches; export stays off without it |
+| `AQUIFER_WS_EXPORT_TOKEN` | _(none)_ | Sent as a bearer token |
+| `AQUIFER_WS_EXPORT_BATCH` | `500` | Messages per batch |
+| `AQUIFER_WS_EXPORT_MAX_BATCH_BYTES` | `4194304` | Encoded size cap per batch (4 MiB, under Lambda's 6 MB request limit) |
+| `AQUIFER_WS_EXPORT_ALLOW_INSECURE` | `false` | Allow an `http` URL that isn't loopback |
+| `AQUIFER_WS_EXPORT_MAX_PENDING` | `1000000` | Approximate cap on messages waiting for export |
+| `AQUIFER_WS_EXPORT_PAYLOADS` | `true` | `false` exports everything but `payload` |
 
 Two clients may temporarily attach to the same `session_id` during an application-managed handoff; both follow the same durable backend event stream, and the client decides when to close the old socket. On `SIGTERM`, Aquifer sends `server_draining`, leaves the old socket open for `AQUIFER_WS_DRAIN_GRACE_SECONDS`, then closes it with WebSocket code **1012 Service Restart**. The client should open its replacement through the gateway using its last processed stream cursor. New handshakes receive **503** while the node drains.
 

@@ -61,7 +61,9 @@ type Runtime struct {
 	Admission  *AdmissionController
 	Pools      *PoolRegistry
 	WebSockets *WebSocketManager
-	Shutdown   ShutdownConfig
+	// WebSocketExport is set when AQUIFER_WS_EXPORT_ENABLED=true.
+	WebSocketExport *WebSocketExporter
+	Shutdown        ShutdownConfig
 }
 
 func NewRuntime(opts RuntimeOptions) *Runtime {
@@ -143,6 +145,7 @@ func NewRuntime(opts RuntimeOptions) *Runtime {
 		shutdownCfg = *opts.ShutdownConfig
 	}
 	var webSocketManager *WebSocketManager
+	var webSocketExporter *WebSocketExporter
 	if webSocketCfg.Enabled {
 		streamStore := opts.WebSocketStore
 		if streamStore == nil {
@@ -153,6 +156,16 @@ func NewRuntime(opts RuntimeOptions) *Runtime {
 			}
 		}
 		if streamStore != nil {
+			if exportCfg := LoadWebSocketExportConfig(); exportCfg.Enabled {
+				if redisStore, ok := streamStore.(*RedisWebSocketStreamStore); ok {
+					exporter, err := StartWebSocketExport(redisStore, exportCfg)
+					if err != nil {
+						log.Printf("websocket export: disabled: %v", err)
+					} else {
+						webSocketExporter = exporter
+					}
+				}
+			}
 			webSocketManager = NewWebSocketManager(*webSocketCfg, streamStore)
 			app.SetWebSocketManager(webSocketManager)
 		}
@@ -169,6 +182,8 @@ func NewRuntime(opts RuntimeOptions) *Runtime {
 		Pools:      pools,
 		WebSockets: webSocketManager,
 		Shutdown:   shutdownCfg,
+
+		WebSocketExport: webSocketExporter,
 	}
 }
 
@@ -234,6 +249,8 @@ func (r *Runtime) Close() {
 	if r == nil {
 		return
 	}
+	// Unacknowledged export messages stay in Valkey for the next start.
+	r.WebSocketExport.Stop()
 	if r.Aquifer != nil {
 		r.Aquifer.Close()
 		return
