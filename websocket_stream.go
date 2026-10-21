@@ -47,6 +47,9 @@ type RedisWebSocketStreamStore struct {
 	prefix    string
 	maxEvents int64
 	ttl       time.Duration
+	// exportMaxLen > 0 means every Append is also added to the export
+	// stream (see websocket_export.go), capped at about this many entries.
+	exportMaxLen int64
 }
 
 // NewRedisWebSocketStreamStore connects the transcript store. Live sessions
@@ -125,13 +128,25 @@ func (s *RedisWebSocketStreamStore) Append(ctx context.Context, sessionID, direc
 		"recorded_at", strconv.FormatInt(time.Now().UnixMilli(), 10),
 	}
 	pipe := s.client.TxPipeline()
-	add := pipe.XAdd(ctx, &redis.XAddArgs{
-		Stream: s.streamKey(sessionID),
-		MaxLen: s.maxEvents,
-		Approx: true,
-		Values: values,
-	})
-	pipe.Expire(ctx, s.streamKey(sessionID), s.ttl)
+	var add *redis.StringCmd
+	var addExported *redis.Cmd
+	if s.exportMaxLen > 0 {
+		// One script writes the transcript entry and its export copy, so a
+		// recorded message is always exported and the copy carries the
+		// transcript's stream ID (see websocket_export.go).
+		args := []any{s.maxEvents, int64(s.ttl / time.Second), s.exportMaxLen, sessionID}
+		// Eval, not EvalSha: inside a MULTI there's no fallback when the
+		// script isn't cached yet (or Valkey restarted and dropped it).
+		addExported = webSocketExportAppendScript.Eval(ctx, pipe, []string{s.streamKey(sessionID), s.exportKey()}, append(args, values...)...)
+	} else {
+		add = pipe.XAdd(ctx, &redis.XAddArgs{
+			Stream: s.streamKey(sessionID),
+			MaxLen: s.maxEvents,
+			Approx: true,
+			Values: values,
+		})
+		pipe.Expire(ctx, s.streamKey(sessionID), s.ttl)
+	}
 	if direction == "backend" {
 		// Sessions deliver only backend entries; client entries are read
 		// past on the next wake, so they don't need one of their own.
@@ -140,6 +155,13 @@ func (s *RedisWebSocketStreamStore) Append(ctx context.Context, sessionID, direc
 	_, err := pipe.Exec(ctx)
 	if err != nil {
 		return "", fmt.Errorf("append websocket event: %w", err)
+	}
+	if addExported != nil {
+		id, err := addExported.Text()
+		if err != nil {
+			return "", fmt.Errorf("read appended websocket event id: %w", err)
+		}
+		return id, nil
 	}
 	id, err := add.Result()
 	if err != nil {
