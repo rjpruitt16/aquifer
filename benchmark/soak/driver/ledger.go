@@ -78,6 +78,9 @@ type Counters struct {
 	Lost                     uint64 `json:"lost"`
 	LostInFlushWindow        uint64 `json:"lost_within_flush_window_of_kill"`
 	Stuck                    uint64 `json:"stuck_over_24h"`
+	// LostInLine is gateway mode's lost: accepted into the gateway's line,
+	// then never seen again, on the gateway, a backend, or as a webhook.
+	LostInLine uint64 `json:"lost_in_gateway_line"`
 }
 
 type ledgerState struct {
@@ -320,6 +323,13 @@ func (l *ledger) resolve(seq uint64, status string, now time.Time) (closed strin
 			c.TerminalNoWebhook++
 			closeAs("")
 		}
+	case "unknown":
+		// Gateway mode: a job accepted into the line whose id was never
+		// seen and that the gateway no longer knows.
+		if now.Sub(time.UnixMilli(p.AcceptedAt)) > lostInLineAfter {
+			c.LostInLine++
+			closeAs("lost_in_gateway_line")
+		}
 	case "":
 		if p.SeenTerminal != 0 {
 			c.TerminalNoWebhook++ // finished, then expired from the store
@@ -398,4 +408,14 @@ func (l *ledger) save() error {
 		return fmt.Errorf("save ledger: %w", err)
 	}
 	return os.Rename(tmp, l.path)
+}
+
+// setJobID records the instance's id for a job accepted into a gateway's
+// line, once the gateway names it.
+func (l *ledger) setJobID(seq uint64, id string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if p, ok := l.s.Outstanding[seq]; ok && p.JobID == "" {
+		p.JobID = id
+	}
 }

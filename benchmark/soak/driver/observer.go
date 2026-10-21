@@ -44,8 +44,12 @@ type minute struct {
 	QueueBacklog float64        `json:"queue_backlog"`
 	ActiveQueues float64        `json:"active_queues"`
 	WS           *wsMinute      `json:"websocket,omitempty"`
-	accept, e2e  histCounts
-	wsCmd        histCounts
+	// Nodes is each cluster or gateway node's supervisor stats (rss_mb,
+	// open_fds, store_mb, restarts), so a leak on one isn't hidden by
+	// Target following only the first.
+	Nodes       map[string]nodeStats `json:"nodes,omitempty"`
+	accept, e2e histCounts
+	wsCmd       histCounts
 }
 
 type wsMinute struct {
@@ -65,34 +69,55 @@ type wsMinute struct {
 // hour summarizes 60 minutes; these are what the monitoring agent compares
 // across the week.
 type hour struct {
-	At              time.Time `json:"at"`
-	Minutes         int       `json:"minutes"`
-	Accepted        float64   `json:"accepted_per_s"`
-	Shed            float64   `json:"shed_per_s"`
-	ClientErrors    float64   `json:"client_errors_per_s"`
-	Completed       float64   `json:"completed_per_s"`
-	Failed          float64   `json:"failed_per_s"`
-	AcceptP50       float64   `json:"accept_p50_ms"`
-	AcceptP99       float64   `json:"accept_p99_ms"`
-	E2EP50          float64   `json:"e2e_p50_ms"`
-	E2EP99          float64   `json:"e2e_p99_ms"`
-	MaxOutstanding  int       `json:"max_outstanding"`
-	MaxQueueBacklog float64   `json:"max_queue_backlog"`
-	RSSMB           float64   `json:"rss_mb_end"`
-	RSSMBMax        float64   `json:"rss_mb_max"`
-	HeapMB          float64   `json:"heap_inuse_mb_end"`
-	Goroutines      float64   `json:"goroutines_end"`
-	GoroutinesMax   float64   `json:"goroutines_max"`
-	OpenFDs         float64   `json:"open_fds_end"`
-	PebbleMB        float64   `json:"pebble_mb_end"`
-	PebbleFiles     float64   `json:"pebble_files_end"`
-	VolumeFreePct   float64   `json:"volume_free_pct_end"`
-	TargetRestarts  float64   `json:"target_restarts_total"`
-	TargetDownMins  int       `json:"minutes_target_unreachable"`
-	Ledger          Counters  `json:"ledger_totals"`
-	UpstreamDownS   int64     `json:"upstream_down_s_total"`
-	WebhookDownS    int64     `json:"webhook_down_s_total"`
-	WS              *wsHour   `json:"websocket,omitempty"`
+	At              time.Time           `json:"at"`
+	Minutes         int                 `json:"minutes"`
+	Accepted        float64             `json:"accepted_per_s"`
+	Shed            float64             `json:"shed_per_s"`
+	ClientErrors    float64             `json:"client_errors_per_s"`
+	Completed       float64             `json:"completed_per_s"`
+	Failed          float64             `json:"failed_per_s"`
+	AcceptP50       float64             `json:"accept_p50_ms"`
+	AcceptP99       float64             `json:"accept_p99_ms"`
+	E2EP50          float64             `json:"e2e_p50_ms"`
+	E2EP99          float64             `json:"e2e_p99_ms"`
+	MaxOutstanding  int                 `json:"max_outstanding"`
+	MaxQueueBacklog float64             `json:"max_queue_backlog"`
+	RSSMB           float64             `json:"rss_mb_end"`
+	RSSMBMax        float64             `json:"rss_mb_max"`
+	HeapMB          float64             `json:"heap_inuse_mb_end"`
+	Goroutines      float64             `json:"goroutines_end"`
+	GoroutinesMax   float64             `json:"goroutines_max"`
+	OpenFDs         float64             `json:"open_fds_end"`
+	PebbleMB        float64             `json:"pebble_mb_end"`
+	PebbleFiles     float64             `json:"pebble_files_end"`
+	VolumeFreePct   float64             `json:"volume_free_pct_end"`
+	TargetRestarts  float64             `json:"target_restarts_total"`
+	TargetDownMins  int                 `json:"minutes_target_unreachable"`
+	Ledger          Counters            `json:"ledger_totals"`
+	UpstreamDownS   int64               `json:"upstream_down_s_total"`
+	WebhookDownS    int64               `json:"webhook_down_s_total"`
+	WS              *wsHour             `json:"websocket,omitempty"`
+	Nodes           map[string]nodeHour `json:"nodes,omitempty"`
+}
+
+type nodeStats struct {
+	RSSMB    float64 `json:"rss_mb"`
+	OpenFDs  float64 `json:"open_fds"`
+	StoreMB  float64 `json:"store_mb"`
+	Restarts float64 `json:"restarts"`
+	Down     bool    `json:"supervisor_unreachable,omitempty"`
+}
+
+// nodeHour is one node's hour: end-of-hour values (for day-over-day
+// comparison at the same hour) and the hour's peaks.
+type nodeHour struct {
+	RSSMBEnd   float64 `json:"rss_mb_end"`
+	RSSMBMax   float64 `json:"rss_mb_max"`
+	OpenFDsEnd float64 `json:"open_fds_end"`
+	OpenFDsMax float64 `json:"open_fds_max"`
+	StoreMBEnd float64 `json:"store_mb_end"`
+	Restarts   float64 `json:"restarts_total"`
+	DownMins   int     `json:"minutes_supervisor_unreachable,omitempty"`
 }
 
 type wsHour struct {
@@ -247,10 +272,29 @@ func (o *observer) observe(now time.Time, secs float64) {
 	} else {
 		m.TargetError = "supervisor: " + err.Error()
 	}
+	if d.cluster != nil {
+		m.Nodes = map[string]nodeStats{}
+		for _, n := range d.cluster.allNodes() {
+			st, err := fetchJSON(c, n.Supervisor+"/stats")
+			if err != nil {
+				m.Nodes[n.ID] = nodeStats{Down: true}
+				continue
+			}
+			m.Nodes[n.ID] = nodeStats{
+				RSSMB:    num(st, "rss_bytes") / (1 << 20),
+				OpenFDs:  num(st, "open_fds"),
+				StoreMB:  num(st, "pebble_bytes") / (1 << 20),
+				Restarts: num(st, "restarts"),
+			}
+		}
+	}
 	if h, err := fetchJSON(c, d.cfg.Target+"/health"); err == nil {
 		if q, ok := h["queues"].(map[string]any); ok {
 			m.QueueBacklog, _ = q["backlog"].(float64)
 			m.ActiveQueues, _ = q["active"].(float64)
+		} else if line, ok := h["line"].(map[string]any); ok {
+			// Canalis: its line is the backlog that matters.
+			m.QueueBacklog, _ = line["jobs"].(float64)
 		}
 	} else if m.TargetError == "" {
 		m.TargetError = "aquifer: " + err.Error()
@@ -329,6 +373,20 @@ func (o *observer) summarizeHour(start time.Time) hour {
 				h.VolumeFreePct = 100 * num(t, "volume_free_bytes") / total
 			}
 			h.TargetRestarts = num(t, "restarts")
+		}
+		for id, s := range m.Nodes {
+			if h.Nodes == nil {
+				h.Nodes = map[string]nodeHour{}
+			}
+			nh := h.Nodes[id]
+			if s.Down {
+				nh.DownMins++
+			} else {
+				nh.RSSMBEnd, nh.OpenFDsEnd, nh.StoreMBEnd, nh.Restarts = s.RSSMB, s.OpenFDs, s.StoreMB, s.Restarts
+				nh.RSSMBMax = max(nh.RSSMBMax, s.RSSMB)
+				nh.OpenFDsMax = max(nh.OpenFDsMax, s.OpenFDs)
+			}
+			h.Nodes[id] = nh
 		}
 	}
 	if h.Minutes > 0 {
