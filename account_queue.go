@@ -19,6 +19,7 @@ import (
 	"github.com/rjpruitt16/aquifer/internal/env"
 	"github.com/rjpruitt16/aquifer/internal/orca"
 	"github.com/rjpruitt16/aquifer/internal/retry"
+	"github.com/rjpruitt16/aquifer/internal/storage"
 )
 
 const (
@@ -881,7 +882,7 @@ func saveLocalResult(store JobStore, job *Job, status Status, responseStatus int
 	if job.IsWebhookDelivery() {
 		return
 	}
-	truncated, wasTruncated := truncateStringBytes(body, env.Int64("AQUIFER_RESULT_MAX_BYTES", defaultLocalResultMaxBytes))
+	truncated, wasTruncated := storage.TruncateStringBytes(body, env.Int64("AQUIFER_RESULT_MAX_BYTES", defaultLocalResultMaxBytes))
 	store.PutResult(job.ID, JobResult{
 		JobID:          job.ID,
 		Status:         status,
