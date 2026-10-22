@@ -985,7 +985,24 @@ func makeRequest(ctx context.Context, job *Job, dispatchURL string, totalJobs, q
 		req.Header.Set(orca.RequestHeaderName, "text")
 	}
 
-	resp, err := dispatchClient.Do(req)
+	client := dispatchClient
+	if job.PoolID == "" && !job.isWebhookDeliveryJob() {
+		// URL-routed jobs must satisfy the intake allowlist at every hop.
+		// Copy the client so pool and webhook dispatch keep their existing
+		// policy while all dispatches still share the pooled transport.
+		checkedClient := *dispatchClient
+		checkedClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return fmt.Errorf("stopped after 10 redirects")
+			}
+			if !domainAllowed(req.URL.String()) {
+				return fmt.Errorf("redirect url domain is not in the configured allowlist (AQUIFER_ALLOWED_URL_DOMAINS)")
+			}
+			return nil
+		}
+		client = &checkedClient
+	}
+	resp, err := client.Do(req)
 	if err == nil {
 		l8.ObserveSchemaHash(dispatchURL, pacingHeader(resp.Header, "Schema-Hash"))
 	}
