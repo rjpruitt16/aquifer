@@ -1,7 +1,10 @@
 // Copyright 2026 Rahmi Pruitt
 // SPDX-License-Identifier: Apache-2.0
 
-package aquifer
+// Package mcpadapter exposes Aquifer as an MCP server over stdio
+// (AQUIFER_ADAPTER=mcp-stdio): tools to submit and read jobs, and job
+// resources at aquifer://jobs/{job_id}.
+package mcpadapter
 
 import (
 	"bufio"
@@ -11,24 +14,26 @@ import (
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/rjpruitt16/aquifer"
 )
 
 const mcpProtocolVersion = "2025-06-18"
 
-type MCPStdioAdapter struct {
+type Adapter struct {
 	in  io.Reader
 	out io.Writer
 }
 
-func NewMCPStdioAdapter(in io.Reader, out io.Writer) *MCPStdioAdapter {
-	return &MCPStdioAdapter{in: in, out: out}
+func NewAdapter(in io.Reader, out io.Writer) *Adapter {
+	return &Adapter{in: in, out: out}
 }
 
-func (a *MCPStdioAdapter) Name() string {
+func (a *Adapter) Name() string {
 	return "mcp-stdio"
 }
 
-func (a *MCPStdioAdapter) Start(ctx context.Context, aquifer *Aquifer) error {
+func (a *Adapter) Start(ctx context.Context, app *aquifer.Aquifer) error {
 	scanner := bufio.NewScanner(a.in)
 	scanner.Buffer(make([]byte, 1024), 1024*1024*16)
 	encoder := json.NewEncoder(a.out)
@@ -73,7 +78,7 @@ func (a *MCPStdioAdapter) Start(ctx context.Context, aquifer *Aquifer) error {
 				continue
 			}
 
-			result, err := handleMCPRequest(aquifer, req)
+			result, err := handleMCPRequest(app, req)
 			if err != nil {
 				var rpcErr *mcpRPCError
 				if errors.As(err, &rpcErr) {
@@ -132,7 +137,7 @@ func writeMCPError(encoder *json.Encoder, id json.RawMessage, code int, message 
 	})
 }
 
-func handleMCPRequest(aquifer *Aquifer, req mcpRequest) (any, error) {
+func handleMCPRequest(app *aquifer.Aquifer, req mcpRequest) (any, error) {
 	switch req.Method {
 	case "initialize":
 		return map[string]any{
@@ -143,7 +148,7 @@ func handleMCPRequest(aquifer *Aquifer, req mcpRequest) (any, error) {
 			},
 			"serverInfo": map[string]any{
 				"name":    "aquifer",
-				"version": Version,
+				"version": aquifer.Version,
 			},
 		}, nil
 	case "ping":
@@ -155,9 +160,9 @@ func handleMCPRequest(aquifer *Aquifer, req mcpRequest) (any, error) {
 	case "resources/templates/list":
 		return map[string]any{"resourceTemplates": mcpResourceTemplates()}, nil
 	case "resources/read":
-		return readMCPResource(aquifer, req.Params)
+		return readMCPResource(app, req.Params)
 	case "tools/call":
-		return callMCPTool(aquifer, req.Params)
+		return callMCPTool(app, req.Params)
 	default:
 		return nil, &mcpRPCError{Code: -32601, Message: "method not found"}
 	}
@@ -167,7 +172,7 @@ type mcpResourceRead struct {
 	URI string `json:"uri"`
 }
 
-func readMCPResource(aquifer *Aquifer, params json.RawMessage) (any, error) {
+func readMCPResource(app *aquifer.Aquifer, params json.RawMessage) (any, error) {
 	var req mcpResourceRead
 	if err := json.Unmarshal(params, &req); err != nil || req.URI == "" {
 		return nil, &mcpRPCError{Code: -32602, Message: "uri is required"}
@@ -179,7 +184,7 @@ func readMCPResource(aquifer *Aquifer, params json.RawMessage) (any, error) {
 	}
 
 	jobID := strings.TrimPrefix(req.URI, prefix)
-	job, err := aquifer.GetJob(jobID)
+	job, err := app.GetJob(jobID)
 	if err != nil {
 		return nil, &mcpRPCError{Code: -32000, Message: err.Error()}
 	}
@@ -201,7 +206,7 @@ type mcpToolCall struct {
 	Arguments json.RawMessage `json:"arguments,omitempty"`
 }
 
-func callMCPTool(aquifer *Aquifer, params json.RawMessage) (any, error) {
+func callMCPTool(app *aquifer.Aquifer, params json.RawMessage) (any, error) {
 	var call mcpToolCall
 	if err := json.Unmarshal(params, &call); err != nil {
 		return nil, &mcpRPCError{Code: -32602, Message: "invalid tool call params"}
@@ -213,11 +218,11 @@ func callMCPTool(aquifer *Aquifer, params json.RawMessage) (any, error) {
 
 	switch call.Name {
 	case "aquifer_enqueue_job":
-		var req JobRequest
+		var req aquifer.JobRequest
 		if err := json.Unmarshal(call.Arguments, &req); err != nil {
 			return nil, &mcpRPCError{Code: -32602, Message: "invalid aquifer_enqueue_job arguments"}
 		}
-		result, err = aquifer.Enqueue(req)
+		result, err = app.Enqueue(req)
 	case "aquifer_get_job":
 		var args struct {
 			JobID string `json:"job_id"`
@@ -225,21 +230,21 @@ func callMCPTool(aquifer *Aquifer, params json.RawMessage) (any, error) {
 		if err := json.Unmarshal(call.Arguments, &args); err != nil || args.JobID == "" {
 			return nil, &mcpRPCError{Code: -32602, Message: "job_id is required"}
 		}
-		result, err = aquifer.GetJob(args.JobID)
+		result, err = app.GetJob(args.JobID)
 	case "aquifer_health":
-		result = aquifer.Health()
+		result = app.Health()
 	case "aquifer_l8_metadata":
 		var args struct {
 			Host string `json:"host"`
 		}
 		json.Unmarshal(call.Arguments, &args)
-		result = aquifer.L8Metadata(args.Host)
+		result = app.L8Metadata(args.Host)
 	case "aquifer_l8_challenge":
-		var challenge L8ChallengeReq
+		var challenge aquifer.L8ChallengeReq
 		if err := json.Unmarshal(call.Arguments, &challenge); err != nil {
 			return nil, &mcpRPCError{Code: -32602, Message: "invalid aquifer_l8_challenge arguments"}
 		}
-		result, err = aquifer.HandleL8Challenge(challenge)
+		result, err = app.HandleL8Challenge(challenge)
 	default:
 		return nil, &mcpRPCError{Code: -32602, Message: fmt.Sprintf("unknown tool: %s", call.Name)}
 	}
