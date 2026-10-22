@@ -62,6 +62,9 @@ type Manager struct {
 	wg         sync.WaitGroup
 	closeOnce  sync.Once
 	generation atomic.Int64
+	// messages counts every message sessions read, from clients and
+	// backends, for the instance's load (see Messages).
+	messages   atomic.Int64
 	sessionsMu sync.Mutex
 	sessions   map[*webSocketSession]struct{}
 	draining   bool
@@ -226,6 +229,25 @@ func (m *Manager) Snapshot() map[string]any {
 	}
 }
 
+// Messages is how many WebSocket messages sessions have read, from clients
+// and backends, since start.
+func (m *Manager) Messages() int64 {
+	if m == nil {
+		return 0
+	}
+	return m.messages.Load()
+}
+
+// Sessions is how many clients are connected, and the most this instance
+// takes (AQUIFER_WS_MAX_CLIENT_CONNECTIONS).
+func (m *Manager) Sessions() (open, limit int) {
+	if m == nil {
+		return 0, 0
+	}
+	snapshot := m.queue.Snapshot()
+	return snapshot.Clients, snapshot.MaxClients
+}
+
 func (m *Manager) IsDraining() bool {
 	if m == nil {
 		return false
@@ -380,6 +402,7 @@ func (s *webSocketSession) readClient() error {
 		if err != nil {
 			return err
 		}
+		s.manager.messages.Add(1)
 		message, err := decodeClientWebSocketMessage(raw)
 		if err != nil {
 			_ = s.client.WriteJSON(Envelope{Type: "error", Reason: err.Error()})
@@ -572,6 +595,7 @@ func (s *webSocketSession) relayUpstream(upstream *websocket.Conn, generation in
 				errCh <- err
 				return
 			}
+			s.manager.messages.Add(1)
 			message, err := decodeBackendWebSocketMessage(raw)
 			if err != nil {
 				errCh <- err

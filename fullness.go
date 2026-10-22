@@ -75,6 +75,7 @@ func withFullnessHeader(next http.Handler, a *Aquifer) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if a != nil {
 			w.Header().Set(fullnessHeader, strconv.Itoa(a.Fullness()))
+			setLoadHeaders(w.Header(), a.Load())
 		}
 		next.ServeHTTP(w, r)
 	})

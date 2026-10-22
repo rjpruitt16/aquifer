@@ -151,5 +151,14 @@ func (r *Registry) registrationPayload(state LifecycleState) map[string]any {
 	if source, ok := r.fullnessSource.Load().(func() int); ok {
 		payload["fullness"] = source()
 	}
+	// HTTP users and WebSocket sessions, and how many of each fit (see
+	// load.go), so a control plane counts each against its own capacity.
+	if source, ok := r.loadSource.Load().(func() Load); ok {
+		load := source()
+		payload["http_users"] = load.HTTPUsers
+		payload["http_capacity"] = load.HTTPCapacity
+		payload["ws_sessions"] = load.WSSessions
+		payload["ws_capacity"] = load.WSCapacity
+	}
 	return payload
 }

@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
 )
 
 const defaultMaxPendingWebhooksPerUser int64 = 1000
@@ -22,6 +23,9 @@ type userLoad struct {
 type userLoadTracker struct {
 	mu    sync.Mutex
 	users map[string]*userLoad
+	// accepted counts every job and webhook delivery ever added, for the
+	// instance's load (load.go).
+	accepted atomic.Int64
 }
 
 func newUserLoadTracker() *userLoadTracker {
@@ -29,6 +33,7 @@ func newUserLoadTracker() *userLoadTracker {
 }
 
 func (t *userLoadTracker) add(job *Job) {
+	t.accepted.Add(1)
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	load := t.users[job.UserID]
@@ -41,6 +46,13 @@ func (t *userLoadTracker) add(job *Job) {
 	} else {
 		load.jobs++
 	}
+}
+
+// active is how many users have jobs or webhook deliveries still owed.
+func (t *userLoadTracker) active() int64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return int64(len(t.users))
 }
 
 func (t *userLoadTracker) done(job *Job) {

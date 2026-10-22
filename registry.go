@@ -47,11 +47,13 @@ type Registry struct {
 	// which needs the admission limits the registry doesn't own) for the
 	// registration ping. Set after construction, so read atomically.
 	fullnessSource atomic.Value // func() int
-	closeOnce      sync.Once
-	ctx            context.Context
-	cancel         context.CancelFunc
-	stop           chan struct{}
-	wg             sync.WaitGroup
+	// loadSource is Aquifer.Load, for the same reason.
+	loadSource atomic.Value // func() Load
+	closeOnce  sync.Once
+	ctx        context.Context
+	cancel     context.CancelFunc
+	stop       chan struct{}
+	wg         sync.WaitGroup
 }
 
 func (r *Registry) SetClusterRouter(router *ClusterRouter) {
@@ -544,6 +546,31 @@ func (r *Registry) SetFullnessSource(source func() int) {
 	if r != nil && source != nil {
 		r.fullnessSource.Store(source)
 	}
+}
+
+// SetLoadSource gives the registration ping the instance's load (see
+// load.go). Wired by NewAquifer.
+func (r *Registry) SetLoadSource(source func() Load) {
+	if r != nil && source != nil {
+		r.loadSource.Store(source)
+	}
+}
+
+// acceptedJobs is how many jobs and webhook deliveries this instance has
+// accepted since start.
+func (r *Registry) acceptedJobs() int64 {
+	if r == nil {
+		return 0
+	}
+	return r.users.accepted.Load()
+}
+
+// activeUsers is how many users have work still owed on this instance.
+func (r *Registry) activeUsers() int64 {
+	if r == nil {
+		return 0
+	}
+	return r.users.active()
 }
 
 // TargetStats is every target API's live queue state, for /metrics.
