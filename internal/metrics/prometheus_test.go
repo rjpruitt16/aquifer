@@ -4,6 +4,7 @@
 package metrics
 
 import (
+	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -170,5 +171,42 @@ func TestFairnessComparesAgainstAboutAMinuteAgo(t *testing.T) {
 	}
 	if n := len(m.samples["api.example.com"]); n > 2 {
 		t.Fatalf("old samples should be dropped, %d kept", n)
+	}
+}
+
+// URL jobs can name any host, so past the cap new targets share "other"
+// instead of adding series (and map entries) forever.
+func TestMetricsTargetLabelsAreCapped(t *testing.T) {
+	m := newPrometheus(false, maxTenantLabels)
+	m.maxTargets = 2
+	for i := range 50 {
+		target := fmt.Sprintf("https://host-%d.example", i)
+		m.JobWaited("u", target, time.Second)
+		m.DispatchAttempt(target, 200)
+		m.JobFinished("u", target, "completed", time.Second)
+	}
+	if len(m.wait) != 3 || len(m.attempts) != 3 || len(m.jobs) != 3 || len(m.duration) != 3 {
+		t.Fatalf("want 2 targets plus other in every map, got wait=%d attempts=%d jobs=%d duration=%d",
+			len(m.wait), len(m.attempts), len(m.jobs), len(m.duration))
+	}
+	out := render(m, nil)
+	if want := `aquifer_jobs_total{target="other",outcome="completed"} 48`; !strings.Contains(out, want+"\n") {
+		t.Errorf("missing %q in:\n%s", want, out)
+	}
+	if strings.Contains(out, "host-2.example") {
+		t.Errorf("targets past the cap should be counted as other:\n%s", out)
+	}
+}
+
+// Fairness samples are kept only for targets that still have queues.
+func TestFairnessSamplesAreDroppedForGoneTargets(t *testing.T) {
+	m := newPrometheus(false, maxTenantLabels)
+	render(m, []TargetStats{queues(map[string]int64{"a": 1}, map[string]int64{"a": 1})})
+	if len(m.samples) != 1 {
+		t.Fatalf("want one target sampled, got %d", len(m.samples))
+	}
+	render(m, nil)
+	if len(m.samples) != 0 {
+		t.Fatalf("a target with no queues should be dropped, got %d", len(m.samples))
 	}
 }

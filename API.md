@@ -537,7 +537,7 @@ Prometheus text format, on the same port as `/health`. The `aquifer` binary serv
 | `aquifer_fairness_jain` | gauge | `target` | [Jain's index](https://en.wikipedia.org/wiki/Fairness_measure) over queues with work waiting, by jobs each finished in about the last minute. `1` is perfectly even, `1/n` is one queue getting everything. Absent when nothing is waiting. |
 | `aquifer_node_info` | gauge | `node_id` | `1`, carrying the id sent as `X-Aqueduct-Node-Id` |
 
-`target` is the target API's scheme and host (`https://api.example.com`), or `pool:<id>`. There are no tenant labels by default: tenant IDs are unbounded, and often customer data. For a pilot, `AQUIFER_METRICS_TENANT_LABELS=true` adds `aquifer_tenant_jobs_total` and `aquifer_tenant_job_duration_seconds` with a `tenant` (`user_id`) label. The first 1,000 tenants seen get their own label, and the rest share `other`.
+`target` is the target API's scheme and host (`https://api.example.com`), or `pool:<id>`. The first 1,000 targets seen get their own label and the rest share `other`, since URL jobs can name any host. There are no tenant labels by default: tenant IDs are unbounded, and often customer data. For a pilot, `AQUIFER_METRICS_TENANT_LABELS=true` adds `aquifer_tenant_jobs_total` and `aquifer_tenant_job_duration_seconds` with a `tenant` (`user_id`) label. The first 1,000 tenants seen get their own label, and the rest share `other`.
 
 ## GET /ready
 

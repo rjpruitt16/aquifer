@@ -23,10 +23,13 @@ import (
 // Labels are by target API (scheme and host, or pool), never by tenant, unless
 // AQUIFER_METRICS_TENANT_LABELS=true: tenant IDs are unbounded and often
 // customer data. With it on, the first maxTenantLabels tenants seen get
-// their own label and the rest share "other".
+// their own label and the rest share "other". Targets are capped the same
+// way at maxTargetLabels: without AQUIFER_ALLOWED_URL_DOMAINS, URL jobs can
+// name any host, and every counter is kept for the life of the process.
 type Prometheus struct {
 	tenantLabels bool
 	maxTenants   int
+	maxTargets   int
 
 	mu         sync.Mutex
 	jobs       map[[3]string]float64 // target, outcome, tenant ("" when off)
@@ -37,10 +40,14 @@ type Prometheus struct {
 	duration   map[[2]string]*histogram
 	tenantDur  map[[3]string]*histogram // target, outcome, tenant (tenant labels only)
 	tenantSeen map[string]bool
+	targetSeen map[string]bool
 	samples    map[string][]servedSample // target -> recent per-queue served counts
 }
 
-const maxTenantLabels = 1000
+const (
+	maxTenantLabels = 1000
+	maxTargetLabels = 1000
+)
 
 // fairnessWindow is how far back the fairness gauge compares service.
 const fairnessWindow = time.Minute
@@ -81,6 +88,7 @@ func newPrometheus(tenantLabels bool, maxTenants int) *Prometheus {
 	return &Prometheus{
 		tenantLabels: tenantLabels,
 		maxTenants:   maxTenants,
+		maxTargets:   maxTargetLabels,
 		jobs:         map[[3]string]float64{},
 		attempts:     map[[2]string]float64{},
 		rejected:     map[string]float64{},
@@ -89,6 +97,7 @@ func newPrometheus(tenantLabels bool, maxTenants int) *Prometheus {
 		duration:     map[[2]string]*histogram{},
 		tenantDur:    map[[3]string]*histogram{},
 		tenantSeen:   map[string]bool{},
+		targetSeen:   map[string]bool{},
 		samples:      map[string][]servedSample{},
 	}
 }
@@ -104,6 +113,19 @@ func (m *Prometheus) tenantLocked(userID string) string {
 	if len(m.tenantSeen) < m.maxTenants {
 		m.tenantSeen[userID] = true
 		return userID
+	}
+	return "other"
+}
+
+// targetLocked is the target label for upstream: itself for the first
+// maxTargets targets seen, "other" after that.
+func (m *Prometheus) targetLocked(upstream string) string {
+	if m.targetSeen[upstream] {
+		return upstream
+	}
+	if len(m.targetSeen) < m.maxTargets {
+		m.targetSeen[upstream] = true
+		return upstream
 	}
 	return "other"
 }
@@ -137,6 +159,7 @@ func (m *Prometheus) DrainFlushFailed(instanceKey string, ledgerSize int)    {}
 func (m *Prometheus) JobWaited(userID, upstream string, wait time.Duration) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	upstream = m.targetLocked(upstream)
 	h := m.wait[upstream]
 	if h == nil {
 		h = newHistogram()
@@ -148,6 +171,7 @@ func (m *Prometheus) JobWaited(userID, upstream string, wait time.Duration) {
 func (m *Prometheus) JobFinished(userID, upstream, outcome string, total time.Duration) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	upstream = m.targetLocked(upstream)
 	m.jobs[[3]string{upstream, outcome, m.tenantLocked(userID)}]++
 	key := [2]string{upstream, outcome}
 	h := m.duration[key]
@@ -170,7 +194,7 @@ func (m *Prometheus) JobFinished(userID, upstream, outcome string, total time.Du
 func (m *Prometheus) DispatchAttempt(upstream string, status int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.attempts[[2]string{upstream, statusClass(status)}]++
+	m.attempts[[2]string{m.targetLocked(upstream), statusClass(status)}]++
 }
 
 func (m *Prometheus) AdmissionRejected(reason string) {
@@ -200,6 +224,20 @@ func statusClass(status int) string {
 // within the window are left out, since a newcomer's short history would
 // look like unfairness. ok is false when there's nothing to compare: no
 // queue waiting, or none served.
+// pruneSamplesLocked drops fairness samples for targets that no longer have
+// queues on this node, so they don't pile up as targets come and go.
+func (m *Prometheus) pruneSamplesLocked(targets []TargetStats) {
+	live := make(map[string]bool, len(targets))
+	for _, t := range targets {
+		live[t.Target] = true
+	}
+	for target := range m.samples {
+		if !live[target] {
+			delete(m.samples, target)
+		}
+	}
+}
+
 func (m *Prometheus) fairnessLocked(stats TargetStats, now time.Time) (index float64, ok bool) {
 	current := servedSample{at: now, served: make(map[string]int64, len(stats.Queues))}
 	for _, q := range stats.Queues {
@@ -251,6 +289,7 @@ func (m *Prometheus) Write(w io.Writer, nodeID string, targets []TargetStats) {
 	defer m.mu.Unlock()
 	now := time.Now()
 	sort.Slice(targets, func(i, j int) bool { return targets[i].Target < targets[j].Target })
+	m.pruneSamplesLocked(targets)
 
 	fmt.Fprintf(w, "# HELP aquifer_node_info This node's id, as sent to backends in X-Aqueduct-Node-Id.\n# TYPE aquifer_node_info gauge\n")
 	fmt.Fprintf(w, "aquifer_node_info{node_id=%s} 1\n", quote(nodeID))
