@@ -1,7 +1,7 @@
 // Copyright 2026 Rahmi Pruitt
 // SPDX-License-Identifier: Apache-2.0
 
-package aquifer
+package storage
 
 import (
 	"bufio"
@@ -19,6 +19,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/rjpruitt16/aquifer/internal/cluster"
 	"github.com/rjpruitt16/aquifer/internal/env"
+	"github.com/rjpruitt16/aquifer/internal/jobs"
 )
 
 const (
@@ -34,28 +35,28 @@ const (
 	remoteIdempotencyMinIdle     = 2
 )
 
-type RemoteIdempotencyEntry struct {
-	JobID      string `json:"job_id"`
-	Status     Status `json:"status"`
-	RecordedAt int64  `json:"recorded_at"`
-	Source     string `json:"source"`
-	ResultKey  string `json:"result_key,omitempty"`
+type RemoteEntry struct {
+	JobID      string      `json:"job_id"`
+	Status     jobs.Status `json:"status"`
+	RecordedAt int64       `json:"recorded_at"`
+	Source     string      `json:"source"`
+	ResultKey  string      `json:"result_key,omitempty"`
 }
 
-type RemoteIdempotency interface {
-	Lookup(hash string) (RemoteIdempotencyEntry, bool)
-	Record(events []DrainEvent) bool
+type Remote interface {
+	Lookup(hash string) (RemoteEntry, bool)
+	Record(events []jobs.DrainEvent) bool
 }
 
-type JobResultRecorder interface {
-	RecordResult(hash string, result JobResult) (string, bool)
+type ResultRecorder interface {
+	RecordResult(hash string, result jobs.Result) (string, bool)
 }
 
-type JobResultReader interface {
-	LookupResult(hash string) (JobResult, bool)
+type ResultReader interface {
+	LookupResult(hash string) (jobs.Result, bool)
 }
 
-type RemoteIdempotencyConfig struct {
+type RemoteConfig struct {
 	Enabled        bool
 	URL            string
 	Timeout        time.Duration
@@ -66,7 +67,7 @@ type RemoteIdempotencyConfig struct {
 	ResultMaxBytes int64
 }
 
-func LoadRemoteIdempotencyConfig() RemoteIdempotencyConfig {
+func LoadRemoteConfig() RemoteConfig {
 	timeoutMS := env.Int64("AQUIFER_REMOTE_IDEMPOTENCY_TIMEOUT_MS", defaultRemoteIdempotencyTimeoutMS)
 	if timeoutMS <= 0 {
 		timeoutMS = defaultRemoteIdempotencyTimeoutMS
@@ -88,7 +89,7 @@ func LoadRemoteIdempotencyConfig() RemoteIdempotencyConfig {
 		maxBytes = defaultRemoteResultMaxBytes
 	}
 
-	return RemoteIdempotencyConfig{
+	return RemoteConfig{
 		Enabled:        env.Bool("AQUIFER_REMOTE_IDEMPOTENCY_ENABLED", false) || strings.EqualFold(os.Getenv("AQUIFER_DRAIN_SINK"), "valkey"),
 		URL:            os.Getenv("AQUIFER_VALKEY_URL"),
 		Timeout:        time.Duration(timeoutMS) * time.Millisecond,
@@ -100,12 +101,12 @@ func LoadRemoteIdempotencyConfig() RemoteIdempotencyConfig {
 	}
 }
 
-type ValkeyRemoteIdempotency struct {
-	cfg    RemoteIdempotencyConfig
+type ValkeyRemote struct {
+	cfg    RemoteConfig
 	client *redis.Client
 }
 
-func NewValkeyRemoteIdempotency(cfg RemoteIdempotencyConfig) RemoteIdempotency {
+func NewValkeyRemote(cfg RemoteConfig) Remote {
 	if !cfg.Enabled {
 		return nil
 	}
@@ -125,21 +126,21 @@ func NewValkeyRemoteIdempotency(cfg RemoteIdempotencyConfig) RemoteIdempotency {
 	if cfg.TTLSeconds <= 0 {
 		cfg.TTLSeconds = defaultRemoteIdempotencyTTLSeconds
 	}
-	client, err := newRemoteIdempotencyClient(cfg)
+	client, err := newRemoteClient(cfg)
 	if err != nil {
 		log.Printf("remote idempotency: %v", err)
 		return nil
 	}
-	return &ValkeyRemoteIdempotency{cfg: cfg, client: client}
+	return &ValkeyRemote{cfg: cfg, client: client}
 }
 
-// newRemoteIdempotencyClient builds one pooled client for the life of the
+// newRemoteClient builds one pooled client for the life of the
 // process. Each lookup used to dial, authenticate and close its own TCP
 // connection; at a few hundred jobs per second that filled the kernel's
 // TIME_WAIT table and pushed DNS plus dial past the lookup timeout, so the
 // cross-node check silently fell back to local-only exactly when load was
 // highest.
-func newRemoteIdempotencyClient(cfg RemoteIdempotencyConfig) (*redis.Client, error) {
+func newRemoteClient(cfg RemoteConfig) (*redis.Client, error) {
 	normalized, err := cluster.NormalizeValkeyURL(cfg.URL)
 	if err != nil {
 		return nil, err
@@ -157,29 +158,29 @@ func newRemoteIdempotencyClient(cfg RemoteIdempotencyConfig) (*redis.Client, err
 	return redis.NewClient(opts), nil
 }
 
-func (v *ValkeyRemoteIdempotency) Lookup(hash string) (RemoteIdempotencyEntry, bool) {
+func (v *ValkeyRemote) Lookup(hash string) (RemoteEntry, bool) {
 	raw, err := v.command("GET", v.cfg.Prefix+hash)
 	if err != nil {
 		log.Printf("remote idempotency: lookup failed: %v", err)
-		return RemoteIdempotencyEntry{}, false
+		return RemoteEntry{}, false
 	}
 	if raw == "" {
-		return RemoteIdempotencyEntry{}, false
+		return RemoteEntry{}, false
 	}
-	var entry RemoteIdempotencyEntry
+	var entry RemoteEntry
 	if err := json.Unmarshal([]byte(raw), &entry); err != nil {
 		log.Printf("remote idempotency: invalid entry for %s: %v", hash, err)
-		return RemoteIdempotencyEntry{}, false
+		return RemoteEntry{}, false
 	}
 	if entry.JobID == "" {
-		return RemoteIdempotencyEntry{}, false
+		return RemoteEntry{}, false
 	}
 	return entry, true
 }
 
-func (v *ValkeyRemoteIdempotency) Record(events []DrainEvent) bool {
+func (v *ValkeyRemote) Record(events []jobs.DrainEvent) bool {
 	for _, event := range events {
-		entry := RemoteIdempotencyEntry{
+		entry := RemoteEntry{
 			JobID:      event.JobID,
 			Status:     event.Status,
 			RecordedAt: event.RecordedAt,
@@ -201,12 +202,12 @@ func (v *ValkeyRemoteIdempotency) Record(events []DrainEvent) bool {
 	return true
 }
 
-func (v *ValkeyRemoteIdempotency) RecordResult(hash string, result JobResult) (string, bool) {
+func (v *ValkeyRemote) RecordResult(hash string, result jobs.Result) (string, bool) {
 	if !v.cfg.ResultEnabled {
 		return "", false
 	}
 	key := v.cfg.ResultPrefix + hash
-	result.Body, result.BodyTruncated = truncateStringBytes(result.Body, v.cfg.ResultMaxBytes)
+	result.Body, result.BodyTruncated = TruncateStringBytes(result.Body, v.cfg.ResultMaxBytes)
 	if result.Source == "" {
 		result.Source = "aquifer"
 	}
@@ -225,27 +226,28 @@ func (v *ValkeyRemoteIdempotency) RecordResult(hash string, result JobResult) (s
 	return key, true
 }
 
-func (v *ValkeyRemoteIdempotency) LookupResult(hash string) (JobResult, bool) {
+func (v *ValkeyRemote) LookupResult(hash string) (jobs.Result, bool) {
 	raw, err := v.command("GET", v.cfg.ResultPrefix+hash)
 	if err != nil {
 		log.Printf("remote result: lookup failed: %v", err)
-		return JobResult{}, false
+		return jobs.Result{}, false
 	}
 	if raw == "" {
-		return JobResult{}, false
+		return jobs.Result{}, false
 	}
-	var result JobResult
+	var result jobs.Result
 	if err := json.Unmarshal([]byte(raw), &result); err != nil {
 		log.Printf("remote result: invalid entry for %s: %v", hash, err)
-		return JobResult{}, false
+		return jobs.Result{}, false
 	}
 	if result.JobID == "" {
-		return JobResult{}, false
+		return jobs.Result{}, false
 	}
 	return result, true
 }
 
-func truncateStringBytes(s string, maxBytes int64) (string, bool) {
+// TruncateStringBytes cuts s to at most maxBytes, reporting whether it did.
+func TruncateStringBytes(s string, maxBytes int64) (string, bool) {
 	if maxBytes == 0 {
 		return "", s != ""
 	}
@@ -255,7 +257,7 @@ func truncateStringBytes(s string, maxBytes int64) (string, bool) {
 	return s[:maxBytes], true
 }
 
-func (v *ValkeyRemoteIdempotency) command(args ...string) (string, error) {
+func (v *ValkeyRemote) command(args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), v.cfg.Timeout)
 	defer cancel()
 	cmdArgs := make([]any, len(args))
