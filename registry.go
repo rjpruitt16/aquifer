@@ -9,6 +9,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/rjpruitt16/aquifer/internal/admission"
 )
 
 type Registry struct {
@@ -321,7 +323,7 @@ func (r *Registry) enqueue(job *Job, accountQueueHeader string, enforceAdmission
 	// userLoadTracker has its own lock, so this runs before the registry
 	// lock (which now covers only resolving the worker).
 	if enforceAdmission && !job.isWebhookDeliveryJob() {
-		if rejected, limit, backlog := r.users.webhookBacklogDecision(job.UserID, randomAdmissionDraw()); rejected {
+		if rejected, limit, backlog := r.users.webhookBacklogDecision(job.UserID, admission.RandomDraw()); rejected {
 			return QueueSnapshot{}, &AdmissionRejectedError{Decision: AdmissionDecision{
 				Allowed: false,
 				Reason:  "webhook_backlog",

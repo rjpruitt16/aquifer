@@ -1,7 +1,7 @@
 // Copyright 2026 Rahmi Pruitt
 // SPDX-License-Identifier: Apache-2.0
 
-package aquifer
+package admission
 
 import (
 	"math"
@@ -12,8 +12,11 @@ import (
 
 const (
 	defaultMaxPendingPerUpstream int64 = 10_000
-	fairAdmissionStart                 = 0.70
 )
+
+// FairStart is the share of a target API's backlog budget at which fair
+// admission starts turning work away.
+const FairStart = 0.70
 
 // QueueSnapshot is the per-target-API state used for fair admission and
 // returned to callers as response headers. Counts include the request being
@@ -27,13 +30,13 @@ type QueueSnapshot struct {
 	RejectionProbability float64 `json:"-"`
 }
 
-type FairAdmissionDecision struct {
+type FairDecision struct {
 	Allowed  bool
 	Reason   string
 	Snapshot QueueSnapshot
 }
 
-func configuredMaxPendingPerUpstream() int64 {
+func MaxPendingPerUpstream() int64 {
 	raw := os.Getenv("AQUIFER_MAX_PENDING_PER_UPSTREAM")
 	if raw == "" {
 		return defaultMaxPendingPerUpstream
@@ -45,7 +48,7 @@ func configuredMaxPendingPerUpstream() int64 {
 	return value
 }
 
-func decideFairAdmission(queuePending, totalPending int64, activeQueues int, maxBacklog int64, draw float64) FairAdmissionDecision {
+func DecideFair(queuePending, totalPending int64, activeQueues int, maxBacklog int64, draw float64) FairDecision {
 	if activeQueues < 1 {
 		activeQueues = 1
 	}
@@ -60,35 +63,35 @@ func decideFairAdmission(queuePending, totalPending int64, activeQueues int, max
 	}
 
 	if maxBacklog <= 0 {
-		return FairAdmissionDecision{Allowed: true, Snapshot: snapshot}
+		return FairDecision{Allowed: true, Snapshot: snapshot}
 	}
 	if projectedTotal > maxBacklog {
 		snapshot.AdmissionPressure = 1
 		snapshot.RejectionProbability = 1
-		return FairAdmissionDecision{Allowed: false, Reason: "upstream_queue", Snapshot: snapshot}
+		return FairDecision{Allowed: false, Reason: "upstream_queue", Snapshot: snapshot}
 	}
 	if activeQueues == 1 {
-		return FairAdmissionDecision{Allowed: true, Snapshot: snapshot}
+		return FairDecision{Allowed: true, Snapshot: snapshot}
 	}
 
-	start := fairAdmissionStart * float64(maxBacklog)
-	pressure := clampFloat((float64(projectedTotal)-start)/(float64(maxBacklog)-start), 0, 1)
+	start := FairStart * float64(maxBacklog)
+	pressure := Clamp((float64(projectedTotal)-start)/(float64(maxBacklog)-start), 0, 1)
 	fairShare := float64(maxBacklog) / float64(activeQueues)
-	excess := clampFloat((float64(projectedQueue)-fairShare)/(float64(maxBacklog)-fairShare), 0, 1)
+	excess := Clamp((float64(projectedQueue)-fairShare)/(float64(maxBacklog)-fairShare), 0, 1)
 	probability := pressure * excess
 
 	snapshot.AdmissionPressure = pressure
 	snapshot.RejectionProbability = probability
-	if probability > 0 && clampFloat(draw, 0, math.Nextafter(1, 0)) < probability {
-		return FairAdmissionDecision{Allowed: false, Reason: "queue_fair_share", Snapshot: snapshot}
+	if probability > 0 && Clamp(draw, 0, math.Nextafter(1, 0)) < probability {
+		return FairDecision{Allowed: false, Reason: "queue_fair_share", Snapshot: snapshot}
 	}
-	return FairAdmissionDecision{Allowed: true, Snapshot: snapshot}
+	return FairDecision{Allowed: true, Snapshot: snapshot}
 }
 
-func randomAdmissionDraw() float64 {
+func RandomDraw() float64 {
 	return rand.Float64()
 }
 
-func clampFloat(value, low, high float64) float64 {
+func Clamp(value, low, high float64) float64 {
 	return math.Max(low, math.Min(value, high))
 }
