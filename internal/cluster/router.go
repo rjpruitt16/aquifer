@@ -458,9 +458,10 @@ func (r *Router) syncState() {
 		err := r.stateStore.Release(ctx, key, r.self.ID)
 		cancel()
 		if err != nil {
+			// Forget the scope anyway. Its assignment in the store expires
+			// on its own after assignmentTTL, and keeping it here while the
+			// store is down would grow by one entry per idle user.
 			r.storeErrors.Add(1)
-			scopeLock.Unlock()
-			continue
 		}
 		r.mu.Lock()
 		delete(r.localScopes, key)
@@ -561,6 +562,7 @@ func (r *Router) Snapshot() map[string]any {
 	}
 	r.mu.Lock()
 	members := len(r.members)
+	tracked := len(r.localScopes)
 	active := r.activeScopeCountLocked(time.Now())
 	state := r.nodeState
 	self := r.self
@@ -578,6 +580,7 @@ func (r *Router) Snapshot() map[string]any {
 		"provider":              r.provider,
 		"state":                 state,
 		"active_users":          active,
+		"tracked_scopes":        tracked,
 		"user_capacity":         r.self.Capacity,
 		"prune_ttl_seconds":     int64(r.pruneTTL / time.Second),
 		"pruned_members":        r.prunedCount(),

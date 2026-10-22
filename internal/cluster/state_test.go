@@ -6,6 +6,7 @@ package cluster
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strconv"
 	"sync"
@@ -19,6 +20,7 @@ type fakeClusterStateStore struct {
 	assignments    map[string]Member
 	assignOverride *Member
 	assignErr      error
+	releaseErr     error
 	heartbeats     []Member
 	renewed        []string
 	released       []string
@@ -84,6 +86,9 @@ func (s *fakeClusterStateStore) Renew(_ context.Context, scopes []string, _ stri
 func (s *fakeClusterStateStore) Release(_ context.Context, scope, nodeID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.releaseErr != nil {
+		return s.releaseErr
+	}
 	if assigned, ok := s.assignments[scope]; ok && assigned.ID == nodeID {
 		delete(s.assignments, scope)
 	}
@@ -315,5 +320,32 @@ func TestValkeyClusterConcurrentClaimsCapacityAndDraining(t *testing.T) {
 	owner, err = store.Assign(ctx, "overflow-user", members, time.Minute)
 	if err != nil || owner.ID != "node-b" {
 		t.Fatalf("expected least-loaded active fallback node-b, got %+v, err=%v", owner, err)
+	}
+}
+
+// While the store is failing, idle scopes are still forgotten locally: their
+// assignments expire in the store on their own, and keeping them here would
+// grow by one entry per user for as long as the outage lasts.
+func TestClusterRouterForgetsIdleScopesWhileTheStoreFails(t *testing.T) {
+	self := Member{ID: "node-a", Address: "http://node-a", Capacity: 1000}
+	store := newFakeClusterStateStore(self)
+	store.assignErr = errors.New("valkey down")
+	store.releaseErr = errors.New("valkey down")
+	router := coordinatedTestRouter(t, store, self)
+	router.idleTTL = time.Millisecond
+
+	for i := range 50 {
+		key := fmt.Sprintf("user-%d", i)
+		if owner, ok := router.ResolveOwner(key, nil); !ok || owner.ID != self.ID {
+			t.Fatalf("%s: want local owner while the store is down, got %+v %v", key, owner, ok)
+		}
+	}
+	if got := router.Snapshot()["tracked_scopes"]; got != 50 {
+		t.Fatalf("want 50 tracked scopes before they go idle, got %v", got)
+	}
+	time.Sleep(5 * time.Millisecond)
+	router.syncState()
+	if got := router.Snapshot()["tracked_scopes"]; got != 0 {
+		t.Fatalf("idle scopes should be forgotten even when Release fails, got %v", got)
 	}
 }
