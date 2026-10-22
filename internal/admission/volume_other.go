@@ -3,7 +3,7 @@
 
 //go:build !unix
 
-package aquifer
+package admission
 
 // volumeAvailableBytes isn't implemented off Unix; the DB ceiling falls back
 // to defaultDBMaxBytes there.

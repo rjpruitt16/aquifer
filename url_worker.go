@@ -16,6 +16,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/rjpruitt16/aquifer/internal/admission"
 )
 
 type URLWorker struct {
@@ -139,7 +141,7 @@ func NewURLWorker(domain string, rps float64, maxConc int, pool *Pool, store Job
 		stop:           make(chan struct{}),
 		done:           make(chan struct{}),
 	}
-	w.maxBacklog.Store(configuredMaxPendingPerUpstream())
+	w.maxBacklog.Store(admission.MaxPendingPerUpstream())
 	go w.enforceAggregateBudget()
 	return w
 }
@@ -318,7 +320,7 @@ func (w *URLWorker) reserve(job *Job, enforceAdmission bool) (*AccountQueue, Que
 		}
 
 		maxBacklog := w.maxBacklog.Load()
-		decision := decideFairAdmission(queuePending, totalPending, activeQueues, maxBacklog, randomAdmissionDraw())
+		decision := admission.DecideFair(queuePending, totalPending, activeQueues, maxBacklog, admission.RandomDraw())
 		if !decision.Allowed {
 			snapshot := decision.Snapshot
 			return nil, snapshot, &AdmissionRejectedError{Decision: AdmissionDecision{
@@ -387,8 +389,8 @@ func (w *URLWorker) snapshotForQueueLocked(key string) QueueSnapshot {
 		snapshot.QueueBacklog = snapshot.UpstreamBacklog
 	}
 	if snapshot.MaxBacklog > 0 {
-		start := fairAdmissionStart * float64(snapshot.MaxBacklog)
-		snapshot.AdmissionPressure = clampFloat((float64(snapshot.UpstreamBacklog)-start)/(float64(snapshot.MaxBacklog)-start), 0, 1)
+		start := admission.FairStart * float64(snapshot.MaxBacklog)
+		snapshot.AdmissionPressure = admission.Clamp((float64(snapshot.UpstreamBacklog)-start)/(float64(snapshot.MaxBacklog)-start), 0, 1)
 	}
 	return snapshot
 }

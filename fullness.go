@@ -7,6 +7,8 @@ import (
 	"math"
 	"net/http"
 	"strconv"
+
+	"github.com/rjpruitt16/aquifer/internal/admission"
 )
 
 // fullnessHeader tells whoever is in front of this instance -- a gateway
@@ -29,14 +31,14 @@ const fullnessHeader = "X-Aqueduct-Fullness"
 // the first queued job, so a caller can see an instance filling up before
 // it starts pushing back.
 //
-// Sampled at most once per admissionSampleTTL: it goes on every response,
+// Sampled at most once per admission.SampleTTL: it goes on every response,
 // and the readings behind it aren't free.
 func (a *Aquifer) Fullness() int {
 	if a == nil {
 		return 0
 	}
-	return int(a.fullnessSample.get(func() int64 {
-		ratio := a.admission.fullnessRatio()
+	return int(a.fullnessSample.Get(func() int64 {
+		ratio := a.admission.FullnessRatio()
 		if a.registry != nil {
 			ratio = math.Max(ratio, a.registry.backlogFullnessRatio())
 		}
@@ -45,27 +47,7 @@ func (a *Aquifer) Fullness() int {
 }
 
 func fullnessPercent(ratio float64) int64 {
-	return int64(math.Round(clampFloat(ratio, 0, 1) * 100))
-}
-
-// fullnessRatio is the highest of memory use, database size and WAL sync
-// lag against their configured limits, reusing the same samples Check uses.
-func (c *AdmissionController) fullnessRatio() float64 {
-	if c == nil {
-		return 0
-	}
-	var ratio float64
-	if c.limits.MemoryLimitMB > 0 {
-		ratio = math.Max(ratio, float64(c.memSample.get(processMemoryMB))/float64(c.limits.MemoryLimitMB))
-	}
-	if c.limits.DBMaxBytes > 0 && c.dbPath != "" {
-		size := c.dbSample.get(func() int64 { return dbSizeBytes(c.dbPath) })
-		ratio = math.Max(ratio, float64(size)/float64(c.limits.DBMaxBytes))
-	}
-	if c.limits.MaxSyncLagMS > 0 {
-		ratio = math.Max(ratio, float64(c.syncLagMS())/float64(c.limits.MaxSyncLagMS))
-	}
-	return ratio
+	return int64(math.Round(admission.Clamp(ratio, 0, 1) * 100))
 }
 
 // backlogFullnessRatio is the fullest target API's backlog against its own

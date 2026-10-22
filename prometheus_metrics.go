@@ -6,6 +6,7 @@ package aquifer
 import (
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"sort"
 	"strconv"
@@ -376,3 +377,5 @@ func sortedKeys3[V any](m map[[3]string]V) [][3]string {
 	})
 	return keys
 }
+
+func round2(v float64) float64 { return math.Round(v*100) / 100 }
