@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/rjpruitt16/aquifer/internal/orca"
 )
 
 func proxyJobRequest(userID, idempotentKey, url string) JobRequest {
@@ -43,8 +45,8 @@ func TestIsOverloadSignal(t *testing.T) {
 		// normal, if unfortunate, direct response.
 		{"500 not overload by default", 500, nil, false, ""},
 		{"502 not overload by default", 502, nil, false, ""},
-		{"200 with orca overload header is reroute-eligible", 200, map[string]string{orcaHeaderName: "TEXT named_metrics.kv_cache_usage_perc=0.95"}, true, "reroute"},
-		{"200 with orca healthy header", 200, map[string]string{orcaHeaderName: "TEXT named_metrics.kv_cache_usage_perc=0.10"}, false, ""},
+		{"200 with orca overload header is reroute-eligible", 200, map[string]string{orca.HeaderName: "TEXT named_metrics.kv_cache_usage_perc=0.95"}, true, "reroute"},
+		{"200 with orca healthy header", 200, map[string]string{orca.HeaderName: "TEXT named_metrics.kv_cache_usage_perc=0.10"}, false, ""},
 		{"upstream widens reroute codes to 5xx", 500, map[string]string{"X-Aqueduct-Reroute-Codes": "5xx"}, true, "reroute"},
 		{"upstream configures a custom queue code", 529, map[string]string{"X-Aqueduct-Queue-Codes": "429,529"}, true, "queue"},
 	}

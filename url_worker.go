@@ -508,25 +508,6 @@ func sha256String(s string) string {
 	return hex.EncodeToString(h[:])
 }
 
-// QueueStat is one account queue, for /metrics. Key is the queue's hashed
-// (user_id, API key), never the plaintext.
-type QueueStat struct {
-	Key     string
-	Backlog int64
-	RPS     float64
-	Served  int64
-}
-
-// TargetStats is one target API (or pool) on this node, for /metrics.
-type TargetStats struct {
-	Target       string
-	ActiveQueues int
-	Backlog      int64
-	// FlowRate is the sum of the active queues' current dispatch rates.
-	FlowRate float64
-	Queues   []QueueStat
-}
-
 func (w *URLWorker) Stats() TargetStats {
 	w.mu.Lock()
 	defer w.mu.Unlock()

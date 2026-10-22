@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/rjpruitt16/aquifer/internal/orca"
 )
 
 type fakeJobResultRecorder struct {
@@ -34,7 +36,7 @@ func (f *fakeJobResultRecorder) RecordResult(hash string, result JobResult) (str
 func TestMakeRequestRequestsOrcaMetricsByDefault(t *testing.T) {
 	var got string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got = r.Header.Get(orcaRequestHeaderName)
+		got = r.Header.Get(orca.RequestHeaderName)
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
@@ -47,21 +49,21 @@ func TestMakeRequestRequestsOrcaMetricsByDefault(t *testing.T) {
 	defer resp.Body.Close()
 
 	if got != "text" {
-		t.Fatalf("expected %q request header to be %q, got %q", orcaRequestHeaderName, "text", got)
+		t.Fatalf("expected %q request header to be %q, got %q", orca.RequestHeaderName, "text", got)
 	}
 }
 
 func TestMakeRequestDoesNotOverrideExplicitOrcaHeader(t *testing.T) {
 	var got string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got = r.Header.Get(orcaRequestHeaderName)
+		got = r.Header.Get(orca.RequestHeaderName)
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
 
 	job := &Job{
 		Method:  "POST",
-		Headers: map[string]string{orcaRequestHeaderName: "JSON"},
+		Headers: map[string]string{orca.RequestHeaderName: "JSON"},
 	}
 	resp, err := makeRequest(context.Background(), job, srv.URL, 0, 0, 0, 0, 0, nil)
 	if err != nil {

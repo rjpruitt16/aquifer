@@ -3,7 +3,22 @@
 
 package aquifer
 
-import "time"
+import (
+	"time"
+
+	"github.com/rjpruitt16/aquifer/internal/metrics"
+)
+
+// The built-in Prometheus adapter lives in internal/metrics. These names
+// keep it reachable for embedding applications.
+type (
+	PrometheusMetrics = metrics.Prometheus
+	TargetStats       = metrics.TargetStats
+	QueueStat         = metrics.QueueStat
+)
+
+// NewPrometheusMetrics reads AQUIFER_METRICS_TENANT_LABELS.
+func NewPrometheusMetrics() *PrometheusMetrics { return metrics.NewPrometheus() }
 
 type MetricsAdapter interface {
 	JobQueued(userID, upstream string)

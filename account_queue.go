@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/rjpruitt16/aquifer/internal/env"
+	"github.com/rjpruitt16/aquifer/internal/orca"
 	"github.com/rjpruitt16/aquifer/internal/retry"
 )
 
@@ -801,7 +802,7 @@ func pacingSignals(header http.Header) jobDoneMsg {
 		var rps float64
 		fmt.Sscanf(val, "%f", &rps)
 		msg.rps = &rps
-	} else if rps := orcaRps(header); rps != nil {
+	} else if rps := orca.Rps(header); rps != nil {
 		// No explicit Aqueduct directive on this response -- fall back to an
 		// ORCA endpoint-load-metrics header if the backend (e.g. vLLM with
 		// --orca_formats) sent one. An explicit X-Aqueduct-Rps always wins.
@@ -979,8 +980,8 @@ func makeRequest(ctx context.Context, job *Job, dispatchURL string, totalJobs, q
 	// only accepts the lowercase literal -- sending "TEXT" makes Triton log
 	// an error and write no header at all. Lowercase is the one value both
 	// verified backends actually accept.
-	if req.Header.Get(orcaRequestHeaderName) == "" {
-		req.Header.Set(orcaRequestHeaderName, "text")
+	if req.Header.Get(orca.RequestHeaderName) == "" {
+		req.Header.Set(orca.RequestHeaderName, "text")
 	}
 
 	resp, err := dispatchClient.Do(req)

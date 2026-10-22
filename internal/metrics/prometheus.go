@@ -1,7 +1,7 @@
 // Copyright 2026 Rahmi Pruitt
 // SPDX-License-Identifier: Apache-2.0
 
-package aquifer
+package metrics
 
 import (
 	"fmt"
@@ -15,16 +15,16 @@ import (
 	"time"
 )
 
-// PrometheusMetrics is the built-in MetricsAdapter behind GET /metrics, in
+// Prometheus is the built-in MetricsAdapter behind GET /metrics, in
 // Prometheus text format. The aquifer binary uses it by default; a program
-// embedding Aquifer opts in by passing NewPrometheusMetrics() as
+// embedding Aquifer opts in by passing NewPrometheus() as
 // RuntimeOptions.Metrics.
 //
 // Labels are by target API (scheme and host, or pool), never by tenant, unless
 // AQUIFER_METRICS_TENANT_LABELS=true: tenant IDs are unbounded and often
 // customer data. With it on, the first maxTenantLabels tenants seen get
 // their own label and the rest share "other".
-type PrometheusMetrics struct {
+type Prometheus struct {
 	tenantLabels bool
 	maxTenants   int
 
@@ -71,14 +71,14 @@ type servedSample struct {
 	served map[string]int64
 }
 
-// NewPrometheusMetrics reads AQUIFER_METRICS_TENANT_LABELS.
-func NewPrometheusMetrics() *PrometheusMetrics {
+// NewPrometheus reads AQUIFER_METRICS_TENANT_LABELS.
+func NewPrometheus() *Prometheus {
 	on, _ := strconv.ParseBool(strings.TrimSpace(os.Getenv("AQUIFER_METRICS_TENANT_LABELS")))
-	return newPrometheusMetrics(on, maxTenantLabels)
+	return newPrometheus(on, maxTenantLabels)
 }
 
-func newPrometheusMetrics(tenantLabels bool, maxTenants int) *PrometheusMetrics {
-	return &PrometheusMetrics{
+func newPrometheus(tenantLabels bool, maxTenants int) *Prometheus {
+	return &Prometheus{
 		tenantLabels: tenantLabels,
 		maxTenants:   maxTenants,
 		jobs:         map[[3]string]float64{},
@@ -94,7 +94,7 @@ func newPrometheusMetrics(tenantLabels bool, maxTenants int) *PrometheusMetrics 
 }
 
 // tenantLocked is the tenant label for userID: "" with tenant labels off.
-func (m *PrometheusMetrics) tenantLocked(userID string) string {
+func (m *Prometheus) tenantLocked(userID string) string {
 	if !m.tenantLabels {
 		return ""
 	}
@@ -113,14 +113,14 @@ func (m *PrometheusMetrics) tenantLocked(userID string) string {
 // WebhookDelivered and WebhookFailed are registration pings and drain-mode
 // ledger flushes, not completion webhooks; those come from
 // WebhookJobFinished.
-func (m *PrometheusMetrics) JobQueued(userID, upstream string)                      {}
-func (m *PrometheusMetrics) JobDispatched(userID, upstream string)                  {}
-func (m *PrometheusMetrics) JobCompleted(userID, upstream string, durationMs int64) {}
-func (m *PrometheusMetrics) JobFailed(userID, upstream string, reason string)       {}
-func (m *PrometheusMetrics) WebhookDelivered(url string, attempt int)               {}
-func (m *PrometheusMetrics) WebhookFailed(url string, attempts int)                 {}
+func (m *Prometheus) JobQueued(userID, upstream string)                      {}
+func (m *Prometheus) JobDispatched(userID, upstream string)                  {}
+func (m *Prometheus) JobCompleted(userID, upstream string, durationMs int64) {}
+func (m *Prometheus) JobFailed(userID, upstream string, reason string)       {}
+func (m *Prometheus) WebhookDelivered(url string, attempt int)               {}
+func (m *Prometheus) WebhookFailed(url string, attempts int)                 {}
 
-func (m *PrometheusMetrics) WebhookJobFinished(outcome string) {
+func (m *Prometheus) WebhookJobFinished(outcome string) {
 	m.mu.Lock()
 	m.webhooks[outcome]++
 	m.mu.Unlock()
@@ -129,12 +129,12 @@ func (m *PrometheusMetrics) WebhookJobFinished(outcome string) {
 // Queue depth and flow rate are read from the live queues at scrape time
 // instead: these events come from many queues under one target label, so
 // the last one to report would win.
-func (m *PrometheusMetrics) QueueDepth(upstream string, depth int)                  {}
-func (m *PrometheusMetrics) FlowRate(upstream string, rps float64)                  {}
-func (m *PrometheusMetrics) DrainFlushSucceeded(instanceKey string, ledgerSize int) {}
-func (m *PrometheusMetrics) DrainFlushFailed(instanceKey string, ledgerSize int)    {}
+func (m *Prometheus) QueueDepth(upstream string, depth int)                  {}
+func (m *Prometheus) FlowRate(upstream string, rps float64)                  {}
+func (m *Prometheus) DrainFlushSucceeded(instanceKey string, ledgerSize int) {}
+func (m *Prometheus) DrainFlushFailed(instanceKey string, ledgerSize int)    {}
 
-func (m *PrometheusMetrics) JobWaited(userID, upstream string, wait time.Duration) {
+func (m *Prometheus) JobWaited(userID, upstream string, wait time.Duration) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	h := m.wait[upstream]
@@ -145,7 +145,7 @@ func (m *PrometheusMetrics) JobWaited(userID, upstream string, wait time.Duratio
 	h.observe(wait.Seconds())
 }
 
-func (m *PrometheusMetrics) JobFinished(userID, upstream, outcome string, total time.Duration) {
+func (m *Prometheus) JobFinished(userID, upstream, outcome string, total time.Duration) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.jobs[[3]string{upstream, outcome, m.tenantLocked(userID)}]++
@@ -167,13 +167,13 @@ func (m *PrometheusMetrics) JobFinished(userID, upstream, outcome string, total 
 	}
 }
 
-func (m *PrometheusMetrics) DispatchAttempt(upstream string, status int) {
+func (m *Prometheus) DispatchAttempt(upstream string, status int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.attempts[[2]string{upstream, statusClass(status)}]++
 }
 
-func (m *PrometheusMetrics) AdmissionRejected(reason string) {
+func (m *Prometheus) AdmissionRejected(reason string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.rejected[reason]++
@@ -200,7 +200,7 @@ func statusClass(status int) string {
 // within the window are left out, since a newcomer's short history would
 // look like unfairness. ok is false when there's nothing to compare: no
 // queue waiting, or none served.
-func (m *PrometheusMetrics) fairnessLocked(stats TargetStats, now time.Time) (index float64, ok bool) {
+func (m *Prometheus) fairnessLocked(stats TargetStats, now time.Time) (index float64, ok bool) {
 	current := servedSample{at: now, served: make(map[string]int64, len(stats.Queues))}
 	for _, q := range stats.Queues {
 		current.served[q.Key] = q.Served
@@ -246,7 +246,7 @@ func (m *PrometheusMetrics) fairnessLocked(stats TargetStats, now time.Time) (in
 }
 
 // Write renders every metric. targets is the live queue state.
-func (m *PrometheusMetrics) Write(w io.Writer, nodeID string, targets []TargetStats) {
+func (m *Prometheus) Write(w io.Writer, nodeID string, targets []TargetStats) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := time.Now()
@@ -379,3 +379,22 @@ func sortedKeys3[V any](m map[[3]string]V) [][3]string {
 }
 
 func round2(v float64) float64 { return math.Round(v*100) / 100 }
+
+// QueueStat is one account queue, for /metrics. Key is the queue's hashed
+// (user_id, API key), never the plaintext.
+type QueueStat struct {
+	Key     string
+	Backlog int64
+	RPS     float64
+	Served  int64
+}
+
+// TargetStats is one target API (or pool) on this node, for /metrics.
+type TargetStats struct {
+	Target       string
+	ActiveQueues int
+	Backlog      int64
+	// FlowRate is the sum of the active queues' current dispatch rates.
+	FlowRate float64
+	Queues   []QueueStat
+}
