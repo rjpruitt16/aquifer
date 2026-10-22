@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/rjpruitt16/aquifer/internal/jobs"
 )
 
 func sharedRequest(userID, key string) JobRequest {
@@ -69,14 +71,14 @@ func TestIdempotencyScopeValidation(t *testing.T) {
 }
 
 func TestSharedScopeHashIsUserIndependent(t *testing.T) {
-	a := dedupHash("agent-a", "k", IdempotencyScopeShared)
-	if a != dedupHash("agent-b", "k", IdempotencyScopeShared) {
+	a := jobs.DedupHash("agent-a", "k", IdempotencyScopeShared)
+	if a != jobs.DedupHash("agent-b", "k", IdempotencyScopeShared) {
 		t.Fatal("shared hash must not depend on user_id")
 	}
-	if a == dedupHash("agent-a", "k", "") || a == dedupHash("shared", "k", "") {
+	if a == jobs.DedupHash("agent-a", "k", "") || a == jobs.DedupHash("shared", "k", "") {
 		t.Fatal("shared hash must not collide with a per-user hash")
 	}
-	if dedupHash("u", "k", "") != hashKey("u:k") {
+	if jobs.DedupHash("u", "k", "") != jobs.HashKey("u:k") {
 		t.Fatal("per-user hash must stay identical to the pre-existing format")
 	}
 }
@@ -91,7 +93,7 @@ func TestSQLiteReloadKeepsDedupHash(t *testing.T) {
 		t.Fatal("unexpected duplicate")
 	}
 	reloaded := store.GetJob(job.ID)
-	if reloaded == nil || reloaded.dedupHash() != job.dedupHash() {
+	if reloaded == nil || reloaded.IdempotencyHash() != job.IdempotencyHash() {
 		t.Fatalf("reloaded job lost its dedup hash: %+v", reloaded)
 	}
 }
@@ -119,7 +121,7 @@ func TestGetJobResultSharedScope(t *testing.T) {
 	if _, err := app.GetJobResult("", "weather:sf", IdempotencyScopeShared); err != nil {
 		t.Fatalf("shared lookup without user_id: %v", err)
 	}
-	if remote.resultHash != dedupHash("", "weather:sf", IdempotencyScopeShared) {
+	if remote.resultHash != jobs.DedupHash("", "weather:sf", IdempotencyScopeShared) {
 		t.Fatalf("expected shared hash lookup, got %q", remote.resultHash)
 	}
 	if _, err := app.GetJobResult("", "weather:sf", ""); err == nil {

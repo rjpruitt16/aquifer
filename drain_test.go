@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/rjpruitt16/aquifer/internal/jobs"
 )
 
 // recordingMetrics wraps NoopMetricsAdapter, capturing only the two calls
@@ -53,7 +55,7 @@ func skipL8Probe(w http.ResponseWriter, r *http.Request) bool {
 func seedLedgerEntry(t *testing.T, r *Registry) {
 	t.Helper()
 	job := &Job{
-		ID: generateID(), UserID: "u1", IdempotentKey: "k1",
+		ID: jobs.NewID(), UserID: "u1", IdempotentKey: "k1",
 		URL: "https://example.com", Method: "POST", WebhookURL: "https://example.com",
 		Status: StatusQueued, CreatedAt: time.Now().UnixMilli(),
 	}

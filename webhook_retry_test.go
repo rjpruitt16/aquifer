@@ -236,7 +236,7 @@ func TestWebhookMaxRetriesPersists(t *testing.T) {
 				t.Fatalf("expected webhook_max_retries -1 after reload, got %+v", got)
 			}
 			got = store.GetJob(unsetJob.ID)
-			if got == nil || got.WebhookMaxRetries != nil || got.webhookMaxRetries() != DefaultWebhookMaxRetries {
+			if got == nil || got.WebhookMaxRetries != nil || got.WebhookRetryLimit() != DefaultWebhookMaxRetries {
 				t.Fatalf("expected an unset webhook_max_retries to stay unset, got %+v", got)
 			}
 		})

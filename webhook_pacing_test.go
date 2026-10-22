@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/rjpruitt16/aquifer/internal/jobs"
 )
 
 // TestWebhookDeliveryJobsExcludedFromLedger is the regression test for a
@@ -38,7 +40,7 @@ func TestWebhookDeliveryJobsExcludedFromLedger(t *testing.T) {
 	t.Cleanup(registry.Close)
 
 	realJob := &Job{
-		ID:            generateID(),
+		ID:            jobs.NewID(),
 		UserID:        "user-1",
 		IdempotentKey: "real-job-1",
 		URL:           webhook.URL,
@@ -89,7 +91,7 @@ func TestWebhookDeliveryDoesNotChain(t *testing.T) {
 	registry := testRegistry(t)
 
 	job := &Job{
-		ID:         generateID(),
+		ID:         jobs.NewID(),
 		UserID:     "user-1",
 		URL:        upstream.URL,
 		Method:     "GET",
@@ -272,7 +274,7 @@ func TestForwardDispatchIsNotL8Signed(t *testing.T) {
 	defer sink.Close()
 
 	job := &Job{
-		ID:         generateID(),
+		ID:         jobs.NewID(),
 		UserID:     "user-1",
 		URL:        receiver.URL,
 		Method:     "GET",

@@ -25,8 +25,9 @@ Shared contracts that must stay identical across Aquifer and Spillway: `X-Aquedu
 ## Where things live
 
 - `aquifer.go` (`PrepareJob`, `Enqueue`), `server.go` (HTTP routes), `proxy.go` (`/proxy`), `account_queue.go` (`execute`, `makeRequest`: the single target API dispatch path).
-- `job.go`: `JobRequest`, `Job`, validation, `dedupHash` (the only place idempotency hashes are derived).
-- `store.go` (SQLite), `pebble_store.go`, `remote_idempotency.go` (Valkey), `cluster_routing.go` (`clusterRoutingKey`).
+- `internal/jobs`: `Job`, `Request`, `Result`, validation, `DedupHash` (the only place idempotency hashes are derived). Root `job.go` keeps `Job`, `JobRequest`, `JobResult` and the status and retry constants as aliases.
+- `internal/storage`: the `Store` interface, `SQLite`, `Pebble`, and `Open` (picks the backend). Root `store.go` keeps `JobStore`, `Store`, `PebbleStore` and their constructors as aliases.
+- `remote_idempotency.go` (Valkey), `cluster_routing.go` (`clusterRoutingKey`).
 - `l8/` (public package `github.com/rjpruitt16/aquifer/l8`): L8 handshake, signing, payload encryption, request-schema validation. `l8_compat.go` keeps the old root names (`NewL8Registry`, `L8Registry`, ...) as aliases.
 - `internal/websocket`: the durable WebSocket proxy (`Manager`, Valkey transcripts, follower, scheduler, transcript export). `websocket.go` keeps the old root names (`WebSocketManager`, `NewWebSocketManager`, ...) as aliases.
 - `internal/admission` (admission limits, fair admission, inbound rate), `internal/region` (region discovery, redirect helpers), `internal/cluster` (membership, routing, Valkey coordination, `State`), `internal/metrics` (the Prometheus adapter, `TargetStats`), `internal/orca` (ORCA load headers). Root `admission.go`, `region.go`, `cluster.go`, `lifecycle.go` and `metrics.go` keep the old root names as aliases.

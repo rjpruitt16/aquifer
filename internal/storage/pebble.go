@@ -1,7 +1,7 @@
 // Copyright 2026 Rahmi Pruitt
 // SPDX-License-Identifier: Apache-2.0
 
-package aquifer
+package storage
 
 import (
 	"encoding/json"
@@ -17,10 +17,11 @@ import (
 
 	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/bloom"
+	"github.com/rjpruitt16/aquifer/internal/jobs"
 )
 
-// PebbleStore is a memory-first LSM-tree alternative to the SQLite-backed
-// Store, opted into via AQUIFER_STORE_BACKEND=pebble. Pebble is a raw
+// Pebble is a memory-first LSM-tree alternative to the SQLite-backed
+// SQLite, opted into via AQUIFER_STORE_BACKEND=pebble. Pebble is a raw
 // key-value engine — no schema, no UNIQUE constraint, no SQL WHERE clause —
 // so several things SQLite gave for free are reimplemented explicitly here:
 //
@@ -46,13 +47,13 @@ import (
 const shardCount = 256
 
 type pebbleRecord struct {
-	Job       *Job
+	Job       *jobs.Job
 	QueueKey  string
 	ExpiresAt int64
-	Result    *JobResult `json:",omitempty"`
+	Result    *jobs.Result `json:",omitempty"`
 }
 
-type PebbleStore struct {
+type Pebble struct {
 	db        *pebble.DB
 	path      string
 	syncOpts  *pebble.WriteOptions
@@ -71,7 +72,7 @@ type PebbleStore struct {
 	// Every write acknowledged before then is on disk; see SyncLag.
 	lastSyncStart atomic.Int64
 
-	// skipDrainEvents: see Store.skipDrainEvents. Recording an event costs
+	// skipDrainEvents: see SQLite.skipDrainEvents. Recording an event costs
 	// two reads and a write under drainMu, a global lock, so with drain
 	// mode off it also serialized every job completion.
 	skipDrainEvents atomic.Bool
@@ -104,7 +105,7 @@ const defaultPebbleCacheMB = 64
 // 0 means sync every write.
 const defaultFlushIntervalMS = 100
 
-func NewPebbleStore(path string) *PebbleStore {
+func NewPebble(path string) *Pebble {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		log.Fatalf("pebble: mkdir %s: %v", filepath.Dir(path), err)
 	}
@@ -141,7 +142,7 @@ func NewPebbleStore(path string) *PebbleStore {
 		log.Fatalf("pebble: open %s: %v", path, err)
 	}
 
-	s := &PebbleStore{
+	s := &Pebble{
 		db: db,
 		// By default each write waits for its sync — see the comment above
 		// this function. Throughput under load comes from
@@ -178,7 +179,7 @@ func NewPebbleStore(path string) *PebbleStore {
 
 // flushLoop syncs the WAL every flushInterval. Pebble's WAL is one ordered
 // log, so a synced empty record makes every earlier NoSync write durable.
-func (s *PebbleStore) flushLoop() {
+func (s *Pebble) flushLoop() {
 	defer close(s.flushDone)
 	ticker := time.NewTicker(s.flushInterval)
 	defer ticker.Stop()
@@ -193,7 +194,7 @@ func (s *PebbleStore) flushLoop() {
 	}
 }
 
-func (s *PebbleStore) syncWAL() {
+func (s *Pebble) syncWAL() {
 	start := time.Now()
 	if err := s.db.LogData(nil, pebble.Sync); err != nil {
 		log.Printf("[pebble] WAL sync failed: %v", err)
@@ -209,29 +210,29 @@ func (s *PebbleStore) syncWAL() {
 // defaultWALSyncIntervalMS). In storm test 1, under memory pressure, jobs
 // accepted 30 to 50 seconds before an OOM kill were lost, so the window had
 // grown that far. Zero when every write waits for its own sync.
-func (s *PebbleStore) SyncLag() time.Duration {
+func (s *Pebble) SyncLag() time.Duration {
 	if s.flushInterval <= 0 {
 		return 0
 	}
 	return time.Since(time.Unix(0, s.lastSyncStart.Load()))
 }
 
-func (s *PebbleStore) seedCounts() {
+func (s *Pebble) seedCounts() {
 	s.queued.Store(0)
 	s.inFlight.Store(0)
 	s.forEachJob(func(rec *pebbleRecord) { s.countStatus(rec.Job.Status, 1) })
 }
 
-func (s *PebbleStore) countStatus(status Status, delta int64) {
+func (s *Pebble) countStatus(status jobs.Status, delta int64) {
 	switch status {
-	case StatusQueued:
+	case jobs.StatusQueued:
 		s.queued.Add(delta)
-	case StatusInFlight:
+	case jobs.StatusInFlight:
 		s.inFlight.Add(delta)
 	}
 }
 
-func (s *PebbleStore) moveStatus(from, to Status) {
+func (s *Pebble) moveStatus(from, to jobs.Status) {
 	if from == to {
 		return
 	}
@@ -239,11 +240,11 @@ func (s *PebbleStore) moveStatus(from, to Status) {
 	s.countStatus(to, 1)
 }
 
-func (s *PebbleStore) Path() string {
+func (s *Pebble) Path() string {
 	return s.path
 }
 
-func (s *PebbleStore) Close() error {
+func (s *Pebble) Close() error {
 	s.closeOnce.Do(func() {
 		close(s.stop)
 		<-s.done
@@ -253,7 +254,7 @@ func (s *PebbleStore) Close() error {
 	return s.closeErr
 }
 
-func (s *PebbleStore) shardLock(key string) *sync.Mutex {
+func (s *Pebble) shardLock(key string) *sync.Mutex {
 	h := fnv.New32a()
 	h.Write([]byte(key))
 	return &s.locks[h.Sum32()%shardCount]
@@ -286,8 +287,8 @@ func drainSequenceMetaKey() []byte    { return []byte("meta:drain_sequence") }
 // fresh job, or the existing job ID if the (user_id, idempotent_key) pair
 // was already accepted. The shard lock is what makes this atomic instead
 // of a racy Get-then-Set — see the package doc comment above.
-func (s *PebbleStore) CheckOrInsert(job *Job) (string, bool) {
-	hashed := job.dedupHash()
+func (s *Pebble) CheckOrInsert(job *jobs.Job) (string, bool) {
+	hashed := job.IdempotencyHash()
 	ik := idemKey(hashed)
 
 	lock := s.shardLock(hashed)
@@ -324,12 +325,12 @@ func (s *PebbleStore) CheckOrInsert(job *Job) (string, bool) {
 		log.Printf("pebble: commit job %s: %v", job.ID, err)
 		return "", false
 	}
-	s.countStatus(StatusQueued, 1)
+	s.countStatus(jobs.StatusQueued, 1)
 
 	return "", false
 }
 
-func (s *PebbleStore) getRecord(jobID string) (*pebbleRecord, bool) {
+func (s *Pebble) getRecord(jobID string) (*pebbleRecord, bool) {
 	val, closer, err := s.db.Get(jobKey(jobID))
 	if err != nil {
 		return nil, false
@@ -343,7 +344,7 @@ func (s *PebbleStore) getRecord(jobID string) (*pebbleRecord, bool) {
 	return &rec, true
 }
 
-func (s *PebbleStore) putRecord(jobID string, rec *pebbleRecord) {
+func (s *Pebble) putRecord(jobID string, rec *pebbleRecord) {
 	data, err := json.Marshal(rec)
 	if err != nil {
 		log.Printf("pebble: marshal job %s: %v", jobID, err)
@@ -359,7 +360,7 @@ func (s *PebbleStore) putRecord(jobID string, rec *pebbleRecord) {
 // one 24-hour index entry per job (every job's creation key outlived its
 // 30-minute completed retention), which on a busy instance was most of the
 // database.
-func (s *PebbleStore) putRecordWithExpiry(jobID string, rec *pebbleRecord, previousExpiresAt int64) {
+func (s *Pebble) putRecordWithExpiry(jobID string, rec *pebbleRecord, previousExpiresAt int64) {
 	data, err := json.Marshal(rec)
 	if err != nil {
 		log.Printf("pebble: marshal job %s: %v", jobID, err)
@@ -382,7 +383,7 @@ func (s *PebbleStore) putRecordWithExpiry(jobID string, rec *pebbleRecord, previ
 // it), and Pebble's log is ordered, so the next synced write makes it durable
 // anyway. A dedicated sync here cost one of the few durable writes per
 // second the WAL can do, twice per job (the job and its webhook).
-func (s *PebbleStore) SetQueueKey(jobID, queueKey string) {
+func (s *Pebble) SetQueueKey(jobID, queueKey string) {
 	rec, ok := s.getRecord(jobID)
 	if !ok {
 		return
@@ -401,14 +402,14 @@ func (s *PebbleStore) SetQueueKey(jobID, queueKey string) {
 // dropping only the job: key would leave a dangling idem: entry pointing
 // at a job that no longer exists, the same ghost-row risk DeleteJob exists
 // to prevent on the SQLite side.
-func (s *PebbleStore) DeleteJob(jobID string) {
+func (s *Pebble) DeleteJob(jobID string) {
 	rec, ok := s.getRecord(jobID)
 	if !ok {
 		s.db.Delete(jobKey(jobID), s.syncOpts)
 		return
 	}
 
-	hashed := rec.Job.dedupHash()
+	hashed := rec.Job.IdempotencyHash()
 
 	batch := s.db.NewBatch()
 	defer batch.Close()
@@ -421,7 +422,7 @@ func (s *PebbleStore) DeleteJob(jobID string) {
 	s.countStatus(rec.Job.Status, -1)
 }
 
-func (s *PebbleStore) PutResult(jobID string, result JobResult) {
+func (s *Pebble) PutResult(jobID string, result jobs.Result) {
 	rec, ok := s.getRecord(jobID)
 	if !ok {
 		return
@@ -430,25 +431,25 @@ func (s *PebbleStore) PutResult(jobID string, result JobResult) {
 	s.putRecord(jobID, rec)
 }
 
-func (s *PebbleStore) GetResult(jobID string) (JobResult, bool) {
+func (s *Pebble) GetResult(jobID string) (jobs.Result, bool) {
 	rec, ok := s.getRecord(jobID)
 	if !ok || rec.Result == nil || rec.ExpiresAt <= time.Now().UnixMilli() {
-		return JobResult{}, false
+		return jobs.Result{}, false
 	}
 	return *rec.Result, true
 }
 
-func (s *PebbleStore) RecordRetry(jobID string, attempts int) {
+func (s *Pebble) RecordRetry(jobID string, attempts int) {
 	rec, ok := s.getRecord(jobID)
 	if !ok {
 		return
 	}
 	rec.Job.Attempts = attempts
-	rec.Job.Status = StatusQueued
+	rec.Job.Status = jobs.StatusQueued
 	s.putRecord(jobID, rec)
 }
 
-func (s *PebbleStore) UpdateStatus(jobID string, status Status) {
+func (s *Pebble) UpdateStatus(jobID string, status jobs.Status) {
 	rec, ok := s.getRecord(jobID)
 	if !ok {
 		return
@@ -458,16 +459,16 @@ func (s *PebbleStore) UpdateStatus(jobID string, status Status) {
 	previousExpiresAt := rec.ExpiresAt
 	rec.ExpiresAt = time.Now().Add(ttlForStatus(status)).UnixMilli()
 	s.putRecordWithExpiry(jobID, rec, previousExpiresAt)
-	if (status == StatusCompleted || status == StatusFailed) && !s.skipDrainEvents.Load() {
+	if (status == jobs.StatusCompleted || status == jobs.StatusFailed) && !s.skipDrainEvents.Load() {
 		s.recordDrainEvent(rec, status)
 	}
 }
 
-// SetDrainEventsEnabled: see Store.SetDrainEventsEnabled.
-func (s *PebbleStore) SetDrainEventsEnabled(enabled bool) { s.skipDrainEvents.Store(!enabled) }
+// SetDrainEventsEnabled: see SQLite.SetDrainEventsEnabled.
+func (s *Pebble) SetDrainEventsEnabled(enabled bool) { s.skipDrainEvents.Store(!enabled) }
 
-func (s *PebbleStore) recordDrainEvent(rec *pebbleRecord, status Status) {
-	if rec == nil || rec.Job == nil || rec.Job.isWebhookDeliveryJob() {
+func (s *Pebble) recordDrainEvent(rec *pebbleRecord, status jobs.Status) {
+	if rec == nil || rec.Job == nil || rec.Job.IsWebhookDelivery() {
 		return
 	}
 
@@ -486,9 +487,9 @@ func (s *PebbleStore) recordDrainEvent(rec *pebbleRecord, status Status) {
 	}
 	sequence++
 
-	event := DrainEvent{
+	event := jobs.DrainEvent{
 		Sequence:   sequence,
-		HashKey:    rec.Job.dedupHash(),
+		HashKey:    rec.Job.IdempotencyHash(),
 		JobID:      rec.Job.ID,
 		Status:     status,
 		RecordedAt: time.Now().UnixMilli(),
@@ -513,7 +514,7 @@ func (s *PebbleStore) recordDrainEvent(rec *pebbleRecord, status Status) {
 // by the less-hot-path operations (recovery, counts, cleanup) — no worse
 // than the current SQL schema, which has no index on status or queue_key
 // either, so these are already full-ish scans there too.
-func (s *PebbleStore) forEachJob(fn func(rec *pebbleRecord)) {
+func (s *Pebble) forEachJob(fn func(rec *pebbleRecord)) {
 	now := time.Now().UnixMilli()
 
 	iter, err := s.db.NewIter(&pebble.IterOptions{
@@ -538,23 +539,23 @@ func (s *PebbleStore) forEachJob(fn func(rec *pebbleRecord)) {
 	}
 }
 
-func (s *PebbleStore) RecoverQueued(queueKey string) []*Job {
-	var jobs []*Job
+func (s *Pebble) RecoverQueued(queueKey string) []*jobs.Job {
+	var found []*jobs.Job
 	s.forEachJob(func(rec *pebbleRecord) {
-		if rec.QueueKey == queueKey && (rec.Job.Status == StatusQueued || rec.Job.Status == StatusInFlight) {
-			rec.Job.Status = StatusQueued
-			jobs = append(jobs, rec.Job)
+		if rec.QueueKey == queueKey && (rec.Job.Status == jobs.StatusQueued || rec.Job.Status == jobs.StatusInFlight) {
+			rec.Job.Status = jobs.StatusQueued
+			found = append(found, rec.Job)
 		}
 	})
-	return jobs
+	return found
 }
 
-func (s *PebbleStore) Counts() StoreCounts {
+func (s *Pebble) Counts() Counts {
 	queued, inFlight := max(s.queued.Load(), 0), max(s.inFlight.Load(), 0)
-	return StoreCounts{TotalJobs: queued + inFlight, QueueDepth: queued}
+	return Counts{TotalJobs: queued + inFlight, QueueDepth: queued}
 }
 
-func (s *PebbleStore) GetJob(jobID string) *Job {
+func (s *Pebble) GetJob(jobID string) *jobs.Job {
 	rec, ok := s.getRecord(jobID)
 	if !ok {
 		return nil
@@ -565,34 +566,34 @@ func (s *PebbleStore) GetJob(jobID string) *Job {
 	return rec.Job
 }
 
-func (s *PebbleStore) GetQueuedJobs() []*Job {
-	var jobs []*Job
+func (s *Pebble) GetQueuedJobs() []*jobs.Job {
+	var found []*jobs.Job
 	s.forEachJob(func(rec *pebbleRecord) {
-		// StatusInFlight only appears on records written by older versions.
-		if rec.Job.Status == StatusQueued || rec.Job.Status == StatusInFlight {
-			rec.Job.Status = StatusQueued
-			jobs = append(jobs, rec.Job)
+		// jobs.StatusInFlight only appears on records written by older versions.
+		if rec.Job.Status == jobs.StatusQueued || rec.Job.Status == jobs.StatusInFlight {
+			rec.Job.Status = jobs.StatusQueued
+			found = append(found, rec.Job)
 		}
 	})
-	return jobs
+	return found
 }
 
 // ListIdempotentKeys backs drain mode's ledger export. Unlike SQLite,
 // pebbleRecord.Job retains the plaintext IdempotentKey (for unrelated
 // reasons -- see the package doc comment), but this must never surface it:
 // the hash is recomputed the same way CheckOrInsert derives it, and only
-// the hash/job_id/status ever go into the returned LedgerEntry. Excludes
-// webhook-delivery jobs (see Job.isWebhookDeliveryJob) --
+// the hash/job_id/status ever go into the returned jobs.LedgerEntry. Excludes
+// webhook-delivery jobs (see Job.IsWebhookDelivery) --
 // those are internal delivery bookkeeping, not real user-submitted work, and
 // have no business appearing in a ledger meant for tenant-handoff dedup.
-func (s *PebbleStore) ListIdempotentKeys() []LedgerEntry {
-	var entries []LedgerEntry
+func (s *Pebble) ListIdempotentKeys() []jobs.LedgerEntry {
+	var entries []jobs.LedgerEntry
 	s.forEachJob(func(rec *pebbleRecord) {
-		if rec.Job.isWebhookDeliveryJob() {
+		if rec.Job.IsWebhookDelivery() {
 			return
 		}
-		entries = append(entries, LedgerEntry{
-			HashKey: rec.Job.dedupHash(),
+		entries = append(entries, jobs.LedgerEntry{
+			HashKey: rec.Job.IdempotencyHash(),
 			JobID:   rec.Job.ID,
 			Status:  rec.Job.Status,
 		})
@@ -605,7 +606,7 @@ func (s *PebbleStore) ListIdempotentKeys() []LedgerEntry {
 // delivery, never on a normal (non-drain-mode) deployment. Takes every
 // shard lock before wiping so a concurrent CheckOrInsert (which only holds
 // one shard's lock) can't race a mid-wipe read/write and reintroduce a row.
-func (s *PebbleStore) ClearIdempotentKeys() {
+func (s *Pebble) ClearIdempotentKeys() {
 	for i := range s.locks {
 		s.locks[i].Lock()
 	}
@@ -646,7 +647,7 @@ func (s *PebbleStore) ClearIdempotentKeys() {
 	s.inFlight.Store(0)
 }
 
-func (s *PebbleStore) ListDrainEvents(limit int) []DrainEvent {
+func (s *Pebble) ListDrainEvents(limit int) []jobs.DrainEvent {
 	if limit <= 0 {
 		limit = 1000
 	}
@@ -660,9 +661,9 @@ func (s *PebbleStore) ListDrainEvents(limit int) []DrainEvent {
 	}
 	defer iter.Close()
 
-	var events []DrainEvent
+	var events []jobs.DrainEvent
 	for iter.First(); iter.Valid() && len(events) < limit; iter.Next() {
-		var e DrainEvent
+		var e jobs.DrainEvent
 		if err := json.Unmarshal(iter.Value(), &e); err != nil {
 			continue
 		}
@@ -671,7 +672,7 @@ func (s *PebbleStore) ListDrainEvents(limit int) []DrainEvent {
 	return events
 }
 
-func (s *PebbleStore) AcknowledgeDrainEventsThrough(sequence int64) {
+func (s *Pebble) AcknowledgeDrainEventsThrough(sequence int64) {
 	if sequence <= 0 {
 		return
 	}
@@ -692,7 +693,7 @@ func (s *PebbleStore) AcknowledgeDrainEventsThrough(sequence int64) {
 	batch := s.db.NewBatch()
 	defer batch.Close()
 	for iter.First(); iter.Valid(); iter.Next() {
-		var event DrainEvent
+		var event jobs.DrainEvent
 		if err := json.Unmarshal(iter.Value(), &event); err != nil {
 			continue
 		}
@@ -707,7 +708,7 @@ func (s *PebbleStore) AcknowledgeDrainEventsThrough(sequence int64) {
 	}
 }
 
-func (s *PebbleStore) cleanupLoop() {
+func (s *Pebble) cleanupLoop() {
 	defer close(s.done)
 
 	ticker := time.NewTicker(60 * time.Second)
@@ -734,7 +735,7 @@ const expireBatchSize = 512
 // crash loses an unsynced batch, the index keys it would have cleared are
 // still there (the range deletion is written last), so the next pass
 // deletes those jobs.
-func (s *PebbleStore) deleteExpired(now int64) {
+func (s *Pebble) deleteExpired(now int64) {
 	iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: []byte("exp:"), UpperBound: expKeyBound(now)})
 	if err != nil {
 		log.Printf("pebble: iterate expiry index: %v", err)
@@ -750,7 +751,7 @@ func (s *PebbleStore) deleteExpired(now int64) {
 	}
 
 	batch := s.db.NewBatch()
-	var statuses []Status
+	var statuses []jobs.Status
 	commit := func() bool {
 		err := batch.Commit(pebble.NoSync)
 		batch.Close()
@@ -779,7 +780,7 @@ func (s *PebbleStore) deleteExpired(now int64) {
 			continue
 		}
 		batch.Delete(jobKey(id), nil)
-		batch.Delete(idemKey(rec.Job.dedupHash()), nil)
+		batch.Delete(idemKey(rec.Job.IdempotencyHash()), nil)
 		statuses = append(statuses, rec.Job.Status)
 		if len(statuses) == expireBatchSize && !commit() {
 			return
@@ -799,7 +800,7 @@ func (s *PebbleStore) deleteExpired(now int64) {
 
 // backfillExpiryIndex gives every job written by an older version an
 // expiry index key, once.
-func (s *PebbleStore) backfillExpiryIndex() {
+func (s *Pebble) backfillExpiryIndex() {
 	if _, closer, err := s.db.Get(expIndexMarker); err == nil {
 		closer.Close()
 		return
@@ -818,7 +819,7 @@ func (s *PebbleStore) backfillExpiryIndex() {
 // forEachJobIncludingExpired is forEachJob without the expiry filter — the
 // cleanup loop is the one caller that needs to see expired rows, since its
 // whole job is deleting them.
-func (s *PebbleStore) forEachJobIncludingExpired(fn func(rec *pebbleRecord)) {
+func (s *Pebble) forEachJobIncludingExpired(fn func(rec *pebbleRecord)) {
 	iter, err := s.db.NewIter(&pebble.IterOptions{
 		LowerBound: []byte("job:"),
 		UpperBound: []byte("job;"),

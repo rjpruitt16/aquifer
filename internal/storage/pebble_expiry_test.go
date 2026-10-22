@@ -1,7 +1,7 @@
 // Copyright 2026 Rahmi Pruitt
 // SPDX-License-Identifier: Apache-2.0
 
-package aquifer
+package storage
 
 import (
 	"fmt"
@@ -10,10 +10,11 @@ import (
 	"time"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/rjpruitt16/aquifer/internal/jobs"
 )
 
-func expiryTestJob(store *PebbleStore, key string) *Job {
-	job := NewJob(&JobRequest{UserID: "u", IdempotentKey: key, URL: "http://x", Method: "POST", WebhookURL: "http://w"})
+func expiryTestJob(store *Pebble, key string) *jobs.Job {
+	job := jobs.New(&jobs.Request{UserID: "u", IdempotentKey: key, URL: "http://x", Method: "POST", WebhookURL: "http://w"})
 	store.CheckOrInsert(job)
 	return job
 }
@@ -23,14 +24,14 @@ func expiryTestJob(store *PebbleStore, key string) *Job {
 // stale index key left behind when a status change extended a job's expiry
 // doesn't delete the live job.
 func TestPebbleCleanupUsesExpiryIndex(t *testing.T) {
-	store := NewPebbleStore(filepath.Join(t.TempDir(), "pebble"))
+	store := NewPebble(filepath.Join(t.TempDir(), "pebble"))
 	defer store.Close()
 
 	done1 := expiryTestJob(store, "done-1")
 	done2 := expiryTestJob(store, "done-2")
 	queued := expiryTestJob(store, "queued")
-	store.UpdateStatus(done1.ID, StatusCompleted)
-	store.UpdateStatus(done2.ID, StatusCompleted)
+	store.UpdateStatus(done1.ID, jobs.StatusCompleted)
+	store.UpdateStatus(done2.ID, jobs.StatusCompleted)
 
 	// 31 minutes from now is past completed retention (30m) but not queued
 	// retention (24h).
@@ -51,8 +52,8 @@ func TestPebbleCleanupUsesExpiryIndex(t *testing.T) {
 	// A failed job's expiry (2h) moved past its first, completed-time key
 	// (30m): the stale key comes due first and must not delete it.
 	moved := expiryTestJob(store, "moved")
-	store.UpdateStatus(moved.ID, StatusCompleted)
-	store.UpdateStatus(moved.ID, StatusFailed)
+	store.UpdateStatus(moved.ID, jobs.StatusCompleted)
+	store.UpdateStatus(moved.ID, jobs.StatusFailed)
 	store.deleteExpired(time.Now().Add(31 * time.Minute).UnixMilli())
 	if _, ok := store.getRecord(moved.ID); !ok {
 		t.Fatal("job deleted by a stale expiry key although its expiry was extended")
@@ -66,11 +67,11 @@ func TestPebbleCleanupUsesExpiryIndex(t *testing.T) {
 // A store written before the expiry index existed gets one backfill pass.
 func TestPebbleExpiryIndexBackfill(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "pebble")
-	store := NewPebbleStore(dir)
+	store := NewPebble(dir)
 	var ids []string
 	for i := 0; i < 5; i++ {
 		job := expiryTestJob(store, fmt.Sprintf("old-%d", i))
-		store.UpdateStatus(job.ID, StatusCompleted)
+		store.UpdateStatus(job.ID, jobs.StatusCompleted)
 		ids = append(ids, job.ID)
 	}
 	// Simulate an older store: no index keys, no marker.
@@ -78,7 +79,7 @@ func TestPebbleExpiryIndexBackfill(t *testing.T) {
 	store.db.Delete(expIndexMarker, pebble.Sync)
 	store.Close()
 
-	store = NewPebbleStore(dir)
+	store = NewPebble(dir)
 	defer store.Close()
 	store.deleteExpired(time.Now().Add(31 * time.Minute).UnixMilli())
 	for _, id := range ids {
@@ -88,7 +89,7 @@ func TestPebbleExpiryIndexBackfill(t *testing.T) {
 	}
 }
 
-func countExpiryKeys(t *testing.T, store *PebbleStore) int {
+func countExpiryKeys(t *testing.T, store *Pebble) int {
 	t.Helper()
 	iter, err := store.db.NewIter(&pebble.IterOptions{LowerBound: []byte("exp:"), UpperBound: []byte("exp;")})
 	if err != nil {
@@ -106,13 +107,13 @@ func countExpiryKeys(t *testing.T, store *PebbleStore) int {
 // creation (24h) outliving the completed job (30m): one leftover entry per
 // job, which grew the database by hundreds of MB an hour.
 func TestPebbleStatusChangeReplacesExpiryKey(t *testing.T) {
-	store := NewPebbleStore(filepath.Join(t.TempDir(), "pebble"))
+	store := NewPebble(filepath.Join(t.TempDir(), "pebble"))
 	defer store.Close()
 
 	const n = 50
 	for i := 0; i < n; i++ {
 		job := expiryTestJob(store, fmt.Sprintf("job-%d", i))
-		store.UpdateStatus(job.ID, StatusCompleted)
+		store.UpdateStatus(job.ID, jobs.StatusCompleted)
 	}
 	if got := countExpiryKeys(t, store); got != n {
 		t.Fatalf("expected one expiry key per job (%d), got %d", n, got)
@@ -130,13 +131,13 @@ func TestPebbleStatusChangeReplacesExpiryKey(t *testing.T) {
 // Cleanup spans several batches: every expired job and its idempotency key
 // go, and the queued count stays right.
 func TestPebbleCleanupAcrossBatches(t *testing.T) {
-	store := NewPebbleStore(filepath.Join(t.TempDir(), "pebble"))
+	store := NewPebble(filepath.Join(t.TempDir(), "pebble"))
 	defer store.Close()
 
 	n := expireBatchSize*2 + 7
 	for i := 0; i < n; i++ {
 		job := expiryTestJob(store, fmt.Sprintf("batch-%d", i))
-		store.UpdateStatus(job.ID, StatusCompleted)
+		store.UpdateStatus(job.ID, jobs.StatusCompleted)
 	}
 	queued := expiryTestJob(store, "still-queued")
 
@@ -151,7 +152,7 @@ func TestPebbleCleanupAcrossBatches(t *testing.T) {
 		t.Fatal("queued job was deleted before its expiry")
 	}
 	// The expired jobs' idempotency keys are free again.
-	again := NewJob(&JobRequest{UserID: "u", IdempotentKey: "batch-0", URL: "http://x", Method: "POST", WebhookURL: "http://w"})
+	again := jobs.New(&jobs.Request{UserID: "u", IdempotentKey: "batch-0", URL: "http://x", Method: "POST", WebhookURL: "http://w"})
 	if existing, dup := store.CheckOrInsert(again); dup {
 		t.Fatalf("idempotency key of an expired job still points at %s", existing)
 	}
@@ -160,11 +161,11 @@ func TestPebbleCleanupAcrossBatches(t *testing.T) {
 func BenchmarkPebbleDeleteExpired(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		b.StopTimer()
-		store := NewPebbleStore(filepath.Join(b.TempDir(), "pebble"))
+		store := NewPebble(filepath.Join(b.TempDir(), "pebble"))
 		for j := 0; j < 20000; j++ {
-			job := NewJob(&JobRequest{UserID: "u", IdempotentKey: fmt.Sprintf("bench-%d-%d", i, j), URL: "http://x", Method: "POST", WebhookURL: "http://w"})
+			job := jobs.New(&jobs.Request{UserID: "u", IdempotentKey: fmt.Sprintf("bench-%d-%d", i, j), URL: "http://x", Method: "POST", WebhookURL: "http://w"})
 			store.CheckOrInsert(job)
-			store.UpdateStatus(job.ID, StatusCompleted)
+			store.UpdateStatus(job.ID, jobs.StatusCompleted)
 		}
 		b.StartTimer()
 		store.deleteExpired(time.Now().Add(31 * time.Minute).UnixMilli())

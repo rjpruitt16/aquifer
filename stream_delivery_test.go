@@ -15,6 +15,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/rjpruitt16/aquifer/internal/jobs"
 )
 
 type streamDeliveryHarness struct {
@@ -70,7 +72,7 @@ func newStreamDeliveryHarness(t *testing.T) *streamDeliveryHarness {
 }
 
 func (h *streamDeliveryHarness) submit() string {
-	body, _ := json.Marshal(JobRequest{UserID: "u", IdempotentKey: "stream-" + generateID(), URL: h.upstream.URL, Method: "POST", WebhookURL: h.webhookURL})
+	body, _ := json.Marshal(JobRequest{UserID: "u", IdempotentKey: "stream-" + jobs.NewID(), URL: h.upstream.URL, Method: "POST", WebhookURL: h.webhookURL})
 	resp, err := http.Post(h.server.URL+"/jobs", "application/json", bytes.NewReader(body))
 	if err != nil {
 		h.t.Fatal(err)
@@ -194,7 +196,7 @@ func TestStoresKeepResults(t *testing.T) {
 }
 
 func (h *streamDeliveryHarness) proxy(ctx context.Context) (*http.Response, error) {
-	body, _ := json.Marshal(JobRequest{UserID: "u", IdempotentKey: "proxy-" + generateID(), URL: h.upstream.URL, Method: "POST", WebhookURL: h.webhookURL})
+	body, _ := json.Marshal(JobRequest{UserID: "u", IdempotentKey: "proxy-" + jobs.NewID(), URL: h.upstream.URL, Method: "POST", WebhookURL: h.webhookURL})
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, h.server.URL+"/proxy", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	return http.DefaultClient.Do(req)
