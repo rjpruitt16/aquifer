@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/rjpruitt16/aquifer/internal/env"
+	"github.com/rjpruitt16/aquifer/internal/region"
 )
 
 const (
@@ -284,8 +285,8 @@ func (r *ClusterRouter) rankedOwners(key string, excluded map[string]bool) []Clu
 	r.mu.Unlock()
 
 	sort.Slice(members, func(i, j int) bool {
-		left := rendezvousScore(members[i].ID, key)
-		right := rendezvousScore(members[j].ID, key)
+		left := region.Score(members[i].ID, key)
+		right := region.Score(members[j].ID, key)
 		if left == right {
 			return members[i].ID < members[j].ID
 		}
@@ -520,7 +521,7 @@ func (r *ClusterRouter) touchLocalScopeLocked(key string) {
 }
 
 func (r *ClusterRouter) scopeLock(key string) *sync.Mutex {
-	score := rendezvousScore("aqueduct-scope-lock", key)
+	score := region.Score("aqueduct-scope-lock", key)
 	index := (int(score[0])*31 + int(score[1])) % len(r.scopeLocks)
 	return &r.scopeLocks[index]
 }

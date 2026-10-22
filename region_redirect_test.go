@@ -18,7 +18,7 @@ import (
 
 // fakeRegionAdapter is a test double for RegionAdapter — a plain, static
 // live-region list, no polling. Real polling behavior (FlyRegionAdapter)
-// has its own tests in region_adapter_test.go; these tests are about
+// has its own tests in internal/region/adapter_test.go; these tests are about
 // AttemptDirect/attemptRedirect's orchestration, not region discovery.
 type fakeRegionAdapter struct {
 	live []string
@@ -27,86 +27,6 @@ type fakeRegionAdapter struct {
 
 func (f fakeRegionAdapter) LiveRegions() []string { return f.live }
 func (f fakeRegionAdapter) SelfRegion() string    { return f.self }
-
-func TestRendezvousPickIsDeterministic(t *testing.T) {
-	candidates := []string{"iad", "lhr", "sjc", "nrt"}
-	first := rendezvousPick(candidates, "some-idempotent-key")
-
-	// Same inputs, different slice order -- must still pick the same
-	// winner, since two independent origins won't necessarily enumerate
-	// their known-live regions in the same order.
-	reordered := []string{"nrt", "sjc", "lhr", "iad"}
-	second := rendezvousPick(reordered, "some-idempotent-key")
-
-	if first != second {
-		t.Fatalf("expected the same pick regardless of input order, got %q vs %q", first, second)
-	}
-
-	// A different key can legitimately pick a different region -- just
-	// confirm it's still deterministic for ITS OWN key.
-	third := rendezvousPick(candidates, "some-idempotent-key")
-	if third != first {
-		t.Fatalf("expected repeat calls with the same inputs to agree, got %q vs %q", first, third)
-	}
-}
-
-func TestRendezvousPickEmptyCandidates(t *testing.T) {
-	if got := rendezvousPick(nil, "key"); got != "" {
-		t.Fatalf("expected empty string for no candidates, got %q", got)
-	}
-}
-
-func TestOrderedRedirectCandidatesExcludesSelfAndVisited(t *testing.T) {
-	live := []string{"iad", "lhr", "sjc", "nrt"}
-	visited := []string{"sjc"}
-	candidates := orderedRedirectCandidates(live, visited, "iad", "some-key")
-
-	for _, c := range candidates {
-		if c == "iad" {
-			t.Fatalf("expected self (iad) excluded from candidates, got %v", candidates)
-		}
-		if c == "sjc" {
-			t.Fatalf("expected already-visited (sjc) excluded from candidates, got %v", candidates)
-		}
-	}
-	if len(candidates) != 2 {
-		t.Fatalf("expected exactly 2 remaining candidates (lhr, nrt), got %v", candidates)
-	}
-}
-
-func TestOrderedRedirectCandidatesPreferredIsAlwaysFirst(t *testing.T) {
-	live := []string{"iad", "lhr", "sjc", "nrt", "fra"}
-	preferred := rendezvousPick(live, "some-key")
-
-	candidates := orderedRedirectCandidates(live, nil, "", "some-key")
-	if len(candidates) == 0 || candidates[0] != preferred {
-		t.Fatalf("expected the rendezvous-preferred region (%q) first, got %v", preferred, candidates)
-	}
-}
-
-func TestOrderedRedirectCandidatesEmptyWhenNothingEligible(t *testing.T) {
-	candidates := orderedRedirectCandidates([]string{"iad"}, nil, "iad", "key")
-	if candidates != nil {
-		t.Fatalf("expected nil when the only live region is self, got %v", candidates)
-	}
-}
-
-func TestRedirectGateOpenClosedAndCooldown(t *testing.T) {
-	g := &redirectGate{}
-	if g.Open() {
-		t.Fatalf("expected a fresh gate to be closed")
-	}
-
-	g.Trip(50 * time.Millisecond)
-	if !g.Open() {
-		t.Fatalf("expected the gate to be open immediately after tripping")
-	}
-
-	time.Sleep(60 * time.Millisecond)
-	if g.Open() {
-		t.Fatalf("expected the gate to close again after its cooldown elapsed")
-	}
-}
 
 func TestSelfMachineIDIsStableAndReadsFlyMachineID(t *testing.T) {
 	// selfMachineIDOnce/selfMachineIDValue are package-level and cached
@@ -132,7 +52,7 @@ func TestSelfMachineIDIsStableAndReadsFlyMachineID(t *testing.T) {
 // Server pairs -- "origin" and "target" -- with origin's redirectTargetURL
 // overridden to dial target's real httptest.Server instead of real Fly
 // .internal DNS (which can't resolve in a unit test environment; see
-// region_adapter_test.go's identical justification for FlyRegionAdapter).
+// internal/region/adapter_test.go's identical justification for FlyRegionAdapter).
 // origin's RegionAdapter reports exactly one live region, "target-region",
 // which resolves to target's server.
 func buildRedirectTestPair(t *testing.T) (origin *Aquifer, originSrv *httptest.Server, target *Aquifer) {
