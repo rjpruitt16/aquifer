@@ -19,7 +19,7 @@ func idleReadings() loadReadings {
 }
 
 func TestIdleLoadAssumesTenJobsPerUserAndOneMessagePerSession(t *testing.T) {
-	// 80% of one CPU / (10 / 750) = 60 users; / (1 / 1,500) = 1,200
+	// 80% of one CPU / (10 / 750) = 60 users; / (1 / 3,000) = 2,400
 	// sessions, capped at 1,000.
 	got := computeLoad(idleReadings())
 	want := Load{HTTPUsers: 0, HTTPCapacity: 60, WSSessions: 0, WSCapacity: 1000}

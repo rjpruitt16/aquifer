@@ -19,8 +19,9 @@ import (
 // Both kinds of traffic spend the same CPU, so they share one budget:
 // whatever one isn't using, the other can have. The CPU in use is split
 // between the two by what each costs (benchmark.md: about 750 jobs/s and
-// 1,500 WebSocket messages/s per CPU), which gives the CPU one user or one
-// session costs, and:
+// 1,500 WebSocket round trips/s per CPU, which is 3,000 messages: a client
+// message and a backend one), which gives the CPU one user or one session
+// costs, and:
 //
 //	headroom      = 80% - CPU in use
 //	http_capacity = users + headroom / CPU per user
@@ -47,8 +48,10 @@ const (
 
 	// Measured per CPU: benchmark.md section 11 (jobs end to end, webhook
 	// included) and section 13 (WebSocket round trips).
-	loadJobsPerCPU       = 750
-	loadWSMessagesPerCPU = 1500
+	loadJobsPerCPU = 750
+	// A round trip is two messages, a client one and a backend one, and
+	// Manager.Messages counts each.
+	loadWSMessagesPerCPU = 3000
 	loadSessionMemoryKB  = 90
 
 	// Assumed while there's no traffic to measure.

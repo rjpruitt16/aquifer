@@ -56,7 +56,7 @@ it exists and is reachable.
 
 `http_users` is how many users have jobs or webhook deliveries still owed on this instance, and `ws_sessions` how many WebSocket clients are connected. `http_capacity` and `ws_capacity` are how many of each it can hold. A control plane like Canalis gives the instance no more HTTP users or sessions than that, counting each kind on its own, so open sessions never use up the room HTTP users need. Every response carries the same four numbers as `X-Aqueduct-Http-Users`, `X-Aqueduct-Http-Capacity`, `X-Aqueduct-WS-Sessions` and `X-Aqueduct-WS-Capacity`.
 
-Both kinds of traffic spend the same CPU, so the capacities come from one budget: what one kind isn't using, the other can have. At most every 5 seconds, Aquifer reads the CPU time the process used, and how many jobs and WebSocket messages it handled. Readings are averaged over about 30 seconds. The CPU in use is split between the two kinds by what each costs, measured in [benchmark.md](benchmark.md): about 750 jobs/s and 1,500 WebSocket messages/s per CPU. That gives the CPU one user or one session costs, and:
+Both kinds of traffic spend the same CPU, so the capacities come from one budget: what one kind isn't using, the other can have. At most every 5 seconds, Aquifer reads the CPU time the process used, and how many jobs and WebSocket messages it handled. Readings are averaged over about 30 seconds. The CPU in use is split between the two kinds by what each costs, measured in [benchmark.md](benchmark.md): about 750 jobs/s and 1,500 WebSocket round trips/s per CPU, which is 3,000 messages, since each round trip is a client message and a backend one. That gives the CPU one user or one session costs, and:
 
 ```
 headroom      = 80% of CPU - CPU in use
