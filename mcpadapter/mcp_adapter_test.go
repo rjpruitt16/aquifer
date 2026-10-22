@@ -1,7 +1,7 @@
 // Copyright 2026 Rahmi Pruitt
 // SPDX-License-Identifier: Apache-2.0
 
-package aquifer
+package mcpadapter
 
 import (
 	"bufio"
@@ -13,10 +13,12 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rjpruitt16/aquifer"
 )
 
 func TestMCPStdioAdapterListsToolsAndResourceTemplates(t *testing.T) {
-	aquifer := testAquifer(t)
+	app := testAquifer(t)
 	input := strings.Join([]string{
 		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}`,
 		`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`,
@@ -24,8 +26,8 @@ func TestMCPStdioAdapterListsToolsAndResourceTemplates(t *testing.T) {
 	}, "\n") + "\n"
 
 	var output bytes.Buffer
-	adapter := NewMCPStdioAdapter(strings.NewReader(input), &output)
-	if err := adapter.Start(context.Background(), aquifer); err != nil {
+	adapter := NewAdapter(strings.NewReader(input), &output)
+	if err := adapter.Start(context.Background(), app); err != nil {
 		t.Fatalf("adapter.Start: %v", err)
 	}
 
@@ -38,8 +40,8 @@ func TestMCPStdioAdapterListsToolsAndResourceTemplates(t *testing.T) {
 		t.Fatalf("initialize returned error: %v", responses[0]["error"])
 	}
 	serverInfo := responses[0]["result"].(map[string]any)["serverInfo"].(map[string]any)
-	if serverInfo["version"] != Version {
-		t.Fatalf("expected MCP server version %q, got %v", Version, serverInfo["version"])
+	if serverInfo["version"] != aquifer.Version {
+		t.Fatalf("expected MCP server version %q, got %v", aquifer.Version, serverInfo["version"])
 	}
 
 	toolsResult := responses[1]["result"].(map[string]any)
@@ -72,23 +74,23 @@ func TestMCPStdioAdapterListsToolsAndResourceTemplates(t *testing.T) {
 }
 
 func TestMCPReadJobResource(t *testing.T) {
-	aquifer := testAquifer(t)
-	req := JobRequest{
+	app := testAquifer(t)
+	req := aquifer.JobRequest{
 		UserID:        "agent-1",
 		IdempotentKey: "job-resource-test",
 		URL:           "http://127.0.0.1:1/test",
 		Method:        "GET",
 		WebhookURL:    "http://127.0.0.1:1/webhook",
 	}
-	result, err := aquifer.Enqueue(req)
+	result, err := app.Enqueue(req)
 	if err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
 
 	input := `{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"aquifer://jobs/` + result.JobID + `"}}` + "\n"
 	var output bytes.Buffer
-	adapter := NewMCPStdioAdapter(strings.NewReader(input), &output)
-	if err := adapter.Start(context.Background(), aquifer); err != nil {
+	adapter := NewAdapter(strings.NewReader(input), &output)
+	if err := adapter.Start(context.Background(), app); err != nil {
 		t.Fatalf("adapter.Start: %v", err)
 	}
 
@@ -103,7 +105,7 @@ func TestMCPReadJobResource(t *testing.T) {
 		t.Fatalf("unexpected resource uri: %v", content["uri"])
 	}
 
-	var job Job
+	var job aquifer.Job
 	if err := json.Unmarshal([]byte(content["text"].(string)), &job); err != nil {
 		t.Fatalf("resource content is not a job: %v", err)
 	}
@@ -119,7 +121,7 @@ func TestMCPStdioAdapterReturnsWhenContextIsCanceled(t *testing.T) {
 		_ = writer.Close()
 	})
 	ctx, cancel := context.WithCancel(context.Background())
-	adapter := NewMCPStdioAdapter(reader, io.Discard)
+	adapter := NewAdapter(reader, io.Discard)
 	done := make(chan error, 1)
 	go func() { done <- adapter.Start(ctx, nil) }()
 
@@ -134,17 +136,17 @@ func TestMCPStdioAdapterReturnsWhenContextIsCanceled(t *testing.T) {
 	}
 }
 
-func testAquifer(t *testing.T) *Aquifer {
+func testAquifer(t *testing.T) *aquifer.Aquifer {
 	t.Helper()
 
 	dir := t.TempDir()
-	store := NewStore(filepath.Join(dir, "aquifer.db"))
-	broker := NewBroker()
-	l8 := NewL8Registry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"))
-	cfg := &Config{Defaults: RateConfig{RPS: 100, MaxConcurrent: 1}}
-	registry := NewRegistry(store, cfg, broker, l8, NoopMetricsAdapter{}, nil)
-	admission := NewAdmissionController(AdmissionLimits{}, filepath.Join(dir, "aquifer.db"))
-	app := NewAquifer(store, registry, broker, l8, admission, nil)
+	store := aquifer.NewStore(filepath.Join(dir, "aquifer.db"))
+	broker := aquifer.NewBroker()
+	l8 := aquifer.NewL8Registry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"))
+	cfg := &aquifer.Config{Defaults: aquifer.RateConfig{RPS: 100, MaxConcurrent: 1}}
+	registry := aquifer.NewRegistry(store, cfg, broker, l8, aquifer.NoopMetricsAdapter{}, nil)
+	admission := aquifer.NewAdmissionController(aquifer.AdmissionLimits{}, filepath.Join(dir, "aquifer.db"))
+	app := aquifer.NewAquifer(store, registry, broker, l8, admission, nil)
 	t.Cleanup(app.Close)
 	return app
 }

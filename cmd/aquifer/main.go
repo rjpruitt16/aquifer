@@ -15,6 +15,7 @@ import (
 
 	"github.com/rjpruitt16/aquifer"
 	"github.com/rjpruitt16/aquifer/a2aadapter"
+	"github.com/rjpruitt16/aquifer/mcpadapter"
 )
 
 // Set via -ldflags at build time (see .goreleaser.yaml); "dev" when built
@@ -95,7 +96,7 @@ func buildAdapter(name, port string) aquifer.FrameworkAdapter {
 	case "http":
 		return aquifer.NewHTTPAdapter(":" + port)
 	case "mcp-stdio":
-		return aquifer.NewMCPStdioAdapter(os.Stdin, os.Stdout)
+		return mcpadapter.NewAdapter(os.Stdin, os.Stdout)
 	case "a2a":
 		publicURL := os.Getenv("AQUIFER_A2A_PUBLIC_URL")
 		if publicURL == "" {

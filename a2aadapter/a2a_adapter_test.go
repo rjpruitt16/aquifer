@@ -24,7 +24,7 @@ import (
 )
 
 // testAquifer builds a minimal, self-contained *aquifer.Aquifer the same
-// way the MCP adapter's own tests do (mcp_adapter_test.go), using only
+// way the MCP adapter's own tests do (mcpadapter/mcp_adapter_test.go), using only
 // exported constructors since this package sits outside aquifer's own
 // package boundary.
 func testAquifer(t *testing.T) *aquifer.Aquifer {
