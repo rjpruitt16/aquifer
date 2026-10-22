@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/rjpruitt16/aquifer/internal/httpx"
+	"github.com/rjpruitt16/aquifer/internal/region"
 	"github.com/rjpruitt16/aquifer/l8"
 )
 
@@ -437,7 +438,7 @@ func (s *Server) proxyJob(w http.ResponseWriter, r *http.Request) {
 		}
 		var redirectErr *RedirectExhaustedError
 		if errors.As(outcome.Err, &redirectErr) {
-			w.Header().Set("Retry-After", fmt.Sprintf("%d", redirectExhaustedRetryAfterSeconds()))
+			w.Header().Set("Retry-After", fmt.Sprintf("%d", region.ExhaustedRetryAfterSeconds()))
 			jsonErrorFields(w, outcome.Err.Error(), http.StatusTooManyRequests, map[string]any{
 				"limit_reason": "redirect_exhausted",
 			})

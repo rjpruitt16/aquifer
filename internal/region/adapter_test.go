@@ -1,7 +1,7 @@
 // Copyright 2026 Rahmi Pruitt
 // SPDX-License-Identifier: Apache-2.0
 
-package aquifer
+package region
 
 import (
 	"net/http"
@@ -12,7 +12,7 @@ import (
 )
 
 func TestNoopRegionAdapterIsEmptyByDefault(t *testing.T) {
-	var a NoopRegionAdapter
+	var a Noop
 	if got := a.LiveRegions(); got != nil {
 		t.Fatalf("expected nil live regions, got %v", got)
 	}
@@ -22,36 +22,36 @@ func TestNoopRegionAdapterIsEmptyByDefault(t *testing.T) {
 }
 
 func TestEnsureRegionAdapterDefaultsNilToNoop(t *testing.T) {
-	adapter := ensureRegionAdapter(nil)
-	if _, ok := adapter.(NoopRegionAdapter); !ok {
-		t.Fatalf("expected nil to default to NoopRegionAdapter, got %T", adapter)
+	adapter := Ensure(nil)
+	if _, ok := adapter.(Noop); !ok {
+		t.Fatalf("expected nil to default to Noop, got %T", adapter)
 	}
 }
 
 func TestEnsureRegionAdapterPassesThroughNonNil(t *testing.T) {
-	fly := &FlyRegionAdapter{}
-	adapter := ensureRegionAdapter(fly)
-	if adapter != RegionAdapter(fly) {
+	fly := &FlyAdapter{}
+	adapter := Ensure(fly)
+	if adapter != Adapter(fly) {
 		t.Fatalf("expected the given adapter to pass through unchanged")
 	}
 }
 
 func TestNewFlyRegionAdapterReturnsNilWithoutRegionsConfigured(t *testing.T) {
 	t.Setenv("AQUIFER_FLY_REGIONS", "")
-	if a := NewFlyRegionAdapter(); a != nil {
+	if a := NewFlyAdapter(); a != nil {
 		t.Fatalf("expected nil when AQUIFER_FLY_REGIONS is unset, got %+v", a)
 	}
 }
 
 func TestNewFlyRegionAdapterReturnsNilForWhitespaceOnlyRegions(t *testing.T) {
 	t.Setenv("AQUIFER_FLY_REGIONS", " , ,")
-	if a := NewFlyRegionAdapter(); a != nil {
+	if a := NewFlyAdapter(); a != nil {
 		t.Fatalf("expected nil when AQUIFER_FLY_REGIONS has no real entries, got %+v", a)
 	}
 }
 
 func TestFlyRegionAdapterLiveRegionsReturnsDefensiveCopy(t *testing.T) {
-	a := &FlyRegionAdapter{live: []string{"iad", "lhr"}}
+	a := &FlyAdapter{live: []string{"iad", "lhr"}}
 	got := a.LiveRegions()
 	got[0] = "mutated"
 	if a.live[0] != "iad" {
@@ -87,7 +87,7 @@ func TestFlyRegionAdapterPollOncePopulatesLiveRegionsExcludingUnhealthyAndSelf(t
 		"sjc": healthyIAD.URL, // reuse the healthy server for a second "region"
 	}
 
-	a := &FlyRegionAdapter{
+	a := &FlyAdapter{
 		selfRegion: "sjc", // must be excluded even though its server is healthy
 		regions:    []string{"iad", "lhr", "sjc"},
 		httpClient: &http.Client{Timeout: 2 * time.Second},
@@ -118,7 +118,7 @@ func TestFlyRegionAdapterPollOnceOrdersLiveRegionsByLatencyAscending(t *testing.
 		"slow-region": slow.URL,
 	}
 
-	a := &FlyRegionAdapter{
+	a := &FlyAdapter{
 		regions:    []string{"slow-region", "fast-region"}, // deliberately not already in latency order
 		httpClient: &http.Client{Timeout: 2 * time.Second},
 		healthCheckURL: func(region string) string {
@@ -135,7 +135,7 @@ func TestFlyRegionAdapterPollOnceOrdersLiveRegionsByLatencyAscending(t *testing.
 }
 
 func TestFlyRegionAdapterPollOnceTreatsUnreachableAsUnhealthy(t *testing.T) {
-	a := &FlyRegionAdapter{
+	a := &FlyAdapter{
 		regions:    []string{"xyz"},
 		httpClient: &http.Client{Timeout: 500 * time.Millisecond},
 		healthCheckURL: func(region string) string {
@@ -156,7 +156,7 @@ func TestNewFlyRegionAdapterParsesRegionListAndPort(t *testing.T) {
 	t.Setenv("FLY_APP_NAME", "my-app")
 	t.Setenv("FLY_REGION", "iad")
 
-	a := NewFlyRegionAdapter()
+	a := NewFlyAdapter()
 	if a == nil {
 		t.Fatalf("expected a real adapter with regions configured")
 	}

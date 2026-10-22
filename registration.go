@@ -26,7 +26,7 @@ import (
 // this ping already sees the caller's real source IP on the connection
 // itself, so a full self-reported address would just be redundant with
 // that. This also makes it more portable than region-redirect's
-// Fly-specific ".internal" DNS convention (region_adapter_fly.go) -- this
+// Fly-specific ".internal" DNS convention (internal/region/fly.go) -- this
 // feature isn't Fly-specific at all.
 //
 // Disabled by default means exactly that: when AQUIFER_REGISTRY_URL is
@@ -36,7 +36,7 @@ const defaultRegistrationIntervalSeconds = 15
 
 type RegistrationConfig struct {
 	URL             string // AQUIFER_REGISTRY_URL -- presence enables this feature
-	Port            string // PORT (same env var and "8080" default region_adapter_fly.go already uses)
+	Port            string // PORT (same env var and "8080" default internal/region/fly.go already uses)
 	IntervalSeconds int64  // AQUIFER_REGISTRY_INTERVAL_SECONDS
 	// ReservedFor (AQUIFER_REGISTRY_RESERVED_FOR) tells the control plane
 	// this instance is dedicated to one user_id and shouldn't be handed to

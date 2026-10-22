@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/rjpruitt16/aquifer/internal/region"
 	"github.com/rjpruitt16/aquifer/l8"
 )
 
@@ -44,7 +45,7 @@ type Aquifer struct {
 	// initialized (not nil-checked elsewhere), since it's cheap and every
 	// Aquifer instance can carry one regardless of whether redirect is
 	// ever actually configured.
-	redirectGate *redirectGate
+	redirectGate *region.Gate
 	// redirectTargetURL builds the URL a redirect hop dials for a given
 	// region. Set to the real .internal DNS builder by NewAquifer;
 	// overridable in tests (which can't resolve real Fly private-network
@@ -60,8 +61,8 @@ type Aquifer struct {
 func NewAquifer(store JobStore, registry *Registry, broker *Broker, l8 *L8Registry, admission *AdmissionController, pools *PoolRegistry) *Aquifer {
 	a := &Aquifer{
 		store: store, registry: registry, broker: broker, l8: l8, admission: admission, pools: pools,
-		redirectGate:      &redirectGate{},
-		redirectTargetURL: defaultRedirectTargetURL,
+		redirectGate:      &region.Gate{},
+		redirectTargetURL: region.DefaultTargetURL,
 		inbound:           NewInboundRateController(),
 	}
 	if registry != nil {
@@ -128,7 +129,7 @@ func (a *Aquifer) SetWebSocketManager(manager *WebSocketManager) {
 }
 
 func (a *Aquifer) regionAdapterOrDefault() RegionAdapter {
-	return ensureRegionAdapter(a.regionAdapter)
+	return region.Ensure(a.regionAdapter)
 }
 
 // RegisterPoolMember adds or refreshes (heartbeats) a member of a pool.

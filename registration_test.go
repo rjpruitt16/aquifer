@@ -27,7 +27,7 @@ func TestRegistrationDisabledByDefault(t *testing.T) {
 }
 
 // TestRegistrationPortDefaultsTo8080 confirms this reuses the exact same
-// PORT env var and default region_adapter_fly.go already established,
+// PORT env var and default internal/region/fly.go already established,
 // rather than introducing a second convention for the same fact.
 func TestRegistrationPortDefaultsTo8080(t *testing.T) {
 	t.Setenv("PORT", "")
