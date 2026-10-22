@@ -274,3 +274,21 @@ func TestTheDestinationIsHeardOnDirectProxyResponses(t *testing.T) {
 	}
 	waitForMode(t, app.registry, upstream.URL, false)
 }
+
+// TestAqueductHeaderTakesPrecedenceOverOrca is the important precedence
+// guarantee: an operator's own explicit pacing directive must never be
+// silently overridden by a best-effort inferred one. This test exercises
+// the actual dispatch response-handling path, not just orca.Rps in isolation.
+func TestAqueductHeaderTakesPrecedenceOverOrca(t *testing.T) {
+	headers := http.Header{}
+	headers.Set("X-Aqueduct-Rps", "7")
+	headers.Set("endpoint-load-metrics", "TEXT named_metrics.kv_cache_usage_perc=0.99")
+
+	if val := pacingHeader(headers, "Rps"); val != "7" {
+		t.Fatalf("expected explicit X-Aqueduct-Rps to be read first, got %q", val)
+	}
+	// orca.Rps itself doesn't know about precedence -- that's enforced by the
+	// caller in account_queue.go's else-if. This test documents the
+	// guarantee at the pacingHeader level: if this string is non-empty,
+	// the caller never even calls orca.Rps.
+}

@@ -1,7 +1,7 @@
 // Copyright 2026 Rahmi Pruitt
 // SPDX-License-Identifier: Apache-2.0
 
-package aquifer
+package orca
 
 import (
 	"net/http"
@@ -16,7 +16,7 @@ func TestOrcaRpsParsesRealVLLMTextFormat(t *testing.T) {
 	headers := http.Header{}
 	headers.Set("endpoint-load-metrics", "TEXT named_metrics.kv_cache_usage_perc=0.98, named_metrics.num_requests_waiting=12")
 
-	rps := orcaRps(headers)
+	rps := Rps(headers)
 	if rps == nil {
 		t.Fatal("expected an rps override, got nil")
 	}
@@ -29,12 +29,12 @@ func TestOrcaRpsParsesRealVLLMTextFormat(t *testing.T) {
 // Triton's OrcaKVMetricHeader produces (verified directly against
 // src/orca_http.cc) -- Triton reports the same concept vLLM calls
 // kv_cache_usage_perc under a different name, kv_cache_utilization, which
-// is why orcaRps tries a list of known names rather than one.
+// is why Rps tries a list of known names rather than one.
 func TestOrcaRpsParsesRealTritonTextFormat(t *testing.T) {
 	headers := http.Header{}
 	headers.Set("endpoint-load-metrics", "TEXT named_metrics.kv_cache_utilization=0.980000, named_metrics.max_token_capacity=1024")
 
-	rps := orcaRps(headers)
+	rps := Rps(headers)
 	if rps == nil {
 		t.Fatal("expected an rps override, got nil")
 	}
@@ -47,7 +47,7 @@ func TestOrcaRpsParsesJSONFormat(t *testing.T) {
 	headers := http.Header{}
 	headers.Set("endpoint-load-metrics", `JSON {"named_metrics":{"kv_cache_usage_perc":0.85}}`)
 
-	rps := orcaRps(headers)
+	rps := Rps(headers)
 	if rps == nil {
 		t.Fatal("expected an rps override, got nil")
 	}
@@ -60,13 +60,13 @@ func TestOrcaRpsNoOverrideWhenHealthy(t *testing.T) {
 	headers := http.Header{}
 	headers.Set("endpoint-load-metrics", "TEXT named_metrics.kv_cache_usage_perc=0.3")
 
-	if rps := orcaRps(headers); rps != nil {
+	if rps := Rps(headers); rps != nil {
 		t.Fatalf("expected no override below the low watermark, got %v", *rps)
 	}
 }
 
 func TestOrcaRpsMissingHeader(t *testing.T) {
-	if rps := orcaRps(http.Header{}); rps != nil {
+	if rps := Rps(http.Header{}); rps != nil {
 		t.Fatalf("expected nil with no header at all, got %v", *rps)
 	}
 }
@@ -75,7 +75,7 @@ func TestOrcaRpsMissingMetric(t *testing.T) {
 	headers := http.Header{}
 	headers.Set("endpoint-load-metrics", "TEXT named_metrics.num_requests_waiting=12")
 
-	if rps := orcaRps(headers); rps != nil {
+	if rps := Rps(headers); rps != nil {
 		t.Fatalf("expected nil when no known kv-cache metric name is reported, got %v", *rps)
 	}
 }
@@ -91,7 +91,7 @@ func TestOrcaRpsMalformedHeaderDoesNotPanic(t *testing.T) {
 	for _, c := range cases {
 		headers := http.Header{}
 		headers.Set("endpoint-load-metrics", c)
-		if rps := orcaRps(headers); rps != nil {
+		if rps := Rps(headers); rps != nil {
 			t.Fatalf("input %q: expected nil for malformed input, got %v", c, *rps)
 		}
 	}
@@ -113,7 +113,7 @@ func TestOrcaLoadToRpsCurve(t *testing.T) {
 		{util: 1.0, wantRps: 0.25},
 	}
 	for _, c := range cases {
-		got := orcaLoadToRps(c.util)
+		got := LoadToRps(c.util)
 		if c.wantNil {
 			if got != nil {
 				t.Errorf("util %.2f: expected nil, got %v", c.util, *got)
@@ -128,22 +128,4 @@ func TestOrcaLoadToRpsCurve(t *testing.T) {
 			t.Errorf("util %.2f: expected %v, got %v", c.util, c.wantRps, *got)
 		}
 	}
-}
-
-// TestAqueductHeaderTakesPrecedenceOverOrca is the important precedence
-// guarantee: an operator's own explicit pacing directive must never be
-// silently overridden by a best-effort inferred one. This test exercises
-// the actual dispatch response-handling path, not just orcaRps in isolation.
-func TestAqueductHeaderTakesPrecedenceOverOrca(t *testing.T) {
-	headers := http.Header{}
-	headers.Set("X-Aqueduct-Rps", "7")
-	headers.Set("endpoint-load-metrics", "TEXT named_metrics.kv_cache_usage_perc=0.99")
-
-	if val := pacingHeader(headers, "Rps"); val != "7" {
-		t.Fatalf("expected explicit X-Aqueduct-Rps to be read first, got %q", val)
-	}
-	// orcaRps itself doesn't know about precedence -- that's enforced by the
-	// caller in account_queue.go's else-if. This test documents the
-	// guarantee at the pacingHeader level: if this string is non-empty,
-	// the caller never even calls orcaRps.
 }

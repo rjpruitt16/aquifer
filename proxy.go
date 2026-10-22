@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/rjpruitt16/aquifer/internal/env"
+	"github.com/rjpruitt16/aquifer/internal/orca"
 )
 
 const (
@@ -262,11 +263,11 @@ func isOverloadSignal(resp *http.Response) (cooldown time.Duration, kind string,
 // uses something nonstandard; defaults are deliberately narrow
 // (429 → queue, 503 → reroute) rather than sweeping in every 5xx.
 //
-// An ORCA overload signal (orcaRps returning non-nil) is always
+// An ORCA overload signal (orca.Rps returning non-nil) is always
 // reroute-eligible — sustained backend load reported this way is commonly
 // instance/pool-specific, unlike a generic rate limit.
 func classifyOverload(headers http.Header, status int) (kind string, overloaded bool) {
-	if orcaRps(headers) != nil {
+	if orca.Rps(headers) != nil {
 		return "reroute", true
 	}
 	if codeListMatches(parseCodeList(headerOrDefault(headers, "Reroute-Codes", defaultRerouteCodes)), status) {
