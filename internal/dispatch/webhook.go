@@ -1,7 +1,7 @@
 // Copyright 2026 Rahmi Pruitt
 // SPDX-License-Identifier: Apache-2.0
 
-package aquifer
+package dispatch
 
 import (
 	"bytes"
@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/rjpruitt16/aquifer/internal/retry"
+	"github.com/rjpruitt16/aquifer/l8"
 )
 
 const webhookMaxRetries = 4
@@ -23,16 +24,16 @@ const webhookMaxRetries = 4
 // per-job completion/failure webhooks, which now go through
 // Registry.EnqueueWebhook's paced account-queue delivery (account_queue.go)
 // instead of firing immediately from here.
-func deliverWebhookSync(url string, payload map[string]any, l8 *L8Registry, metrics MetricsAdapter) bool {
+func deliverWebhookSync(url string, payload map[string]any, l8 *l8.Registry, metrics MetricsAdapter) bool {
 	return deliverWebhookSyncContext(context.Background(), url, payload, l8, metrics)
 }
 
-func deliverWebhookSyncContext(ctx context.Context, url string, payload map[string]any, l8 *L8Registry, metrics MetricsAdapter) bool {
-	return deliverWithRetryContext(ctx, url, payload, 0, l8, ensureMetrics(metrics))
+func deliverWebhookSyncContext(ctx context.Context, url string, payload map[string]any, l8 *l8.Registry, metrics MetricsAdapter) bool {
+	return deliverWithRetryContext(ctx, url, payload, 0, l8, EnsureMetrics(metrics))
 }
 
-func deliverWebhookOnceContext(ctx context.Context, rawURL string, payload map[string]any, l8 *L8Registry, metrics MetricsAdapter) bool {
-	metrics = ensureMetrics(metrics)
+func deliverWebhookOnceContext(ctx context.Context, rawURL string, payload map[string]any, l8 *l8.Registry, metrics MetricsAdapter) bool {
+	metrics = EnsureMetrics(metrics)
 	body, _ := json.Marshal(payload)
 	body, l8Headers, err := l8.SealDelivery(rawURL, body, "application/json")
 	if err != nil {
@@ -63,11 +64,11 @@ func deliverWebhookOnceContext(ctx context.Context, rawURL string, payload map[s
 	return true
 }
 
-func deliverWithRetry(rawURL string, payload map[string]any, attempt int, l8 *L8Registry, metrics MetricsAdapter) bool {
+func deliverWithRetry(rawURL string, payload map[string]any, attempt int, l8 *l8.Registry, metrics MetricsAdapter) bool {
 	return deliverWithRetryContext(context.Background(), rawURL, payload, attempt, l8, metrics)
 }
 
-func deliverWithRetryContext(ctx context.Context, rawURL string, payload map[string]any, attempt int, l8 *L8Registry, metrics MetricsAdapter) bool {
+func deliverWithRetryContext(ctx context.Context, rawURL string, payload map[string]any, attempt int, l8 *l8.Registry, metrics MetricsAdapter) bool {
 	if ctx.Err() != nil {
 		return false
 	}
@@ -99,7 +100,7 @@ func deliverWithRetryContext(ctx context.Context, rawURL string, payload map[str
 		if attempt < webhookMaxRetries {
 			backoff := retry.Jitter(time.Duration(math.Pow(2, float64(attempt))) * time.Second)
 			log.Printf("[Webhook] error delivering to %s, retry %d/%d in %s: %v", rawURL, attempt+1, webhookMaxRetries, backoff, err)
-			if !sleepBeforeRetryContext(ctx, backoff) {
+			if !SleepBeforeRetryContext(ctx, backoff) {
 				return false
 			}
 			return deliverWithRetryContext(ctx, rawURL, payload, attempt+1, l8, metrics)
@@ -114,7 +115,7 @@ func deliverWithRetryContext(ctx context.Context, rawURL string, payload map[str
 		if attempt < webhookMaxRetries {
 			backoff := retry.Jitter(time.Duration(math.Pow(2, float64(attempt))) * time.Second)
 			log.Printf("[Webhook] %d from %s, retry %d/%d in %s", resp.StatusCode, rawURL, attempt+1, webhookMaxRetries, backoff)
-			if !sleepBeforeRetryContext(ctx, backoff) {
+			if !SleepBeforeRetryContext(ctx, backoff) {
 				return false
 			}
 			return deliverWithRetryContext(ctx, rawURL, payload, attempt+1, l8, metrics)

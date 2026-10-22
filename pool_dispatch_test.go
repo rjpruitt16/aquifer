@@ -11,13 +11,15 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/rjpruitt16/aquifer/internal/dispatch"
 )
 
 // TestPoolBackedJobDispatchesToRegisteredMember is the end-to-end proof
 // that a job submitted with pool_id (no url) actually resolves through
 // the pool and reaches a real registered member's address, exercising
 // the full path: Registry -> URLWorker -> AccountQueue -> Pool.Pick ->
-// execute -> makeRequest.
+// execute -> dispatch.MakeRequest.
 func TestPoolBackedJobDispatchesToRegisteredMember(t *testing.T) {
 	var hits atomic.Int64
 	member := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -80,9 +82,9 @@ func TestPoolBackedJobDispatchesToRegisteredMember(t *testing.T) {
 // pool stays queued until a member registers, which is the restart-safe
 // behavior for durable pool-backed work.
 func TestPoolBackedJobWaitsForMembers(t *testing.T) {
-	oldSleep := poolEmptySleepFunc.Load()
-	poolEmptySleepFunc.Store(func(time.Duration) { time.Sleep(10 * time.Millisecond) })
-	t.Cleanup(func() { poolEmptySleepFunc.Store(oldSleep) })
+	oldSleep := dispatch.PoolEmptySleepFunc.Load()
+	dispatch.PoolEmptySleepFunc.Store(func(time.Duration) { time.Sleep(10 * time.Millisecond) })
+	t.Cleanup(func() { dispatch.PoolEmptySleepFunc.Store(oldSleep) })
 
 	var memberHits atomic.Int64
 	member := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -144,12 +146,12 @@ func TestPoolBackedJobWaitsForMembers(t *testing.T) {
 }
 
 func TestPoolBackedJobFailsOverToHealthyMember(t *testing.T) {
-	oldSleep := retrySleepFunc.Load()
-	retrySleepFunc.Store(func(time.Duration) {})
-	oldBackoff := retryBackoffFunc.Load()
-	retryBackoffFunc.Store(func(int) time.Duration { return 0 })
-	t.Cleanup(func() { retryBackoffFunc.Store(oldBackoff) })
-	t.Cleanup(func() { retrySleepFunc.Store(oldSleep) })
+	oldSleep := dispatch.RetrySleepFunc.Load()
+	dispatch.RetrySleepFunc.Store(func(time.Duration) {})
+	oldBackoff := dispatch.RetryBackoffFunc.Load()
+	dispatch.RetryBackoffFunc.Store(func(int) time.Duration { return 0 })
+	t.Cleanup(func() { dispatch.RetryBackoffFunc.Store(oldBackoff) })
+	t.Cleanup(func() { dispatch.RetrySleepFunc.Store(oldSleep) })
 
 	var badHits atomic.Int64
 	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -211,18 +213,18 @@ func TestPoolBackedJobFailsOverToHealthyMember(t *testing.T) {
 	if job := store.GetJob(result.JobID); job == nil || job.Status != StatusCompleted {
 		t.Fatalf("expected stored job to complete after failover, got %#v", job)
 	}
-	if got := pools.Get("workers").members["bad"].Reputation(); got >= 1.0 {
+	if got := memberReputation(pools.Get("workers"), "bad"); got >= 1.0 {
 		t.Fatalf("expected bad member reputation to decay after failed attempt, got %v", got)
 	}
 }
 
 func TestPoolBackedJobTreatsFinal500AsFailed(t *testing.T) {
-	oldSleep := retrySleepFunc.Load()
-	retrySleepFunc.Store(func(time.Duration) {})
-	oldBackoff := retryBackoffFunc.Load()
-	retryBackoffFunc.Store(func(int) time.Duration { return 0 })
-	t.Cleanup(func() { retryBackoffFunc.Store(oldBackoff) })
-	t.Cleanup(func() { retrySleepFunc.Store(oldSleep) })
+	oldSleep := dispatch.RetrySleepFunc.Load()
+	dispatch.RetrySleepFunc.Store(func(time.Duration) {})
+	oldBackoff := dispatch.RetryBackoffFunc.Load()
+	dispatch.RetryBackoffFunc.Store(func(int) time.Duration { return 0 })
+	t.Cleanup(func() { dispatch.RetryBackoffFunc.Store(oldBackoff) })
+	t.Cleanup(func() { dispatch.RetrySleepFunc.Store(oldSleep) })
 
 	always500 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -287,14 +289,11 @@ func testPoolApp(t *testing.T, rps float64, maxConcurrent int) (*Aquifer, *Store
 	return app, store, pools
 }
 
-func waitForWebhook(t *testing.T, ch <-chan map[string]any) map[string]any {
-	t.Helper()
-
-	select {
-	case payload := <-ch:
-		return payload
-	case <-time.After(10 * time.Second):
-		t.Fatal("timed out waiting for webhook")
+func memberReputation(pool *Pool, id string) float64 {
+	for _, m := range pool.Snapshot() {
+		if m["id"] == id {
+			return m["reputation"].(float64)
+		}
 	}
-	return nil
+	return -1
 }

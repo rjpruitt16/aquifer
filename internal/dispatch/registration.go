@@ -1,7 +1,7 @@
 // Copyright 2026 Rahmi Pruitt
 // SPDX-License-Identifier: Apache-2.0
 
-package aquifer
+package dispatch
 
 import (
 	"context"
@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rjpruitt16/aquifer/internal/cluster"
 	"github.com/rjpruitt16/aquifer/internal/env"
 )
 
@@ -106,7 +107,7 @@ func (r *Registry) registrationLoop() {
 }
 
 func (r *Registry) pingRegistry() {
-	state, _ := r.registrationState.Load().(LifecycleState)
+	state, _ := r.registrationState.Load().(cluster.State)
 	payload := r.registrationPayload(state)
 	if !deliverWebhookSyncContext(r.ctx, r.registrationCfg.URL, payload, r.l8, r.metrics) && r.ctx.Err() == nil {
 		log.Printf("registration: failed to report state to %s after retries", r.registrationCfg.URL)
@@ -117,13 +118,13 @@ func (r *Registry) ReportOffline(ctx context.Context) {
 	if r == nil || !r.registrationCfg.Enabled() {
 		return
 	}
-	r.registrationState.Store(LifecycleStateOffline)
-	if !deliverWebhookOnceContext(ctx, r.registrationCfg.URL, r.registrationPayload(LifecycleStateOffline), r.l8, r.metrics) {
+	r.registrationState.Store(cluster.StateOffline)
+	if !deliverWebhookOnceContext(ctx, r.registrationCfg.URL, r.registrationPayload(cluster.StateOffline), r.l8, r.metrics) {
 		log.Printf("registration: failed to report offline state to %s", r.registrationCfg.URL)
 	}
 }
 
-func (r *Registry) registrationPayload(state LifecycleState) map[string]any {
+func (r *Registry) registrationPayload(state cluster.State) map[string]any {
 	payload := map[string]any{
 		"port":        r.registrationCfg.Port,
 		"state":       state,

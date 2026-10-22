@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rjpruitt16/aquifer/internal/dispatch"
 	"github.com/rjpruitt16/aquifer/internal/orca"
 )
 
@@ -210,7 +211,7 @@ func TestAttemptDirect429TripsBreakerForThatDomain(t *testing.T) {
 		t.Fatalf("expected fallback on 429")
 	}
 
-	worker := app.registry.workerFor(outcome.Job)
+	worker := app.registry.WorkerFor(outcome.Job)
 	if !worker.BreakerOpen() {
 		t.Fatalf("expected the breaker for this domain to be open after a 429")
 	}
@@ -267,7 +268,7 @@ func TestAttemptDirectHonorsQueueActiveHeaderWithoutDiscardingTheResponse(t *tes
 		t.Fatalf("expected the real response relayed verbatim, got status=%d body=%q", outcome.Status, outcome.Body)
 	}
 
-	worker := app.registry.workerFor(outcome.Job)
+	worker := app.registry.WorkerFor(outcome.Job)
 	if !worker.BreakerOpen() {
 		t.Fatalf("expected X-Aqueduct-Queue-Active: true to trip the breaker for future requests")
 	}
@@ -298,7 +299,7 @@ func TestAttemptDirectFallsBackWhileQueueHasBacklogEvenAfterBreakerCooldownExpir
 	// real backlog, not just a persisted-but-untouched job record.
 	app.Dispatch(first.Job, "")
 
-	worker := app.registry.workerFor(first.Job)
+	worker := app.registry.WorkerFor(first.Job)
 	deadline := time.Now().Add(2 * time.Second)
 	for !worker.QueueActive() && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
@@ -433,12 +434,12 @@ func TestProxyJobHTTPDuplicateOfTerminalJobReturnsStatusWithoutHanging(t *testin
 }
 
 func TestProxyJobHTTPFallsBackAndStreamsToEventualCompletion(t *testing.T) {
-	oldSleep := retrySleepFunc.Load()
-	retrySleepFunc.Store(func(time.Duration) {})
-	oldBackoff := retryBackoffFunc.Load()
-	retryBackoffFunc.Store(func(int) time.Duration { return 0 })
-	t.Cleanup(func() { retryBackoffFunc.Store(oldBackoff) })
-	t.Cleanup(func() { retrySleepFunc.Store(oldSleep) })
+	oldSleep := dispatch.RetrySleepFunc.Load()
+	dispatch.RetrySleepFunc.Store(func(time.Duration) {})
+	oldBackoff := dispatch.RetryBackoffFunc.Load()
+	dispatch.RetryBackoffFunc.Store(func(int) time.Duration { return 0 })
+	t.Cleanup(func() { dispatch.RetryBackoffFunc.Store(oldBackoff) })
+	t.Cleanup(func() { dispatch.RetrySleepFunc.Store(oldSleep) })
 
 	app, _ := testAquiferWithLimits(t, AdmissionLimits{})
 	srv := NewServer(app)
@@ -489,12 +490,12 @@ func TestProxyJobHTTPFallsBackAndStreamsToEventualCompletion(t *testing.T) {
 }
 
 func TestProxyJobHTTPFallbackStreamsAProxyFallbackEventFirst(t *testing.T) {
-	oldSleep := retrySleepFunc.Load()
-	retrySleepFunc.Store(func(time.Duration) {})
-	oldBackoff := retryBackoffFunc.Load()
-	retryBackoffFunc.Store(func(int) time.Duration { return 0 })
-	t.Cleanup(func() { retryBackoffFunc.Store(oldBackoff) })
-	t.Cleanup(func() { retrySleepFunc.Store(oldSleep) })
+	oldSleep := dispatch.RetrySleepFunc.Load()
+	dispatch.RetrySleepFunc.Store(func(time.Duration) {})
+	oldBackoff := dispatch.RetryBackoffFunc.Load()
+	dispatch.RetryBackoffFunc.Store(func(int) time.Duration { return 0 })
+	t.Cleanup(func() { dispatch.RetryBackoffFunc.Store(oldBackoff) })
+	t.Cleanup(func() { dispatch.RetrySleepFunc.Store(oldSleep) })
 
 	app, _ := testAquiferWithLimits(t, AdmissionLimits{})
 	srv := NewServer(app)

@@ -1,7 +1,7 @@
 // Copyright 2026 Rahmi Pruitt
 // SPDX-License-Identifier: Apache-2.0
 
-package aquifer
+package dispatch
 
 import (
 	"context"
@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/rjpruitt16/aquifer/internal/cluster"
 )
 
 // TestRegistrationDisabledByDefault proves the opt-in: with no
@@ -114,13 +116,13 @@ func TestRegistrationReportsShutdownLifecycle(t *testing.T) {
 	t.Setenv("AQUIFER_REGISTRY_INTERVAL_SECONDS", "3600")
 	r := drainTestRegistry(t, NoopMetricsAdapter{})
 
-	waitForRegistrationState(t, states, string(LifecycleStateActive))
+	waitForRegistrationState(t, states, string(cluster.StateActive))
 	r.BeginDrain()
-	waitForRegistrationState(t, states, string(LifecycleStateDraining))
+	waitForRegistrationState(t, states, string(cluster.StateDraining))
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	r.ReportOffline(ctx)
-	waitForRegistrationState(t, states, string(LifecycleStateOffline))
+	waitForRegistrationState(t, states, string(cluster.StateOffline))
 }
 
 func waitForRegistrationState(t *testing.T, states <-chan string, expected string) {
@@ -238,7 +240,7 @@ func TestRegistrationPingsAsSoonAsDrainModeIsUnassigned(t *testing.T) {
 	if body["drain_state"] != string(DrainStateUnassigned) {
 		t.Fatalf("expected drain_state %q, got %v", DrainStateUnassigned, body["drain_state"])
 	}
-	if body["state"] != string(LifecycleStateActive) {
+	if body["state"] != string(cluster.StateActive) {
 		t.Fatalf("drain mode's state must not change the lifecycle state, got %v", body["state"])
 	}
 

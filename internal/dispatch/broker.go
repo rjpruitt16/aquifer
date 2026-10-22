@@ -1,7 +1,7 @@
 // Copyright 2026 Rahmi Pruitt
 // SPDX-License-Identifier: Apache-2.0
 
-package aquifer
+package dispatch
 
 import (
 	"encoding/json"
@@ -124,7 +124,7 @@ func (b *Broker) Publish(jobID string, event SSEEvent) {
 	}
 }
 
-func writeSSE(w http.ResponseWriter, event string, data map[string]any) error {
+func WriteSSE(w http.ResponseWriter, event string, data map[string]any) error {
 	b, _ := json.Marshal(data)
 	_, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b)
 	return err

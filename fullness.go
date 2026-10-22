@@ -40,7 +40,7 @@ func (a *Aquifer) Fullness() int {
 	return int(a.fullnessSample.Get(func() int64 {
 		ratio := a.admission.FullnessRatio()
 		if a.registry != nil {
-			ratio = math.Max(ratio, a.registry.backlogFullnessRatio())
+			ratio = math.Max(ratio, a.registry.BacklogFullnessRatio())
 		}
 		return fullnessPercent(ratio)
 	}))
@@ -48,27 +48,6 @@ func (a *Aquifer) Fullness() int {
 
 func fullnessPercent(ratio float64) int64 {
 	return int64(math.Round(admission.Clamp(ratio, 0, 1) * 100))
-}
-
-// backlogFullnessRatio is the fullest target API's backlog against its own
-// backlog budget. Per target API, not summed: one target API at its limit is
-// already turning work away, however idle the others are.
-func (r *Registry) backlogFullnessRatio() float64 {
-	r.mu.Lock()
-	workers := make([]*URLWorker, 0, len(r.workers))
-	for _, worker := range r.workers {
-		workers = append(workers, worker)
-	}
-	r.mu.Unlock()
-
-	var ratio float64
-	for _, worker := range workers {
-		snapshot := worker.Snapshot()
-		if snapshot.MaxBacklog > 0 {
-			ratio = math.Max(ratio, float64(snapshot.UpstreamBacklog)/float64(snapshot.MaxBacklog))
-		}
-	}
-	return ratio
 }
 
 func withFullnessHeader(next http.Handler, a *Aquifer) http.Handler {

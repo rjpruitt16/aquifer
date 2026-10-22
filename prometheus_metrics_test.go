@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rjpruitt16/aquifer/internal/dispatch"
 	"github.com/rjpruitt16/aquifer/internal/jobs"
 )
 
@@ -66,7 +67,7 @@ func TestMetricsEndpointThroughARealServer(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	target := domainKey(backend.URL)
+	target := dispatch.DomainKey(backend.URL)
 	for _, want := range []string{
 		`aquifer_jobs_total{target="` + target + `",outcome="completed"} 3`,
 		`aquifer_dispatch_attempts_total{target="` + target + `",status_class="2xx"} 3`,
@@ -116,9 +117,9 @@ func TestMetricsIs404WithACustomAdapter(t *testing.T) {
 func TestARejectedWebhookIsNotDelivered(t *testing.T) {
 	m := NewPrometheusMetrics()
 	hook := &Job{Kind: jobs.KindWebhookDelivery}
-	observeJobFinished(m, hook, "https://app.example", "completed", 200)
-	observeJobFinished(m, hook, "https://app.example", "completed", 401)
-	observeJobFinished(m, hook, "https://app.example", "failed", 503)
+	dispatch.ObserveJobFinished(m, hook, "https://app.example", "completed", 200)
+	dispatch.ObserveJobFinished(m, hook, "https://app.example", "completed", 401)
+	dispatch.ObserveJobFinished(m, hook, "https://app.example", "failed", 503)
 	var b strings.Builder
 	m.Write(&b, "node-a", nil)
 	out := b.String()

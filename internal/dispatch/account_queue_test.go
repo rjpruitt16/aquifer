@@ -1,7 +1,7 @@
 // Copyright 2026 Rahmi Pruitt
 // SPDX-License-Identifier: Apache-2.0
 
-package aquifer
+package dispatch
 
 import (
 	"context"
@@ -14,11 +14,13 @@ import (
 
 	"github.com/rjpruitt16/aquifer/internal/jobs"
 	"github.com/rjpruitt16/aquifer/internal/orca"
+	"github.com/rjpruitt16/aquifer/internal/storage"
+	"github.com/rjpruitt16/aquifer/l8"
 )
 
 type fakeJobResultRecorder struct {
 	hash   string
-	result JobResult
+	result jobs.Result
 	key    string
 	ok     bool
 }
@@ -43,7 +45,7 @@ func TestMakeRequestRedirectAllowlist(t *testing.T) {
 		{name: "relative allowed", status: 302, allowlist: "127.0.0.1", location: "relative"},
 		{name: "unrestricted by default", status: 302},
 		{name: "pool exempt", status: 302, allowlist: "127.0.0.1", poolID: "trusted-pool"},
-		{name: "webhook exempt", status: 302, allowlist: "127.0.0.1", kind: jobKindWebhookDelivery},
+		{name: "webhook exempt", status: 302, allowlist: "127.0.0.1", kind: jobs.KindWebhookDelivery},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -82,11 +84,11 @@ func TestMakeRequestRedirectAllowlist(t *testing.T) {
 			if msg := req.Validate(); msg != "" {
 				t.Fatalf("initial request rejected: %s", msg)
 			}
-			job := NewJob(&req)
+			job := jobs.New(&req)
 			if tc.kind != "" {
 				job.Kind = tc.kind
 			}
-			resp, err := makeRequest(t.Context(), job, srv.URL+"/start", 0, 0, 0, 0, 0, nil)
+			resp, err := MakeRequest(t.Context(), job, srv.URL+"/start", 0, 0, 0, 0, 0, nil)
 			if resp != nil {
 				defer resp.Body.Close()
 			}
@@ -122,7 +124,7 @@ func TestMakeRequestRedirectLimit(t *testing.T) {
 	defer srv.Close()
 
 	req := validRequest(srv.URL)
-	resp, err := makeRequest(t.Context(), NewJob(&req), srv.URL, 0, 0, 0, 0, 0, nil)
+	resp, err := MakeRequest(t.Context(), jobs.New(&req), srv.URL, 0, 0, 0, 0, 0, nil)
 	if resp != nil {
 		defer resp.Body.Close()
 	}
@@ -134,7 +136,7 @@ func TestMakeRequestRedirectLimit(t *testing.T) {
 	}
 }
 
-func (f *fakeJobResultRecorder) RecordResult(hash string, result JobResult) (string, bool) {
+func (f *fakeJobResultRecorder) RecordResult(hash string, result jobs.Result) (string, bool) {
 	f.hash = hash
 	f.result = result
 	return f.key, f.ok
@@ -154,10 +156,10 @@ func TestMakeRequestRequestsOrcaMetricsByDefault(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	job := &Job{Method: "POST"}
-	resp, err := makeRequest(context.Background(), job, srv.URL, 0, 0, 0, 0, 0, nil)
+	job := &jobs.Job{Method: "POST"}
+	resp, err := MakeRequest(context.Background(), job, srv.URL, 0, 0, 0, 0, 0, nil)
 	if err != nil {
-		t.Fatalf("makeRequest failed: %v", err)
+		t.Fatalf("MakeRequest failed: %v", err)
 	}
 	defer resp.Body.Close()
 
@@ -174,13 +176,13 @@ func TestMakeRequestDoesNotOverrideExplicitOrcaHeader(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	job := &Job{
+	job := &jobs.Job{
 		Method:  "POST",
 		Headers: map[string]string{orca.RequestHeaderName: "JSON"},
 	}
-	resp, err := makeRequest(context.Background(), job, srv.URL, 0, 0, 0, 0, 0, nil)
+	resp, err := MakeRequest(context.Background(), job, srv.URL, 0, 0, 0, 0, 0, nil)
 	if err != nil {
-		t.Fatalf("makeRequest failed: %v", err)
+		t.Fatalf("MakeRequest failed: %v", err)
 	}
 	defer resp.Body.Close()
 
@@ -194,7 +196,7 @@ func TestPacingHeaderPrefersAqueduct(t *testing.T) {
 	headers.Set("X-Aquifer-Rps", "2")
 	headers.Set("X-Aqueduct-Rps", "5")
 
-	if got := pacingHeader(headers, "Rps"); got != "5" {
+	if got := PacingHeader(headers, "Rps"); got != "5" {
 		t.Fatalf("expected Aqueduct header to win, got %q", got)
 	}
 }
@@ -203,14 +205,14 @@ func TestPacingHeaderFallsBackToAquifer(t *testing.T) {
 	headers := http.Header{}
 	headers.Set("X-Aquifer-Max-Concurrent", "3")
 
-	if got := pacingHeader(headers, "Max-Concurrent"); got != "3" {
+	if got := PacingHeader(headers, "Max-Concurrent"); got != "3" {
 		t.Fatalf("expected Aquifer fallback, got %q", got)
 	}
 }
 
 func TestSetLoadHeaderWritesBothNamespaces(t *testing.T) {
 	headers := http.Header{}
-	setLoadHeader(headers, "Queue-Depth", "42")
+	SetLoadHeader(headers, "Queue-Depth", "42")
 
 	if got := headers.Get("X-Aqueduct-Queue-Depth"); got != "42" {
 		t.Fatalf("expected Aqueduct header, got %q", got)
@@ -222,9 +224,9 @@ func TestSetLoadHeaderWritesBothNamespaces(t *testing.T) {
 
 func TestRecordJobResultUsesIdempotencyHash(t *testing.T) {
 	recorder := &fakeJobResultRecorder{key: "aqueduct:result:abc", ok: true}
-	job := &Job{ID: "job-1", UserID: "user-1", IdempotentKey: "key-1", WebhookURL: "https://example.com/webhook"}
+	job := &jobs.Job{ID: "job-1", UserID: "user-1", IdempotentKey: "key-1", WebhookURL: "https://example.com/webhook"}
 
-	got := recordJobResult(job, recorder, StatusCompleted, http.StatusOK, "application/json", `{"ok":true}`)
+	got := recordJobResult(job, recorder, jobs.StatusCompleted, http.StatusOK, "application/json", `{"ok":true}`)
 
 	if got != recorder.key {
 		t.Fatalf("expected result key %q, got %q", recorder.key, got)
@@ -232,7 +234,7 @@ func TestRecordJobResultUsesIdempotencyHash(t *testing.T) {
 	if recorder.hash != jobs.HashKey("user-1:key-1") {
 		t.Fatalf("expected idempotency hash, got %q", recorder.hash)
 	}
-	if recorder.result.JobID != "job-1" || recorder.result.Status != StatusCompleted || recorder.result.ResponseStatus != http.StatusOK {
+	if recorder.result.JobID != "job-1" || recorder.result.Status != jobs.StatusCompleted || recorder.result.ResponseStatus != http.StatusOK {
 		t.Fatalf("unexpected recorded result: %+v", recorder.result)
 	}
 	if recorder.result.Body != `{"ok":true}` || recorder.result.ContentType != "application/json" {
@@ -242,9 +244,9 @@ func TestRecordJobResultUsesIdempotencyHash(t *testing.T) {
 
 func TestRecordJobResultSkipsWebhookDeliveryJobs(t *testing.T) {
 	recorder := &fakeJobResultRecorder{key: "aqueduct:result:abc", ok: true}
-	job := &Job{ID: "webhook-job", UserID: "user-1", IdempotentKey: "webhook:job-1"}
+	job := &jobs.Job{ID: "webhook-job", UserID: "user-1", IdempotentKey: "webhook:job-1"}
 
-	if got := recordJobResult(job, recorder, StatusCompleted, http.StatusOK, "application/json", "{}"); got != "" {
+	if got := recordJobResult(job, recorder, jobs.StatusCompleted, http.StatusOK, "application/json", "{}"); got != "" {
 		t.Fatalf("expected no result key for webhook delivery job, got %q", got)
 	}
 	if recorder.hash != "" {
@@ -253,16 +255,16 @@ func TestRecordJobResultSkipsWebhookDeliveryJobs(t *testing.T) {
 }
 
 // TestSlowStartBeginsAtMinRPS proves a queue constructed with slowStart=true
-// starts dispatching at minRPS regardless of how high its configured
+// starts dispatching at MinRPS regardless of how high its configured
 // ceiling is, rather than firing at the full configured rate immediately --
 // a fresh queue's first request has no prior response to read a pacing
 // signal from, so the starting point has to be decided up front, not
 // adjusted reactively the way ordinary header-driven pacing is.
 func TestSlowStartBeginsAtMinRPS(t *testing.T) {
 	dir := t.TempDir()
-	store := NewStore(dir + "/aquifer.db")
+	store := storage.NewSQLite(dir + "/aquifer.db")
 	broker := NewBroker()
-	l8 := NewL8Registry(dir+"/.l8-key", dir+"/l8-trust")
+	l8 := l8.NewRegistry(dir+"/.l8-key", dir+"/l8-trust")
 	t.Cleanup(func() {
 		l8.Close()
 		store.Close()
@@ -280,8 +282,8 @@ func TestSlowStartBeginsAtMinRPS(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 
-	if got := q.RPS(); got != minRPS {
-		t.Fatalf("expected slow-start queue to begin at minRPS (%v), got %v", minRPS, got)
+	if got := q.RPS(); got != MinRPS {
+		t.Fatalf("expected slow-start queue to begin at MinRPS (%v), got %v", MinRPS, got)
 	}
 }
 
@@ -290,9 +292,9 @@ func TestSlowStartBeginsAtMinRPS(t *testing.T) {
 // same as before slow start existed.
 func TestSlowStartOffByDefaultStartsAtConfiguredRPS(t *testing.T) {
 	dir := t.TempDir()
-	store := NewStore(dir + "/aquifer.db")
+	store := storage.NewSQLite(dir + "/aquifer.db")
 	broker := NewBroker()
-	l8 := NewL8Registry(dir+"/.l8-key", dir+"/l8-trust")
+	l8 := l8.NewRegistry(dir+"/.l8-key", dir+"/l8-trust")
 	t.Cleanup(func() {
 		l8.Close()
 		store.Close()
@@ -317,18 +319,18 @@ func TestSlowStartOffByDefaultStartsAtConfiguredRPS(t *testing.T) {
 
 func TestExpiredQueuedJobFailsWithoutDispatch(t *testing.T) {
 	dir := t.TempDir()
-	store := NewStore(dir + "/aquifer.db")
+	store := storage.NewSQLite(dir + "/aquifer.db")
 	broker := NewBroker()
-	l8 := NewL8Registry(dir+"/.l8-key", dir+"/l8-trust")
+	l8 := l8.NewRegistry(dir+"/.l8-key", dir+"/l8-trust")
 	t.Cleanup(func() {
 		l8.Close()
 		store.Close()
 	})
 
-	job := &Job{
+	job := &jobs.Job{
 		ID: jobs.NewID(), UserID: "deadline-user", IdempotentKey: "expired-key",
 		URL: "http://127.0.0.1:1/should-not-run", Method: "POST", WebhookURL: "http://127.0.0.1:1/hook",
-		Status: StatusQueued, CreatedAt: time.Now().UnixMilli(), ExecuteBefore: time.Now().Add(-time.Second).UnixMilli(),
+		Status: jobs.StatusQueued, CreatedAt: time.Now().UnixMilli(), ExecuteBefore: time.Now().Add(-time.Second).UnixMilli(),
 	}
 	store.CheckOrInsert(job)
 	q := NewAccountQueue("deadline-user", "http://127.0.0.1:1", 100, 1, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, int, map[string]any) {}, nil, nil, nil, nil, func(string) {}, false, func(bool) {}, nil)
@@ -337,7 +339,7 @@ func TestExpiredQueuedJobFailsWithoutDispatch(t *testing.T) {
 
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		if stored := store.GetJob(job.ID); stored != nil && stored.Status == StatusFailed {
+		if stored := store.GetJob(job.ID); stored != nil && stored.Status == jobs.StatusFailed {
 			return
 		}
 		time.Sleep(5 * time.Millisecond)
@@ -347,9 +349,9 @@ func TestExpiredQueuedJobFailsWithoutDispatch(t *testing.T) {
 
 func TestJobExpiringDuringPacingDelayFailsWithoutDispatch(t *testing.T) {
 	dir := t.TempDir()
-	store := NewStore(dir + "/aquifer.db")
+	store := storage.NewSQLite(dir + "/aquifer.db")
 	broker := NewBroker()
-	l8 := NewL8Registry(dir+"/.l8-key", dir+"/l8-trust")
+	l8 := l8.NewRegistry(dir+"/.l8-key", dir+"/l8-trust")
 	t.Cleanup(func() {
 		l8.Close()
 		store.Close()
@@ -362,15 +364,15 @@ func TestJobExpiringDuringPacingDelayFailsWithoutDispatch(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	first := &Job{
+	first := &jobs.Job{
 		ID: jobs.NewID(), UserID: "deadline-user", IdempotentKey: "first",
 		URL: upstream.URL, Method: "POST", WebhookURL: "http://127.0.0.1:1/hook",
-		Status: StatusQueued, CreatedAt: time.Now().UnixMilli(),
+		Status: jobs.StatusQueued, CreatedAt: time.Now().UnixMilli(),
 	}
-	expiring := &Job{
+	expiring := &jobs.Job{
 		ID: jobs.NewID(), UserID: "deadline-user", IdempotentKey: "expiring",
 		URL: upstream.URL, Method: "POST", WebhookURL: "http://127.0.0.1:1/hook",
-		Status: StatusQueued, CreatedAt: time.Now().UnixMilli(),
+		Status: jobs.StatusQueued, CreatedAt: time.Now().UnixMilli(),
 		ExecuteBefore: time.Now().Add(150 * time.Millisecond).UnixMilli(),
 	}
 	store.CheckOrInsert(first)
@@ -383,7 +385,7 @@ func TestJobExpiringDuringPacingDelayFailsWithoutDispatch(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if stored := store.GetJob(expiring.ID); stored != nil && stored.Status == StatusFailed {
+		if stored := store.GetJob(expiring.ID); stored != nil && stored.Status == jobs.StatusFailed {
 			if got := requests.Load(); got != 1 {
 				t.Fatalf("expected only the first job to reach upstream, got %d requests", got)
 			}
@@ -392,4 +394,14 @@ func TestJobExpiringDuringPacingDelayFailsWithoutDispatch(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("job that expired during pacing did not fail: %+v", store.GetJob(expiring.ID))
+}
+
+func validRequest(rawURL string) jobs.Request {
+	return jobs.Request{
+		UserID:        "user-1",
+		IdempotentKey: "key-1",
+		URL:           rawURL,
+		Method:        "POST",
+		WebhookURL:    "https://example.com/callback",
+	}
 }

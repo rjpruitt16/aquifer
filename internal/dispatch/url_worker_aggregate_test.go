@@ -1,12 +1,15 @@
 // Copyright 2026 Rahmi Pruitt
 // SPDX-License-Identifier: Apache-2.0
 
-package aquifer
+package dispatch
 
 import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/rjpruitt16/aquifer/internal/storage"
+	"github.com/rjpruitt16/aquifer/l8"
 )
 
 // TestAggregateBudgetThrottlesSiblingQueues proves the fix for the gap
@@ -18,9 +21,9 @@ import (
 // back down to the worker's actual budget.
 func TestAggregateBudgetThrottlesSiblingQueues(t *testing.T) {
 	dir := t.TempDir()
-	store := NewStore(filepath.Join(dir, "aquifer.db"))
+	store := storage.NewSQLite(filepath.Join(dir, "aquifer.db"))
 	broker := NewBroker()
-	l8 := NewL8Registry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"))
+	l8 := l8.NewRegistry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"))
 	t.Cleanup(func() {
 		l8.Close()
 		store.Close()
@@ -74,9 +77,9 @@ func TestAggregateBudgetThrottlesSiblingQueues(t *testing.T) {
 // shared budget between with only one tenant active.
 func TestAggregateBudgetLeavesSingleQueueAlone(t *testing.T) {
 	dir := t.TempDir()
-	store := NewStore(filepath.Join(dir, "aquifer.db"))
+	store := storage.NewSQLite(filepath.Join(dir, "aquifer.db"))
 	broker := NewBroker()
-	l8 := NewL8Registry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"))
+	l8 := l8.NewRegistry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"))
 	t.Cleanup(func() {
 		l8.Close()
 		store.Close()

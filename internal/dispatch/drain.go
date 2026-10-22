@@ -1,7 +1,7 @@
 // Copyright 2026 Rahmi Pruitt
 // SPDX-License-Identifier: Apache-2.0
 
-package aquifer
+package dispatch
 
 import (
 	"context"
@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/rjpruitt16/aquifer/internal/env"
+	"github.com/rjpruitt16/aquifer/internal/jobs"
 	"github.com/rjpruitt16/aquifer/internal/retry"
 )
 
@@ -189,11 +190,11 @@ func (r *Registry) attemptDrainFlushContext(ctx context.Context) bool {
 	return true
 }
 
-func (r *Registry) flushDrainEventBatch(eventName string) ([]DrainEvent, bool) {
+func (r *Registry) flushDrainEventBatch(eventName string) ([]jobs.DrainEvent, bool) {
 	return r.flushDrainEventBatchContext(context.Background(), eventName)
 }
 
-func (r *Registry) flushDrainEventBatchContext(ctx context.Context, eventName string) ([]DrainEvent, bool) {
+func (r *Registry) flushDrainEventBatchContext(ctx context.Context, eventName string) ([]jobs.DrainEvent, bool) {
 	r.drainFlushMu.Lock()
 	defer r.drainFlushMu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -223,11 +224,11 @@ func (r *Registry) flushDrainEventBatchContext(ctx context.Context, eventName st
 	return events, true
 }
 
-func (r *Registry) deliverDrainBatch(eventName string, events []DrainEvent, start, end int64) bool {
+func (r *Registry) deliverDrainBatch(eventName string, events []jobs.DrainEvent, start, end int64) bool {
 	return r.deliverDrainBatchContext(context.Background(), eventName, events, start, end)
 }
 
-func (r *Registry) deliverDrainBatchContext(ctx context.Context, eventName string, events []DrainEvent, start, end int64) bool {
+func (r *Registry) deliverDrainBatchContext(ctx context.Context, eventName string, events []jobs.DrainEvent, start, end int64) bool {
 	if r.drainCfg.Sink == "valkey" {
 		remote := r.drainRemoteOrNil()
 		if remote == nil {

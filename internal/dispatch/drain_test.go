@@ -1,7 +1,7 @@
 // Copyright 2026 Rahmi Pruitt
 // SPDX-License-Identifier: Apache-2.0
 
-package aquifer
+package dispatch
 
 import (
 	"encoding/json"
@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/rjpruitt16/aquifer/internal/jobs"
+	"github.com/rjpruitt16/aquifer/internal/storage"
+	"github.com/rjpruitt16/aquifer/l8"
 )
 
 // recordingMetrics wraps NoopMetricsAdapter, capturing only the two calls
@@ -31,9 +33,9 @@ func (m *recordingMetrics) DrainFlushFailed(instanceKey string, ledgerSize int) 
 func drainTestRegistry(t *testing.T, metrics MetricsAdapter) *Registry {
 	t.Helper()
 	dir := t.TempDir()
-	store := NewStore(filepath.Join(dir, "aquifer.db"))
+	store := storage.NewSQLite(filepath.Join(dir, "aquifer.db"))
 	broker := NewBroker()
-	l8 := NewL8Registry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"))
+	l8 := l8.NewRegistry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"))
 	cfg := &Config{Defaults: RateConfig{RPS: 100, MaxConcurrent: 1}}
 	r := NewRegistry(store, cfg, broker, l8, metrics, nil)
 	t.Cleanup(r.Close)
@@ -54,13 +56,13 @@ func skipL8Probe(w http.ResponseWriter, r *http.Request) bool {
 
 func seedLedgerEntry(t *testing.T, r *Registry) {
 	t.Helper()
-	job := &Job{
+	job := &jobs.Job{
 		ID: jobs.NewID(), UserID: "u1", IdempotentKey: "k1",
 		URL: "https://example.com", Method: "POST", WebhookURL: "https://example.com",
-		Status: StatusQueued, CreatedAt: time.Now().UnixMilli(),
+		Status: jobs.StatusQueued, CreatedAt: time.Now().UnixMilli(),
 	}
 	r.store.CheckOrInsert(job)
-	r.store.UpdateStatus(job.ID, StatusCompleted)
+	r.store.UpdateStatus(job.ID, jobs.StatusCompleted)
 }
 
 // TestDrainDisabledNeverTransitionsState is the test proving "opt-in," not

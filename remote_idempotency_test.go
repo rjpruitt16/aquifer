@@ -98,39 +98,3 @@ func TestGetJobResultLooksUpRemoteByIdempotencyHash(t *testing.T) {
 		t.Fatalf("unexpected result: %+v", result)
 	}
 }
-
-func TestDrainValkeySinkRecordsAndAcknowledges(t *testing.T) {
-	remote := &fakeRemoteIdempotency{recordOK: true}
-	r := drainTestRegistry(t, NoopMetricsAdapter{})
-	r.drainCfg = DrainConfig{Enabled: true, TimerSeconds: 1, Sink: "valkey", BatchMaxEvents: 10}
-	r.applyDrainEvents()
-	r.SetDrainRemote(remote)
-	seedLedgerEntry(t, r)
-
-	events, ok := r.flushDrainEventBatch("ledger_batch")
-	if !ok {
-		t.Fatalf("expected valkey sink batch flush to succeed")
-	}
-	if len(remote.recorded) != 1 || len(events) != 1 {
-		t.Fatalf("expected one event recorded to remote sink, got remote=%+v events=%+v", remote.recorded, events)
-	}
-	if remaining := r.store.ListDrainEvents(10); len(remaining) != 0 {
-		t.Fatalf("expected acknowledged drain event deleted, got %+v", remaining)
-	}
-}
-
-func TestDrainValkeySinkFailureDoesNotAcknowledge(t *testing.T) {
-	remote := &fakeRemoteIdempotency{recordOK: false}
-	r := drainTestRegistry(t, NoopMetricsAdapter{})
-	r.drainCfg = DrainConfig{Enabled: true, TimerSeconds: 1, Sink: "valkey", BatchMaxEvents: 10}
-	r.applyDrainEvents()
-	r.SetDrainRemote(remote)
-	seedLedgerEntry(t, r)
-
-	if _, ok := r.flushDrainEventBatch("ledger_batch"); ok {
-		t.Fatalf("expected valkey sink batch flush to fail")
-	}
-	if remaining := r.store.ListDrainEvents(10); len(remaining) != 1 {
-		t.Fatalf("expected unacknowledged drain event retained, got %+v", remaining)
-	}
-}

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rjpruitt16/aquifer/internal/dispatch"
 	"github.com/rjpruitt16/aquifer/internal/env"
 	"github.com/rjpruitt16/aquifer/internal/orca"
 )
@@ -117,7 +118,7 @@ func (a *Aquifer) AttemptDirect(ctx context.Context, req JobRequest, timeout tim
 	// tripped it; whether THAT retry also tries redirect depends on which
 	// kind of signal tripped it (BreakerKind), decided below the same way
 	// a fresh overload response decides it.
-	worker := a.registry.workerFor(job)
+	worker := a.registry.WorkerFor(job)
 	if worker.BreakerOpen() {
 		return a.fallbackOutcome(ctx, req, job, "domain_degraded", 0, timeout, worker.BreakerKind() == "reroute")
 	}
@@ -130,16 +131,16 @@ func (a *Aquifer) AttemptDirect(ctx context.Context, req JobRequest, timeout tim
 
 	counts := a.store.Counts()
 	queues := worker.Snapshot()
-	resp, attemptErr := makeRequest(attemptCtx, job, job.URL, counts.TotalJobs, counts.QueueDepth, 0, queues.ActiveQueues, queues.UpstreamBacklog, a.l8)
+	resp, attemptErr := dispatch.MakeRequest(attemptCtx, job, job.URL, counts.TotalJobs, counts.QueueDepth, 0, queues.ActiveQueues, queues.UpstreamBacklog, a.l8)
 	if attemptErr != nil {
 		return a.fallbackOutcome(ctx, req, job, "upstream_unreachable", 0, timeout, true)
 	}
 	defer resp.Body.Close()
-	worker.HandleMaxBacklogHeader(pacingHeader(resp.Header, "Max-Backlog"))
+	worker.HandleMaxBacklogHeader(dispatch.PacingHeader(resp.Header, "Max-Backlog"))
 	// The destination's say on one queue per tenant vs one shared queue,
 	// learned from direct responses as well as queued ones.
-	if on, ok := parseAccountQueueValue(pacingHeader(resp.Header, "Account-Queue")); ok {
-		worker.handleDestinationAccountQueue(on)
+	if on, ok := dispatch.ParseAccountQueueValue(dispatch.PacingHeader(resp.Header, "Account-Queue")); ok {
+		worker.HandleDestinationAccountQueue(on)
 	}
 
 	if overloadCooldown, kind, overloaded := isOverloadSignal(resp); overloaded {
@@ -154,13 +155,13 @@ func (a *Aquifer) AttemptDirect(ctx context.Context, req JobRequest, timeout tim
 	// real, valid answer already in hand: it's relayed to the caller as
 	// normal below, only future requests to this domain start queuing --
 	// always "queue" kind, never reroute, matching its own name.
-	if pacingHeader(resp.Header, "Queue-Active") == "true" {
+	if dispatch.PacingHeader(resp.Header, "Queue-Active") == "true" {
 		worker.TripBreaker(breakerCooldown(resp.Header), "queue")
 	}
 
 	body, _ := io.ReadAll(resp.Body)
 	a.store.UpdateStatus(job.ID, StatusCompleted)
-	saveLocalResult(a.store, job, StatusCompleted, resp.StatusCode, resp.Header.Get("Content-Type"), string(body))
+	dispatch.SaveLocalResult(a.store, job, StatusCompleted, resp.StatusCode, resp.Header.Get("Content-Type"), string(body))
 	a.broker.Publish(job.ID, SSEEvent{Event: "completed", Data: map[string]any{
 		"job_id": job.ID, "response_status": resp.StatusCode, "body": string(body),
 	}})
@@ -230,7 +231,7 @@ func (a *Aquifer) fallbackOutcome(ctx context.Context, req JobRequest, job *Job,
 // this off to the durable, paced queue instead" — classifyOverload decides
 // which of two ways: "queue" locally, or also try cross-region redirect
 // first (region_redirect.go) before queueing. Distinct from execute()'s own
-// >=500-only retry classification (account_queue.go): a direct attempt has
+// >=500-only retry classification (internal/dispatch/account_queue.go): a direct attempt has
 // no retry loop of its own, so either kind means fall back, not retry
 // inline. When true, the second return value is how long to trip this
 // target API's circuit breaker for — anchored to the target API's own
@@ -280,7 +281,7 @@ func classifyOverload(headers http.Header, status int) (kind string, overloaded 
 }
 
 func headerOrDefault(headers http.Header, name, def string) string {
-	if v := pacingHeader(headers, name); v != "" {
+	if v := dispatch.PacingHeader(headers, name); v != "" {
 		return v
 	}
 	return def
@@ -337,7 +338,7 @@ func breakerCooldown(headers http.Header) time.Duration {
 
 // proxyDirectAttemptTimeout is how long AttemptDirect waits for a direct
 // response before giving up and falling back — deliberately short and
-// separate from the queue path's own 30s client timeout (makeRequest),
+// separate from the queue path's own 30s client timeout (dispatch.MakeRequest),
 // since the whole point of proxy mode is failing fast, not tying up the
 // caller's connection.
 func proxyDirectAttemptTimeout() time.Duration {

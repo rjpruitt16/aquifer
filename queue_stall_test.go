@@ -15,13 +15,13 @@ import (
 )
 
 // Soak run 2 stalled a queue this way: a short target API outage halved the
-// pace down to minRPS, and the run loop then slept out each 2s dispatch
+// pace down to dispatch.MinRPS, and the run loop then slept out each 2s dispatch
 // interval in place. While it slept it read neither completions (the
 // successes that would raise the pace again) nor new jobs, including the
 // webhook deliveries its own finished jobs were trying to enqueue on the same
 // host's queue. It only got back to its channels once maxConcurrent jobs
 // were in flight, so the target API's recovery went unnoticed for
-// maxConcurrent / minRPS seconds (17 minutes in the soak).
+// maxConcurrent / dispatch.MinRPS seconds (17 minutes in the soak).
 func TestQueueRecoversPaceWhileWaitingToDispatch(t *testing.T) {
 	withRetryBackoff(t, 50*time.Millisecond)
 	const jobs = 40
@@ -79,7 +79,7 @@ func TestQueueRecoversPaceWhileWaitingToDispatch(t *testing.T) {
 		defer mu.Unlock()
 		return len(delivered)
 	}
-	// The outage ends after 1s. At minRPS the old loop needed 20 x 2s = 40s
+	// The outage ends after 1s. At dispatch.MinRPS the old loop needed 20 x 2s = 40s
 	// before it noticed; a queue that keeps reading its channels recovers in
 	// a few seconds.
 	if !waitFor(t, 12*time.Second, func() bool { return count() == jobs }) {

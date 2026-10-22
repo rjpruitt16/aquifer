@@ -1,7 +1,7 @@
 // Copyright 2026 Rahmi Pruitt
 // SPDX-License-Identifier: Apache-2.0
 
-package aquifer
+package dispatch
 
 import (
 	"net/http"
@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/rjpruitt16/aquifer/internal/jobs"
+	"github.com/rjpruitt16/aquifer/internal/storage"
+	"github.com/rjpruitt16/aquifer/l8"
 )
 
 func testRegistry(t *testing.T) *Registry {
@@ -18,17 +20,17 @@ func testRegistry(t *testing.T) *Registry {
 
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "aquifer.db")
-	store := NewStore(dbPath)
+	store := storage.NewSQLite(dbPath)
 	broker := NewBroker()
-	l8 := NewL8Registry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"))
+	l8 := l8.NewRegistry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"))
 	cfg := &Config{Defaults: RateConfig{RPS: 100, MaxConcurrent: 1}}
 	r := NewRegistry(store, cfg, broker, l8, NoopMetricsAdapter{}, nil)
 	t.Cleanup(r.Close)
 	return r
 }
 
-func jobFor(userID, apiKey string) *Job {
-	return &Job{
+func jobFor(userID, apiKey string) *jobs.Job {
+	return &jobs.Job{
 		ID:     jobs.NewID(),
 		UserID: userID,
 		// postman-echo.com/post always returns a fast 200 for both the
@@ -41,13 +43,13 @@ func jobFor(userID, apiKey string) *Job {
 		Method:     "POST",
 		Headers:    map[string]string{"Authorization": apiKey},
 		WebhookURL: "https://postman-echo.com/post",
-		Status:     StatusQueued,
+		Status:     jobs.StatusQueued,
 	}
 }
 
 // TestAccountQueueHeaderIsolatesTenants proves the fix for the previously
 // unreachable AccountQueue path: a job enqueued with the account-queue header
-// set to "enabled" must land in a queue keyed per-tenant (jobQueueKey), not
+// set to "enabled" must land in a queue keyed per-tenant (JobQueueKey), not
 // the single shared queue every job used before handleAccountQueueHeader had
 // a caller. Without this, a noisy tenant's flood starves every other tenant
 // hitting the same target API domain.
@@ -60,7 +62,7 @@ func TestAccountQueueHeaderIsolatesTenants(t *testing.T) {
 	r.Enqueue(noisy, "enabled")
 	r.Enqueue(quiet, "enabled")
 
-	key := domainKey(noisy.URL)
+	key := DomainKey(noisy.URL)
 	w, ok := r.workers[key]
 	if !ok {
 		t.Fatalf("expected a worker for domain %q", key)
@@ -73,8 +75,8 @@ func TestAccountQueueHeaderIsolatesTenants(t *testing.T) {
 		t.Fatalf("expected accountQueueMode to be enabled after header, worker never had handleAccountQueueHeader called")
 	}
 
-	noisyKey := jobQueueKey(noisy)
-	quietKey := jobQueueKey(quiet)
+	noisyKey := JobQueueKey(noisy)
+	quietKey := JobQueueKey(quiet)
 
 	if noisyKey == quietKey {
 		t.Fatalf("test setup bug: expected distinct tenant keys, got same key for both")
@@ -86,7 +88,7 @@ func TestAccountQueueHeaderIsolatesTenants(t *testing.T) {
 	if _, ok := w.queues[quietKey]; !ok {
 		t.Errorf("expected a dedicated queue for the quiet tenant, found none (queues: %v)", queueKeys(w.queues))
 	}
-	if _, ok := w.queues[sharedKey]; ok {
+	if _, ok := w.queues[SharedQueueKey]; ok {
 		t.Errorf("did not expect the shared queue to be used once account-queue mode is enabled")
 	}
 }
@@ -107,7 +109,7 @@ func TestAccountQueueHeaderOmittedSharesQueue(t *testing.T) {
 	r.Enqueue(a, "")
 	r.Enqueue(b, "")
 
-	key := domainKey(a.URL)
+	key := DomainKey(a.URL)
 	w, ok := r.workers[key]
 	if !ok {
 		t.Fatalf("expected a worker for domain %q", key)
@@ -119,7 +121,7 @@ func TestAccountQueueHeaderOmittedSharesQueue(t *testing.T) {
 	if w.accountQueueMode {
 		t.Fatalf("expected accountQueueMode to stay off when header is never set")
 	}
-	if _, ok := w.queues[sharedKey]; !ok {
+	if _, ok := w.queues[SharedQueueKey]; !ok {
 		t.Errorf("expected both jobs to land in the shared queue, found none (queues: %v)", queueKeys(w.queues))
 	}
 }
@@ -144,7 +146,7 @@ func TestSlowStartHeaderAppliesToNextNewQueueOnly(t *testing.T) {
 	first.WebhookURL = ""
 	r.Enqueue(first, "enabled")
 
-	key := domainKey(first.URL)
+	key := DomainKey(first.URL)
 
 	// Wait for the first job's response (carrying the header) to be
 	// processed and the worker's slowStart flag flipped.
@@ -183,7 +185,7 @@ func TestSlowStartHeaderAppliesToNextNewQueueOnly(t *testing.T) {
 	second.WebhookURL = ""
 	r.Enqueue(second, "enabled")
 
-	secondKey := jobQueueKey(second)
+	secondKey := JobQueueKey(second)
 	var q *AccountQueue
 	deadline = time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
@@ -209,20 +211,20 @@ func TestSlowStartHeaderAppliesToNextNewQueueOnly(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 
-	// Not an exact-equality check against minRPS: this queue's very first
+	// Not an exact-equality check against MinRPS: this queue's very first
 	// dispatch has a zero-value lastRequestAt, so it fires with no pacing
 	// delay at all, and against a fast local httptest.Server the whole
 	// round trip (dispatch -> response -> the existing creep-up-by-1.05x
 	// mechanism) can legitimately complete before this assertion runs --
 	// confirmed by reproducing exactly that: an observed value of 0.52
-	// (minRPS * 1.05, one real creep tick), not a bug, just a transient
+	// (MinRPS * 1.05, one real creep tick), not a bug, just a transient
 	// value this test was asserting too precisely against. The meaningful,
-	// non-racy property is "started near the floor," not "== minRPS at
+	// non-racy property is "started near the floor," not "== MinRPS at
 	// this exact instant" -- comfortably below configuredRPS (100) proves
 	// slow start engaged; several creep ticks would still be nowhere close
 	// to that ceiling.
-	if got := q.RPS(); got < minRPS || got > minRPS*1.2 {
-		t.Fatalf("expected the second tenant's fresh queue to start near minRPS (%v), got %v", minRPS, got)
+	if got := q.RPS(); got < MinRPS || got > MinRPS*1.2 {
+		t.Fatalf("expected the second tenant's fresh queue to start near MinRPS (%v), got %v", MinRPS, got)
 	}
 }
 
@@ -242,7 +244,7 @@ func TestIdleAccountQueueRemovesWorkerAndStopsBudgetLoop(t *testing.T) {
 
 	r.Enqueue(job, "enabled")
 
-	key := domainKey(job.URL)
+	key := DomainKey(job.URL)
 	var worker *URLWorker
 	if !waitUntil(2*time.Second, func() bool {
 		r.mu.Lock()

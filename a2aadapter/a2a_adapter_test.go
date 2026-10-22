@@ -61,7 +61,7 @@ func newTestHandler(t *testing.T, aq *aquifer.Aquifer, allowPrivatePush bool) a2
 	t.Helper()
 	// A real, immediately-200ing sink -- Execute always sets WebhookURL to
 	// this when a request doesn't set one, and Aquifer's own webhook
-	// delivery (webhook.go) will actually POST to it in the background.
+	// delivery (internal/dispatch/webhook.go) will actually POST to it in the background.
 	// Pointing this at a dead address instead would just make every test
 	// spend several seconds retrying with backoff for no reason.
 	sink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
