@@ -42,17 +42,6 @@ type RemoteIdempotencyEntry struct {
 	ResultKey  string `json:"result_key,omitempty"`
 }
 
-type JobResult struct {
-	JobID          string `json:"job_id"`
-	Status         Status `json:"status"`
-	ResponseStatus int    `json:"response_status"`
-	ContentType    string `json:"content_type,omitempty"`
-	Body           string `json:"body,omitempty"`
-	BodyTruncated  bool   `json:"body_truncated,omitempty"`
-	RecordedAt     int64  `json:"recorded_at"`
-	Source         string `json:"source"`
-}
-
 type RemoteIdempotency interface {
 	Lookup(hash string) (RemoteIdempotencyEntry, bool)
 	Record(events []DrainEvent) bool

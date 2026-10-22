@@ -1,7 +1,7 @@
 // Copyright 2026 Rahmi Pruitt
 // SPDX-License-Identifier: Apache-2.0
 
-package aquifer
+package storage
 
 import (
 	"fmt"
@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/rjpruitt16/aquifer/internal/jobs"
 )
 
 // With the flush interval (100ms by default), writes are acknowledged before
@@ -18,9 +20,9 @@ import (
 // write. The child exits without Close, like a kill -9.
 func TestPebbleFlushIntervalSurvivesCrash(t *testing.T) {
 	if dir := os.Getenv("AQUIFER_PEBBLE_FLUSH_CHILD_DIR"); dir != "" {
-		store := NewPebbleStore(dir)
+		store := NewPebble(dir)
 		for i := 0; i < 50; i++ {
-			job := NewJob(&JobRequest{UserID: "u", IdempotentKey: fmt.Sprintf("k-%d", i), URL: "http://x", Method: "POST", WebhookURL: "http://w"})
+			job := jobs.New(&jobs.Request{UserID: "u", IdempotentKey: fmt.Sprintf("k-%d", i), URL: "http://x", Method: "POST", WebhookURL: "http://w"})
 			job.ID = fmt.Sprintf("job-%d", i)
 			if _, dup := store.CheckOrInsert(job); dup {
 				os.Exit(2)
@@ -37,7 +39,7 @@ func TestPebbleFlushIntervalSurvivesCrash(t *testing.T) {
 		t.Fatalf("child: %v\n%s", err, out)
 	}
 
-	store := NewPebbleStore(dir)
+	store := NewPebble(dir)
 	defer store.Close()
 	for i := 0; i < 50; i++ {
 		if store.GetJob(fmt.Sprintf("job-%d", i)) == nil {
@@ -51,9 +53,9 @@ func TestPebbleFlushIntervalSurvivesCrash(t *testing.T) {
 // every write: the same crash right after writing loses nothing.
 func TestPebbleFlushIntervalZeroSyncsEveryWrite(t *testing.T) {
 	if dir := os.Getenv("AQUIFER_PEBBLE_SYNC_CHILD_DIR"); dir != "" {
-		store := NewPebbleStore(dir)
+		store := NewPebble(dir)
 		for i := 0; i < 50; i++ {
-			job := NewJob(&JobRequest{UserID: "u", IdempotentKey: fmt.Sprintf("k-%d", i), URL: "http://x", Method: "POST", WebhookURL: "http://w"})
+			job := jobs.New(&jobs.Request{UserID: "u", IdempotentKey: fmt.Sprintf("k-%d", i), URL: "http://x", Method: "POST", WebhookURL: "http://w"})
 			job.ID = fmt.Sprintf("job-%d", i)
 			store.CheckOrInsert(job)
 		}
@@ -67,7 +69,7 @@ func TestPebbleFlushIntervalZeroSyncsEveryWrite(t *testing.T) {
 		t.Fatalf("child: %v\n%s", err, out)
 	}
 
-	store := NewPebbleStore(dir)
+	store := NewPebble(dir)
 	defer store.Close()
 	for i := 0; i < 50; i++ {
 		if store.GetJob(fmt.Sprintf("job-%d", i)) == nil {

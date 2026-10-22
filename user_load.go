@@ -36,7 +36,7 @@ func (t *userLoadTracker) add(job *Job) {
 		load = &userLoad{}
 		t.users[job.UserID] = load
 	}
-	if job.isWebhookDeliveryJob() {
+	if job.IsWebhookDelivery() {
 		load.webhooks++
 	} else {
 		load.jobs++
@@ -50,7 +50,7 @@ func (t *userLoadTracker) done(job *Job) {
 	if load == nil {
 		return
 	}
-	if job.isWebhookDeliveryJob() {
+	if job.IsWebhookDelivery() {
 		load.webhooks = max(load.webhooks-1, 0)
 	} else {
 		load.jobs = max(load.jobs-1, 0)

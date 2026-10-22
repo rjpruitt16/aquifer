@@ -1,7 +1,7 @@
 // Copyright 2026 Rahmi Pruitt
 // SPDX-License-Identifier: Apache-2.0
 
-package aquifer
+package storage
 
 import (
 	"fmt"
@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/rjpruitt16/aquifer/internal/jobs"
 )
 
 // TestPebbleStoreListAndClearIdempotentKeys mirrors
@@ -19,15 +21,15 @@ import (
 // leak into the returned ledger.
 func TestPebbleStoreListAndClearIdempotentKeys(t *testing.T) {
 	dir := t.TempDir()
-	store := NewPebbleStore(filepath.Join(dir, "pebble"))
+	store := NewPebble(filepath.Join(dir, "pebble"))
 	t.Cleanup(func() { store.Close() })
 
 	const plaintextKey = "super-secret-plaintext-key"
-	job1 := &Job{ID: generateID(), UserID: "u1", IdempotentKey: plaintextKey, URL: "https://example.com", Method: "POST", WebhookURL: "https://example.com", Status: StatusQueued, CreatedAt: time.Now().UnixMilli()}
-	job2 := &Job{ID: generateID(), UserID: "u2", IdempotentKey: "k2", URL: "https://example.com", Method: "POST", WebhookURL: "https://example.com", Status: StatusQueued, CreatedAt: time.Now().UnixMilli()}
+	job1 := &jobs.Job{ID: jobs.NewID(), UserID: "u1", IdempotentKey: plaintextKey, URL: "https://example.com", Method: "POST", WebhookURL: "https://example.com", Status: jobs.StatusQueued, CreatedAt: time.Now().UnixMilli()}
+	job2 := &jobs.Job{ID: jobs.NewID(), UserID: "u2", IdempotentKey: "k2", URL: "https://example.com", Method: "POST", WebhookURL: "https://example.com", Status: jobs.StatusQueued, CreatedAt: time.Now().UnixMilli()}
 	store.CheckOrInsert(job1)
 	store.CheckOrInsert(job2)
-	store.UpdateStatus(job2.ID, StatusCompleted)
+	store.UpdateStatus(job2.ID, jobs.StatusCompleted)
 
 	entries := store.ListIdempotentKeys()
 	if len(entries) != 2 {
@@ -41,11 +43,11 @@ func TestPebbleStoreListAndClearIdempotentKeys(t *testing.T) {
 			t.Fatalf("plaintext idempotent key leaked somewhere in ledger entry: %+v", e)
 		}
 	}
-	byJobID := map[string]LedgerEntry{}
+	byJobID := map[string]jobs.LedgerEntry{}
 	for _, e := range entries {
 		byJobID[e.JobID] = e
 	}
-	if e, ok := byJobID[job2.ID]; !ok || e.Status != StatusCompleted {
+	if e, ok := byJobID[job2.ID]; !ok || e.Status != jobs.StatusCompleted {
 		t.Fatalf("expected job2 entry with status completed, got %+v (ok=%v)", e, ok)
 	}
 	if e, ok := byJobID[job1.ID]; !ok || e.HashKey == "" {
@@ -65,20 +67,20 @@ func TestPebbleStoreListAndClearIdempotentKeys(t *testing.T) {
 
 func TestPebbleStoreDrainEventsAreAcknowledgedBySequence(t *testing.T) {
 	dir := t.TempDir()
-	store := NewPebbleStore(filepath.Join(dir, "pebble"))
+	store := NewPebble(filepath.Join(dir, "pebble"))
 	t.Cleanup(func() { store.Close() })
 
-	job1 := &Job{ID: generateID(), UserID: "u1", IdempotentKey: "k1", URL: "https://example.com", Method: "POST", WebhookURL: "https://example.com", Status: StatusQueued, CreatedAt: time.Now().UnixMilli()}
-	job2 := &Job{ID: generateID(), UserID: "u2", IdempotentKey: "k2", URL: "https://example.com", Method: "POST", WebhookURL: "https://example.com", Status: StatusQueued, CreatedAt: time.Now().UnixMilli()}
-	webhookJob := &Job{ID: generateID(), UserID: "u3", IdempotentKey: "webhook:" + generateID(), URL: "https://example.com", Method: "POST", Status: StatusQueued, CreatedAt: time.Now().UnixMilli()}
+	job1 := &jobs.Job{ID: jobs.NewID(), UserID: "u1", IdempotentKey: "k1", URL: "https://example.com", Method: "POST", WebhookURL: "https://example.com", Status: jobs.StatusQueued, CreatedAt: time.Now().UnixMilli()}
+	job2 := &jobs.Job{ID: jobs.NewID(), UserID: "u2", IdempotentKey: "k2", URL: "https://example.com", Method: "POST", WebhookURL: "https://example.com", Status: jobs.StatusQueued, CreatedAt: time.Now().UnixMilli()}
+	webhookJob := &jobs.Job{ID: jobs.NewID(), UserID: "u3", IdempotentKey: "webhook:" + jobs.NewID(), URL: "https://example.com", Method: "POST", Status: jobs.StatusQueued, CreatedAt: time.Now().UnixMilli()}
 
 	store.CheckOrInsert(job1)
 	store.CheckOrInsert(job2)
 	store.CheckOrInsert(webhookJob)
-	store.UpdateStatus(job1.ID, StatusCompleted)
-	store.UpdateStatus(job2.ID, StatusFailed)
-	store.UpdateStatus(webhookJob.ID, StatusCompleted)
-	store.UpdateStatus(job1.ID, StatusCompleted)
+	store.UpdateStatus(job1.ID, jobs.StatusCompleted)
+	store.UpdateStatus(job2.ID, jobs.StatusFailed)
+	store.UpdateStatus(webhookJob.ID, jobs.StatusCompleted)
+	store.UpdateStatus(job1.ID, jobs.StatusCompleted)
 
 	events := store.ListDrainEvents(10)
 	if len(events) != 2 {
@@ -87,10 +89,10 @@ func TestPebbleStoreDrainEventsAreAcknowledgedBySequence(t *testing.T) {
 	if events[0].Sequence == 0 || events[1].Sequence <= events[0].Sequence {
 		t.Fatalf("expected ordered non-zero sequences, got %+v", events)
 	}
-	if events[0].JobID != job1.ID || events[0].Status != StatusCompleted {
+	if events[0].JobID != job1.ID || events[0].Status != jobs.StatusCompleted {
 		t.Fatalf("expected first event for completed job1, got %+v", events[0])
 	}
-	if events[1].JobID != job2.ID || events[1].Status != StatusFailed {
+	if events[1].JobID != job2.ID || events[1].Status != jobs.StatusFailed {
 		t.Fatalf("expected second event for failed job2, got %+v", events[1])
 	}
 
@@ -113,7 +115,7 @@ func TestPebbleStoreDrainEventsAreAcknowledgedBySequence(t *testing.T) {
 // in CheckOrInsert is what's meant to prevent it.
 func TestPebbleStoreHandlesConcurrentInserts(t *testing.T) {
 	dir := t.TempDir()
-	store := NewPebbleStore(filepath.Join(dir, "pebble"))
+	store := NewPebble(filepath.Join(dir, "pebble"))
 	t.Cleanup(func() { store.Close() })
 
 	const n = 50
@@ -125,14 +127,14 @@ func TestPebbleStoreHandlesConcurrentInserts(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			job := &Job{
-				ID:            generateID(),
+			job := &jobs.Job{
+				ID:            jobs.NewID(),
 				UserID:        "concurrent-user",
-				IdempotentKey: generateID(),
+				IdempotentKey: jobs.NewID(),
 				URL:           "https://example.com/webhook",
 				Method:        "POST",
 				WebhookURL:    "https://example.com/callback",
-				Status:        StatusQueued,
+				Status:        jobs.StatusQueued,
 				CreatedAt:     time.Now().UnixMilli(),
 			}
 			if _, isDuplicate := store.CheckOrInsert(job); isDuplicate {
@@ -160,17 +162,17 @@ func TestPebbleStoreHandlesConcurrentInserts(t *testing.T) {
 
 func TestPebbleStoreDuplicateDetection(t *testing.T) {
 	dir := t.TempDir()
-	store := NewPebbleStore(filepath.Join(dir, "pebble"))
+	store := NewPebble(filepath.Join(dir, "pebble"))
 	t.Cleanup(func() { store.Close() })
 
-	job := &Job{
-		ID:            generateID(),
+	job := &jobs.Job{
+		ID:            jobs.NewID(),
 		UserID:        "dup-user",
 		IdempotentKey: "dup-key",
 		URL:           "https://example.com/webhook",
 		Method:        "POST",
 		WebhookURL:    "https://example.com/callback",
-		Status:        StatusQueued,
+		Status:        jobs.StatusQueued,
 		CreatedAt:     time.Now().UnixMilli(),
 	}
 
@@ -178,14 +180,14 @@ func TestPebbleStoreDuplicateDetection(t *testing.T) {
 		t.Fatal("first insert should not be a duplicate")
 	}
 
-	retry := &Job{
-		ID:            generateID(),
+	retry := &jobs.Job{
+		ID:            jobs.NewID(),
 		UserID:        "dup-user",
 		IdempotentKey: "dup-key",
 		URL:           "https://example.com/webhook",
 		Method:        "POST",
 		WebhookURL:    "https://example.com/callback",
-		Status:        StatusQueued,
+		Status:        jobs.StatusQueued,
 		CreatedAt:     time.Now().UnixMilli(),
 	}
 
@@ -204,17 +206,17 @@ func TestPebbleStoreDuplicateDetection(t *testing.T) {
 // a "duplicate" pointing at a job that no longer exists.
 func TestPebbleStoreDeleteJobLeavesNoGhostIndex(t *testing.T) {
 	dir := t.TempDir()
-	store := NewPebbleStore(filepath.Join(dir, "pebble"))
+	store := NewPebble(filepath.Join(dir, "pebble"))
 	t.Cleanup(func() { store.Close() })
 
-	job := &Job{
-		ID:            generateID(),
+	job := &jobs.Job{
+		ID:            jobs.NewID(),
 		UserID:        "del-user",
 		IdempotentKey: "del-key",
 		URL:           "https://example.com/webhook",
 		Method:        "POST",
 		WebhookURL:    "https://example.com/callback",
-		Status:        StatusQueued,
+		Status:        jobs.StatusQueued,
 		CreatedAt:     time.Now().UnixMilli(),
 	}
 
@@ -228,14 +230,14 @@ func TestPebbleStoreDeleteJobLeavesNoGhostIndex(t *testing.T) {
 		t.Fatalf("expected job to be gone after DeleteJob, got %+v", got)
 	}
 
-	retry := &Job{
-		ID:            generateID(),
+	retry := &jobs.Job{
+		ID:            jobs.NewID(),
 		UserID:        "del-user",
 		IdempotentKey: "del-key",
 		URL:           "https://example.com/webhook",
 		Method:        "POST",
 		WebhookURL:    "https://example.com/callback",
-		Status:        StatusQueued,
+		Status:        jobs.StatusQueued,
 		CreatedAt:     time.Now().UnixMilli(),
 	}
 

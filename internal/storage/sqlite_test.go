@@ -1,13 +1,15 @@
 // Copyright 2026 Rahmi Pruitt
 // SPDX-License-Identifier: Apache-2.0
 
-package aquifer
+package storage
 
 import (
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/rjpruitt16/aquifer/internal/jobs"
 )
 
 // TestStoreListAndClearIdempotentKeys covers drain mode's store-level
@@ -15,24 +17,24 @@ import (
 // it so a previously-duplicate key is seen as fresh afterward.
 func TestStoreListAndClearIdempotentKeys(t *testing.T) {
 	dir := t.TempDir()
-	store := NewStore(filepath.Join(dir, "aquifer.db"))
+	store := NewSQLite(filepath.Join(dir, "aquifer.db"))
 	t.Cleanup(func() { store.Close() })
 
-	job1 := &Job{ID: generateID(), UserID: "u1", IdempotentKey: "k1", URL: "https://example.com", Method: "POST", WebhookURL: "https://example.com", Status: StatusQueued, CreatedAt: time.Now().UnixMilli()}
-	job2 := &Job{ID: generateID(), UserID: "u2", IdempotentKey: "k2", URL: "https://example.com", Method: "POST", WebhookURL: "https://example.com", Status: StatusQueued, CreatedAt: time.Now().UnixMilli()}
+	job1 := &jobs.Job{ID: jobs.NewID(), UserID: "u1", IdempotentKey: "k1", URL: "https://example.com", Method: "POST", WebhookURL: "https://example.com", Status: jobs.StatusQueued, CreatedAt: time.Now().UnixMilli()}
+	job2 := &jobs.Job{ID: jobs.NewID(), UserID: "u2", IdempotentKey: "k2", URL: "https://example.com", Method: "POST", WebhookURL: "https://example.com", Status: jobs.StatusQueued, CreatedAt: time.Now().UnixMilli()}
 	store.CheckOrInsert(job1)
 	store.CheckOrInsert(job2)
-	store.UpdateStatus(job2.ID, StatusCompleted)
+	store.UpdateStatus(job2.ID, jobs.StatusCompleted)
 
 	entries := store.ListIdempotentKeys()
 	if len(entries) != 2 {
 		t.Fatalf("expected 2 ledger entries, got %d", len(entries))
 	}
-	byJobID := map[string]LedgerEntry{}
+	byJobID := map[string]jobs.LedgerEntry{}
 	for _, e := range entries {
 		byJobID[e.JobID] = e
 	}
-	if e, ok := byJobID[job2.ID]; !ok || e.Status != StatusCompleted {
+	if e, ok := byJobID[job2.ID]; !ok || e.Status != jobs.StatusCompleted {
 		t.Fatalf("expected job2 entry with status completed, got %+v (ok=%v)", e, ok)
 	}
 	if e, ok := byJobID[job1.ID]; !ok || e.HashKey == "" {
@@ -55,14 +57,14 @@ func TestStoreListAndClearIdempotentKeys(t *testing.T) {
 
 func TestStorePersistsExecuteBefore(t *testing.T) {
 	dir := t.TempDir()
-	store := NewStore(filepath.Join(dir, "aquifer.db"))
+	store := NewSQLite(filepath.Join(dir, "aquifer.db"))
 	t.Cleanup(func() { store.Close() })
 
 	executeBefore := time.Now().Add(time.Minute).UnixMilli()
-	job := &Job{
-		ID: generateID(), UserID: "deadline-user", IdempotentKey: "deadline-key",
+	job := &jobs.Job{
+		ID: jobs.NewID(), UserID: "deadline-user", IdempotentKey: "deadline-key",
 		URL: "https://example.com", Method: "POST", WebhookURL: "https://example.com/hook",
-		Status: StatusQueued, CreatedAt: time.Now().UnixMilli(), ExecuteBefore: executeBefore,
+		Status: jobs.StatusQueued, CreatedAt: time.Now().UnixMilli(), ExecuteBefore: executeBefore,
 	}
 	if _, duplicate := store.CheckOrInsert(job); duplicate {
 		t.Fatal("new deadline job was unexpectedly treated as a duplicate")
@@ -76,19 +78,19 @@ func TestStorePersistsExecuteBefore(t *testing.T) {
 
 func TestStoreDrainEventsAreAcknowledgedBySequence(t *testing.T) {
 	dir := t.TempDir()
-	store := NewStore(filepath.Join(dir, "aquifer.db"))
+	store := NewSQLite(filepath.Join(dir, "aquifer.db"))
 	t.Cleanup(func() { store.Close() })
 
-	job1 := &Job{ID: generateID(), UserID: "u1", IdempotentKey: "k1", URL: "https://example.com", Method: "POST", WebhookURL: "https://example.com", Status: StatusQueued, CreatedAt: time.Now().UnixMilli()}
-	job2 := &Job{ID: generateID(), UserID: "u2", IdempotentKey: "k2", URL: "https://example.com", Method: "POST", WebhookURL: "https://example.com", Status: StatusQueued, CreatedAt: time.Now().UnixMilli()}
-	webhookJob := &Job{ID: generateID(), UserID: "u3", IdempotentKey: "webhook:" + generateID(), URL: "https://example.com", Method: "POST", Status: StatusQueued, CreatedAt: time.Now().UnixMilli()}
+	job1 := &jobs.Job{ID: jobs.NewID(), UserID: "u1", IdempotentKey: "k1", URL: "https://example.com", Method: "POST", WebhookURL: "https://example.com", Status: jobs.StatusQueued, CreatedAt: time.Now().UnixMilli()}
+	job2 := &jobs.Job{ID: jobs.NewID(), UserID: "u2", IdempotentKey: "k2", URL: "https://example.com", Method: "POST", WebhookURL: "https://example.com", Status: jobs.StatusQueued, CreatedAt: time.Now().UnixMilli()}
+	webhookJob := &jobs.Job{ID: jobs.NewID(), UserID: "u3", IdempotentKey: "webhook:" + jobs.NewID(), URL: "https://example.com", Method: "POST", Status: jobs.StatusQueued, CreatedAt: time.Now().UnixMilli()}
 
 	store.CheckOrInsert(job1)
 	store.CheckOrInsert(job2)
 	store.CheckOrInsert(webhookJob)
-	store.UpdateStatus(job1.ID, StatusCompleted)
-	store.UpdateStatus(job2.ID, StatusFailed)
-	store.UpdateStatus(webhookJob.ID, StatusCompleted)
+	store.UpdateStatus(job1.ID, jobs.StatusCompleted)
+	store.UpdateStatus(job2.ID, jobs.StatusFailed)
+	store.UpdateStatus(webhookJob.ID, jobs.StatusCompleted)
 
 	events := store.ListDrainEvents(10)
 	if len(events) != 2 {
@@ -97,10 +99,10 @@ func TestStoreDrainEventsAreAcknowledgedBySequence(t *testing.T) {
 	if events[0].Sequence == 0 || events[1].Sequence <= events[0].Sequence {
 		t.Fatalf("expected ordered non-zero sequences, got %+v", events)
 	}
-	if events[0].JobID != job1.ID || events[0].Status != StatusCompleted {
+	if events[0].JobID != job1.ID || events[0].Status != jobs.StatusCompleted {
 		t.Fatalf("expected first event for completed job1, got %+v", events[0])
 	}
-	if events[1].JobID != job2.ID || events[1].Status != StatusFailed {
+	if events[1].JobID != job2.ID || events[1].Status != jobs.StatusFailed {
 		t.Fatalf("expected second event for failed job2, got %+v", events[1])
 	}
 
@@ -123,7 +125,7 @@ func TestStoreDrainEventsAreAcknowledgedBySequence(t *testing.T) {
 // should complete quickly rather than queueing one-at-a-time.
 func TestStoreHandlesConcurrentInserts(t *testing.T) {
 	dir := t.TempDir()
-	store := NewStore(filepath.Join(dir, "aquifer.db"))
+	store := NewSQLite(filepath.Join(dir, "aquifer.db"))
 	t.Cleanup(func() { store.Close() })
 
 	const n = 50
@@ -135,14 +137,14 @@ func TestStoreHandlesConcurrentInserts(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			job := &Job{
-				ID:            generateID(),
+			job := &jobs.Job{
+				ID:            jobs.NewID(),
 				UserID:        "concurrent-user",
-				IdempotentKey: generateID(),
+				IdempotentKey: jobs.NewID(),
 				URL:           "https://example.com/webhook",
 				Method:        "POST",
 				WebhookURL:    "https://example.com/callback",
-				Status:        StatusQueued,
+				Status:        jobs.StatusQueued,
 				CreatedAt:     time.Now().UnixMilli(),
 			}
 			if _, isDuplicate := store.CheckOrInsert(job); isDuplicate {

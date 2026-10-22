@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/rjpruitt16/aquifer/internal/admission"
+	"github.com/rjpruitt16/aquifer/internal/jobs"
 	"github.com/rjpruitt16/aquifer/internal/region"
 	"github.com/rjpruitt16/aquifer/l8"
 )
@@ -200,7 +201,7 @@ func (a *Aquifer) PrepareJob(req JobRequest) (job *Job, duplicate *EnqueueResult
 	}
 
 	if a.remote != nil {
-		entry, found := a.remote.Lookup(job.dedupHash())
+		entry, found := a.remote.Lookup(job.IdempotencyHash())
 		if found {
 			a.store.DeleteJob(job.ID)
 			return nil, &EnqueueResult{
@@ -284,7 +285,7 @@ func (a *Aquifer) GetJobResult(userID, idempotentKey, scope string) (JobResult, 
 	switch {
 	case idempotentKey == "":
 		return JobResult{}, errors.New("idempotent_key is required")
-	case scope == IdempotencyScopeShared && !sharedIdempotencyEnabled():
+	case scope == IdempotencyScopeShared && !jobs.SharedIdempotencyEnabled():
 		return JobResult{}, errors.New(`idempotency_scope "shared" requires AQUIFER_SHARED_IDEMPOTENCY_ENABLED=true`)
 	case scope != IdempotencyScopeShared && userID == "":
 		return JobResult{}, errors.New("user_id is required unless idempotency_scope is shared")
@@ -293,7 +294,7 @@ func (a *Aquifer) GetJobResult(userID, idempotentKey, scope string) (JobResult, 
 	if !ok {
 		return JobResult{}, ErrJobResultNotFound
 	}
-	if result, found := reader.LookupResult(dedupHash(userID, idempotentKey, scope)); found {
+	if result, found := reader.LookupResult(jobs.DedupHash(userID, idempotentKey, scope)); found {
 		return result, nil
 	}
 	return JobResult{}, ErrJobResultNotFound

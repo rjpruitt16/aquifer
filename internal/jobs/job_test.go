@@ -1,12 +1,12 @@
 // Copyright 2026 Rahmi Pruitt
 // SPDX-License-Identifier: Apache-2.0
 
-package aquifer
+package jobs
 
 import "testing"
 
-func validRequest(rawURL string) JobRequest {
-	return JobRequest{
+func validRequest(rawURL string) Request {
+	return Request{
 		UserID:        "user-1",
 		IdempotentKey: "key-1",
 		URL:           rawURL,
@@ -28,7 +28,7 @@ func TestWebhookURLIsOptional(t *testing.T) {
 	if msg := req.Validate(); msg != "" {
 		t.Fatalf("expected webhook_url to be optional, got: %q", msg)
 	}
-	if NewJob(&req).isWebhookDeliveryJob() {
+	if New(&req).IsWebhookDelivery() {
 		t.Fatal("callback-free user job must not be treated as an internal webhook delivery")
 	}
 }
@@ -79,7 +79,7 @@ func TestDomainAllowlistDoesNotFalsePositiveOnSuffixWithoutDot(t *testing.T) {
 func TestDomainAllowlistIgnoresPoolRoutedJobs(t *testing.T) {
 	t.Setenv("AQUIFER_ALLOWED_URL_DOMAINS", "example.com")
 
-	req := JobRequest{
+	req := Request{
 		UserID:        "user-1",
 		IdempotentKey: "key-1",
 		PoolID:        "pool-1",

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/rjpruitt16/aquifer/internal/admission"
+	"github.com/rjpruitt16/aquifer/internal/jobs"
 )
 
 type Registry struct {
@@ -322,7 +323,7 @@ func (r *Registry) enqueue(job *Job, accountQueueHeader string, enforceAdmission
 
 	// userLoadTracker has its own lock, so this runs before the registry
 	// lock (which now covers only resolving the worker).
-	if enforceAdmission && !job.isWebhookDeliveryJob() {
+	if enforceAdmission && !job.IsWebhookDelivery() {
 		if rejected, limit, backlog := r.users.webhookBacklogDecision(job.UserID, admission.RandomDraw()); rejected {
 			return QueueSnapshot{}, &AdmissionRejectedError{Decision: AdmissionDecision{
 				Allowed: false,
@@ -490,7 +491,7 @@ func (r *Registry) resolveWorkerLocked(job *Job) (string, *URLWorker) {
 // same way a real job is (the underlying webhook-delivery Job is persisted
 // via CheckOrInsert, not just an in-memory retry loop).
 //
-// originalJobID scopes the idempotent key (see Job.isWebhookDeliveryJob) so
+// originalJobID scopes the idempotent key (see Job.IsWebhookDelivery) so
 // a given job's webhook is enqueued at most once even if this were somehow
 // called twice for it. maxRetries is the original job's webhook_max_retries.
 //
@@ -512,7 +513,7 @@ func (r *Registry) EnqueueWebhook(originalJobID, userID, webhookURL string, maxR
 		Body:          string(body),
 		MaxRetries:    &maxRetries,
 	})
-	job.Kind = jobKindWebhookDelivery
+	job.Kind = jobs.KindWebhookDelivery
 
 	if _, duplicate := r.store.CheckOrInsert(job); duplicate || r.stopping() {
 		return

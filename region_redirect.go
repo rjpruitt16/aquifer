@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rjpruitt16/aquifer/internal/jobs"
 	"github.com/rjpruitt16/aquifer/internal/region"
 )
 
@@ -38,7 +39,7 @@ func selfMachineID() string {
 			selfMachineIDValue = host
 			return
 		}
-		selfMachineIDValue = generateID()
+		selfMachineIDValue = jobs.NewID()
 	})
 	return selfMachineIDValue
 }

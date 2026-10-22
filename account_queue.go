@@ -422,8 +422,8 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 						q.store.UpdateStatus(j.ID, StatusFailed)
 						q.metrics.JobFailed(j.UserID, q.upstream, "internal panic")
 						observeJobFinished(q.metrics, j, q.upstream, "failed", 0)
-						if !j.isWebhookDeliveryJob() && j.WebhookURL != "" {
-							q.enqueueWebhook(j.ID, j.UserID, j.WebhookURL, j.webhookMaxRetries(), map[string]any{
+						if !j.IsWebhookDelivery() && j.WebhookURL != "" {
+							q.enqueueWebhook(j.ID, j.UserID, j.WebhookURL, j.WebhookRetryLimit(), map[string]any{
 								"job_id": j.ID,
 								"status": "failed",
 								"reason": "internal panic",
@@ -697,7 +697,7 @@ func execute(ctx context.Context, job *Job, dispatchURL, upstream string, store 
 		})
 		metrics.JobCompleted(job.UserID, upstream, time.Since(startedAt).Milliseconds())
 		observeJobFinished(metrics, job, upstream, "completed", resp.StatusCode)
-		if !job.isWebhookDeliveryJob() && job.WebhookURL != "" && !streamed {
+		if !job.IsWebhookDelivery() && job.WebhookURL != "" && !streamed {
 			payload := map[string]any{
 				"job_id":          job.ID,
 				"status":          "completed",
@@ -707,7 +707,7 @@ func execute(ctx context.Context, job *Job, dispatchURL, upstream string, store 
 			if resultKey != "" {
 				payload["result_key"] = resultKey
 			}
-			enqueueWebhook(job.ID, job.UserID, job.WebhookURL, job.webhookMaxRetries(), payload)
+			enqueueWebhook(job.ID, job.UserID, job.WebhookURL, job.WebhookRetryLimit(), payload)
 		}
 		return pacingSignals(resp.Header)
 	}
@@ -723,8 +723,8 @@ func execute(ctx context.Context, job *Job, dispatchURL, upstream string, store 
 		header = resp.Header
 	}
 	retryAt := time.Now().Add(retryDelay(job.Attempts, header))
-	if !job.hasRetriesLeft() || !retryAt.Before(job.retryDeadline()) {
-		if job.hasRetriesLeft() {
+	if !job.HasRetriesLeft() || !retryAt.Before(job.RetryDeadline()) {
+		if job.HasRetriesLeft() {
 			reason = "retry_window_exhausted: " + reason
 		}
 		failJob(job, upstream, reason, responseStatus, body, store, broker, metrics, enqueueWebhook, resultRecorder)
@@ -775,7 +775,7 @@ func failJob(job *Job, upstream, reason string, responseStatus int, body []byte,
 		outcome = "expired"
 	}
 	observeJobFinished(metrics, job, upstream, outcome, responseStatus)
-	if !job.isWebhookDeliveryJob() && job.WebhookURL != "" && !streamed {
+	if !job.IsWebhookDelivery() && job.WebhookURL != "" && !streamed {
 		payload := map[string]any{
 			"job_id":          job.ID,
 			"status":          "failed",
@@ -786,7 +786,7 @@ func failJob(job *Job, upstream, reason string, responseStatus int, body []byte,
 		if resultKey != "" {
 			payload["result_key"] = resultKey
 		}
-		enqueueWebhook(job.ID, job.UserID, job.WebhookURL, job.webhookMaxRetries(), payload)
+		enqueueWebhook(job.ID, job.UserID, job.WebhookURL, job.WebhookRetryLimit(), payload)
 	}
 }
 
@@ -864,12 +864,12 @@ func failExpiredJob(job *Job, upstream string, store JobStore, broker *Broker, m
 	}})
 	metrics.JobFailed(job.UserID, upstream, reason)
 	observeJobFinished(metrics, job, upstream, "expired", 0)
-	if !job.isWebhookDeliveryJob() && job.WebhookURL != "" {
+	if !job.IsWebhookDelivery() && job.WebhookURL != "" {
 		payload := map[string]any{"job_id": job.ID, "status": "failed", "reason": reason}
 		if resultKey != "" {
 			payload["result_key"] = resultKey
 		}
-		go enqueueWebhook(job.ID, job.UserID, job.WebhookURL, job.webhookMaxRetries(), payload)
+		go enqueueWebhook(job.ID, job.UserID, job.WebhookURL, job.WebhookRetryLimit(), payload)
 	}
 }
 
@@ -878,7 +878,7 @@ const defaultLocalResultMaxBytes = 64 * 1024
 // saveLocalResult keeps the terminal response with the job (bounded by
 // AQUIFER_RESULT_MAX_BYTES) so GET /jobs/{id} can return it.
 func saveLocalResult(store JobStore, job *Job, status Status, responseStatus int, contentType, body string) {
-	if job.isWebhookDeliveryJob() {
+	if job.IsWebhookDelivery() {
 		return
 	}
 	truncated, wasTruncated := truncateStringBytes(body, env.Int64("AQUIFER_RESULT_MAX_BYTES", defaultLocalResultMaxBytes))
@@ -895,10 +895,10 @@ func saveLocalResult(store JobStore, job *Job, status Status, responseStatus int
 }
 
 func recordJobResult(job *Job, recorder JobResultRecorder, status Status, responseStatus int, contentType string, body string) string {
-	if recorder == nil || job.isWebhookDeliveryJob() {
+	if recorder == nil || job.IsWebhookDelivery() {
 		return ""
 	}
-	key, ok := recorder.RecordResult(job.dedupHash(), JobResult{
+	key, ok := recorder.RecordResult(job.IdempotencyHash(), JobResult{
 		JobID:          job.ID,
 		Status:         status,
 		ResponseStatus: responseStatus,
@@ -925,10 +925,10 @@ func makeRequest(ctx context.Context, job *Job, dispatchURL string, totalJobs, q
 	// payload private for) the *receiver* of a webhook — they have no meaning
 	// for forward dispatch to an arbitrary target API, so this only applies
 	// when the job being dispatched is itself a webhook delivery (see
-	// Job.isWebhookDeliveryJob).
+	// Job.IsWebhookDelivery).
 	body := []byte(job.Body)
 	var l8Headers map[string]string
-	if job.isWebhookDeliveryJob() && l8 != nil {
+	if job.IsWebhookDelivery() && l8 != nil {
 		l8.EnsureTrust(dispatchURL)
 		contentType := job.Headers["Content-Type"]
 		if contentType == "" {

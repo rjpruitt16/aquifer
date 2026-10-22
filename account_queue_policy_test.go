@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/rjpruitt16/aquifer/internal/jobs"
 )
 
 // Who decides whether a destination gets one queue per tenant or one shared
@@ -36,7 +38,7 @@ func okServer(t *testing.T, header string) *httptest.Server {
 }
 
 func localJob(userID, url string) *Job {
-	return &Job{ID: generateID(), UserID: userID, URL: url, Method: "POST", Status: StatusQueued}
+	return &Job{ID: jobs.NewID(), UserID: userID, URL: url, Method: "POST", Status: StatusQueued}
 }
 
 func workerFor(t *testing.T, r *Registry, url string) *URLWorker {

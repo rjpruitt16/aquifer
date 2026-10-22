@@ -51,7 +51,7 @@ func TestCreateJobAllowsOmittedWebhookURL(t *testing.T) {
 		t.Fatalf("decode response: %v", err)
 	}
 	job := store.GetJob(result.JobID)
-	if job == nil || job.isWebhookDeliveryJob() {
+	if job == nil || job.IsWebhookDelivery() {
 		t.Fatalf("callback-free user job was misclassified as internal: %+v", job)
 	}
 }

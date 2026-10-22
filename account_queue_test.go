@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rjpruitt16/aquifer/internal/jobs"
 	"github.com/rjpruitt16/aquifer/internal/orca"
 )
 
@@ -116,7 +117,7 @@ func TestRecordJobResultUsesIdempotencyHash(t *testing.T) {
 	if got != recorder.key {
 		t.Fatalf("expected result key %q, got %q", recorder.key, got)
 	}
-	if recorder.hash != hashKey("user-1:key-1") {
+	if recorder.hash != jobs.HashKey("user-1:key-1") {
 		t.Fatalf("expected idempotency hash, got %q", recorder.hash)
 	}
 	if recorder.result.JobID != "job-1" || recorder.result.Status != StatusCompleted || recorder.result.ResponseStatus != http.StatusOK {
@@ -213,7 +214,7 @@ func TestExpiredQueuedJobFailsWithoutDispatch(t *testing.T) {
 	})
 
 	job := &Job{
-		ID: generateID(), UserID: "deadline-user", IdempotentKey: "expired-key",
+		ID: jobs.NewID(), UserID: "deadline-user", IdempotentKey: "expired-key",
 		URL: "http://127.0.0.1:1/should-not-run", Method: "POST", WebhookURL: "http://127.0.0.1:1/hook",
 		Status: StatusQueued, CreatedAt: time.Now().UnixMilli(), ExecuteBefore: time.Now().Add(-time.Second).UnixMilli(),
 	}
@@ -250,12 +251,12 @@ func TestJobExpiringDuringPacingDelayFailsWithoutDispatch(t *testing.T) {
 	t.Cleanup(upstream.Close)
 
 	first := &Job{
-		ID: generateID(), UserID: "deadline-user", IdempotentKey: "first",
+		ID: jobs.NewID(), UserID: "deadline-user", IdempotentKey: "first",
 		URL: upstream.URL, Method: "POST", WebhookURL: "http://127.0.0.1:1/hook",
 		Status: StatusQueued, CreatedAt: time.Now().UnixMilli(),
 	}
 	expiring := &Job{
-		ID: generateID(), UserID: "deadline-user", IdempotentKey: "expiring",
+		ID: jobs.NewID(), UserID: "deadline-user", IdempotentKey: "expiring",
 		URL: upstream.URL, Method: "POST", WebhookURL: "http://127.0.0.1:1/hook",
 		Status: StatusQueued, CreatedAt: time.Now().UnixMilli(),
 		ExecuteBefore: time.Now().Add(150 * time.Millisecond).UnixMilli(),

@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/rjpruitt16/aquifer/internal/jobs"
 )
 
 type fakeRemoteIdempotency struct {
@@ -69,7 +71,7 @@ func TestRemoteIdempotencyDuplicateDeletesLocalAcceptedJob(t *testing.T) {
 	if result.ResultKey != "aqueduct:result:remote-key" {
 		t.Fatalf("expected remote duplicate to return result key, got %+v", result)
 	}
-	if remote.lookupHash != hashKey(req.UserID+":"+req.IdempotentKey) {
+	if remote.lookupHash != jobs.HashKey(req.UserID+":"+req.IdempotentKey) {
 		t.Fatalf("expected lookup by Aquifer idempotency hash, got %q", remote.lookupHash)
 	}
 	if entries := store.ListIdempotentKeys(); len(entries) != 0 {
@@ -97,7 +99,7 @@ func TestGetJobResultLooksUpRemoteByIdempotencyHash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected remote result, got error: %v", err)
 	}
-	if remote.resultHash != hashKey("user-1:key-1") {
+	if remote.resultHash != jobs.HashKey("user-1:key-1") {
 		t.Fatalf("expected lookup by idempotency hash, got %q", remote.resultHash)
 	}
 	if result.JobID != "remote-job" || result.Body != `{"ok":true}` {

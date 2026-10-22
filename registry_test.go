@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/rjpruitt16/aquifer/internal/jobs"
 )
 
 func testRegistry(t *testing.T) *Registry {
@@ -27,7 +29,7 @@ func testRegistry(t *testing.T) *Registry {
 
 func jobFor(userID, apiKey string) *Job {
 	return &Job{
-		ID:     generateID(),
+		ID:     jobs.NewID(),
 		UserID: userID,
 		// postman-echo.com/post always returns a fast 200 for both the
 		// dispatch and the webhook delivery — example.com's 405 on POST

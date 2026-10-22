@@ -10,14 +10,16 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/rjpruitt16/aquifer/internal/jobs"
 )
 
 func webhookJobFor(userID string) *Job {
-	return &Job{ID: generateID(), UserID: userID, WebhookURL: ""}
+	return &Job{ID: jobs.NewID(), UserID: userID, WebhookURL: ""}
 }
 
 func userJob(userID string) *Job {
-	return &Job{ID: generateID(), UserID: userID, WebhookURL: "https://example.com/hook"}
+	return &Job{ID: jobs.NewID(), UserID: userID, WebhookURL: "https://example.com/hook"}
 }
 
 func TestWebhookBacklogDecision(t *testing.T) {

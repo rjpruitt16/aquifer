@@ -97,7 +97,7 @@ func sinceCreated(job *Job, now time.Time) time.Duration {
 }
 
 func observeJobWaited(metrics MetricsAdapter, job *Job, upstream string) {
-	if t, ok := metrics.(JobTimingMetrics); ok && job.Attempts == 0 && !job.isWebhookDeliveryJob() {
+	if t, ok := metrics.(JobTimingMetrics); ok && job.Attempts == 0 && !job.IsWebhookDelivery() {
 		t.JobWaited(job.UserID, upstream, sinceCreated(job, time.Now()))
 	}
 }
@@ -108,7 +108,7 @@ func observeJobWaited(metrics MetricsAdapter, job *Job, upstream string) {
 // won't retry, a receiver's 401 or 403 included, and that's a webhook the
 // receiver turned down, not one that arrived.
 func observeJobFinished(metrics MetricsAdapter, job *Job, upstream, outcome string, status int) {
-	if job.isWebhookDeliveryJob() {
+	if job.IsWebhookDelivery() {
 		if w, ok := metrics.(WebhookJobMetrics); ok {
 			if outcome == "completed" && status >= 200 && status < 300 {
 				w.WebhookJobFinished("delivered")
@@ -124,7 +124,7 @@ func observeJobFinished(metrics MetricsAdapter, job *Job, upstream, outcome stri
 }
 
 func observeDispatch(metrics MetricsAdapter, job *Job, upstream string, status int) {
-	if d, ok := metrics.(DispatchMetrics); ok && !job.isWebhookDeliveryJob() {
+	if d, ok := metrics.(DispatchMetrics); ok && !job.IsWebhookDelivery() {
 		d.DispatchAttempt(upstream, status)
 	}
 }

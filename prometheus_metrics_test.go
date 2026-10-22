@@ -14,6 +14,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/rjpruitt16/aquifer/internal/jobs"
 )
 
 // Through a real server: jobs dispatched to a real backend show up on
@@ -113,7 +115,7 @@ func TestMetricsIs404WithACustomAdapter(t *testing.T) {
 // a retry, and that's a failed webhook, not a delivered one.
 func TestARejectedWebhookIsNotDelivered(t *testing.T) {
 	m := NewPrometheusMetrics()
-	hook := &Job{Kind: jobKindWebhookDelivery}
+	hook := &Job{Kind: jobs.KindWebhookDelivery}
 	observeJobFinished(m, hook, "https://app.example", "completed", 200)
 	observeJobFinished(m, hook, "https://app.example", "completed", 401)
 	observeJobFinished(m, hook, "https://app.example", "failed", 503)
