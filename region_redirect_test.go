@@ -18,7 +18,7 @@ import (
 
 // fakeRegionAdapter is a test double for RegionAdapter — a plain, static
 // live-region list, no polling. Real polling behavior (FlyRegionAdapter)
-// has its own tests in region_adapter_test.go; these tests are about
+// has its own tests in internal/region/adapter_test.go; these tests are about
 // AttemptDirect/attemptRedirect's orchestration, not region discovery.
 type fakeRegionAdapter struct {
 	live []string
@@ -52,7 +52,7 @@ func TestSelfMachineIDIsStableAndReadsFlyMachineID(t *testing.T) {
 // Server pairs -- "origin" and "target" -- with origin's redirectTargetURL
 // overridden to dial target's real httptest.Server instead of real Fly
 // .internal DNS (which can't resolve in a unit test environment; see
-// region_adapter_test.go's identical justification for FlyRegionAdapter).
+// internal/region/adapter_test.go's identical justification for FlyRegionAdapter).
 // origin's RegionAdapter reports exactly one live region, "target-region",
 // which resolves to target's server.
 func buildRedirectTestPair(t *testing.T) (origin *Aquifer, originSrv *httptest.Server, target *Aquifer) {

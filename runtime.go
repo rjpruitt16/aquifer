@@ -27,7 +27,7 @@ type RuntimeOptions struct {
 	// AQUIFER_DRAIN_ENABLED is explicitly set to true.
 	DrainConfig *DrainConfig
 	// RegionAdapter backs /proxy's cross-region redirect (proxy.go,
-	// region_adapter.go). If nil, NewRuntime tries NewFlyRegionAdapter,
+	// internal/region/adapter.go). If nil, NewRuntime tries NewFlyRegionAdapter,
 	// which itself only activates if AQUIFER_FLY_REGIONS is set — same
 	// zero-code, env-var-only activation pattern as AQUIFER_DRAIN_ENABLED.
 	// Set this to plug in a RegionAdapter for a different platform.
