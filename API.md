@@ -98,6 +98,8 @@ Accepted and fairness-rejected responses report `X-Aqueduct-Active-Queues`, `X-A
 
 Every response also carries `X-Aqueduct-Fullness`: how full this instance is, `0`–`100`. It's the most-constrained of the limits the instance already enforces: memory against `AQUIFER_MEMORY_LIMIT_MB`, the database against `AQUIFER_DB_MAX_BYTES`, and the fullest target API's backlog against its backlog budget (`AQUIFER_MAX_PENDING_PER_UPSTREAM` or the target API's own `X-Aqueduct-Max-Backlog`). Limits that are switched off don't count. Unlike `X-Aqueduct-Admission-Pressure`, which stays at `0` until a backlog reaches fair admission's 70% starting point, fullness rises from the first queued job, so whatever sits in front of the instance (a gateway like Canalis, or a client) can see it filling up before it starts pushing back, and decide for itself when to stop sending it new work. The same number is in the registration ping as `fullness` ([REGISTRATION.md](REGISTRATION.md)). Sampled at most every 250ms.
 
+Every response also carries the instance's load: `X-Aqueduct-Http-Users`, `X-Aqueduct-Http-Capacity`, `X-Aqueduct-WS-Sessions` and `X-Aqueduct-WS-Capacity`, the same numbers as the registration ping ([REGISTRATION.md](REGISTRATION.md#load-http-users-and-websocket-sessions)).
+
 ### Webhook backlog admission
 
 A user whose completion webhooks are piling up undelivered is consuming capacity faster than their receiver can absorb it. When other users are also active on the instance, new jobs from that user are rejected with **429** and `limit_reason: "webhook_backlog"` until they catch up:

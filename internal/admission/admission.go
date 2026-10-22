@@ -405,6 +405,15 @@ func dbSizeBytes(path string) int64 {
 	return total
 }
 
+// Memory is this process's memory in use and AQUIFER_MEMORY_LIMIT_MB (0:
+// no limit), in MB, from the same sample Check uses.
+func (c *Controller) Memory() (usedMB, limitMB int64) {
+	if c == nil {
+		return 0, 0
+	}
+	return c.memSample.Get(processMemoryMB), c.limits.MemoryLimitMB
+}
+
 // AnyLimitConfigured reports whether at least one admission limit is
 // actually active, as opposed to merely whether a controller instance
 // exists (the runtime always constructs one, even with everything at zero).
