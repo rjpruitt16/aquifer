@@ -15,6 +15,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/rjpruitt16/aquifer/internal/cluster"
 )
 
 func testClusterAquifer(t *testing.T) (*Aquifer, *Store) {
@@ -31,107 +33,6 @@ func testClusterAquifer(t *testing.T) (*Aquifer, *Store) {
 	app := NewAquifer(store, registry, broker, l8, admission, nil)
 	t.Cleanup(app.Close)
 	return app, store
-}
-
-func testClusterRouter(self ClusterMember, members ...ClusterMember) *ClusterRouter {
-	return NewClusterRouter(ClusterConfig{
-		Enabled:  true,
-		Self:     self,
-		Members:  members,
-		PruneTTL: 30 * time.Second,
-	})
-}
-
-func keyOwnedBy(t *testing.T, router *ClusterRouter, ownerID string) string {
-	t.Helper()
-
-	for i := 0; i < 10000; i++ {
-		key := "user-" + strconvItoa(i)
-		owner, ok := router.OwnerFor(key)
-		if ok && owner.ID == ownerID {
-			return key
-		}
-	}
-	t.Fatalf("could not find a key owned by %s", ownerID)
-	return ""
-}
-
-func keyRankedBy(t *testing.T, router *ClusterRouter, firstID, secondID string) string {
-	t.Helper()
-
-	for i := 0; i < 10000; i++ {
-		key := "user-" + strconvItoa(i)
-		ranked := router.RankedOwners(key)
-		if len(ranked) >= 2 && ranked[0].ID == firstID && ranked[1].ID == secondID {
-			return key
-		}
-	}
-	t.Fatalf("could not find a key ranked %s then %s", firstID, secondID)
-	return ""
-}
-
-func TestClusterRouterLocatesStableOwner(t *testing.T) {
-	self := ClusterMember{ID: "node-a", Address: "http://node-a"}
-	other := ClusterMember{ID: "node-b", Address: "http://node-b"}
-	router := testClusterRouter(self, self, other)
-
-	first, ok := router.OwnerFor("tenant-1")
-	if !ok {
-		t.Fatal("expected an owner")
-	}
-	second, ok := router.OwnerFor("tenant-1")
-	if !ok {
-		t.Fatal("expected an owner on repeat lookup")
-	}
-	if first.ID != second.ID {
-		t.Fatalf("expected stable owner, got %q then %q", first.ID, second.ID)
-	}
-}
-
-func TestClusterRouterRanksOwnersStably(t *testing.T) {
-	self := ClusterMember{ID: "node-a", Address: "http://node-a"}
-	router := testClusterRouter(
-		self,
-		self,
-		ClusterMember{ID: "node-b", Address: "http://node-b"},
-		ClusterMember{ID: "node-c", Address: "http://node-c"},
-	)
-
-	first := router.RankedOwners("tenant-1")
-	second := router.RankedOwners("tenant-1")
-	if len(first) != 3 || len(second) != 3 {
-		t.Fatalf("expected three ranked owners, got %d and %d", len(first), len(second))
-	}
-	for i := range first {
-		if first[i].ID != second[i].ID {
-			t.Fatalf("expected stable ranking, got %+v then %+v", first, second)
-		}
-	}
-}
-
-func TestClusterRouterSoftPrunesMember(t *testing.T) {
-	self := ClusterMember{ID: "node-a", Address: "http://node-a"}
-	other := ClusterMember{ID: "node-b", Address: "http://node-b"}
-	router := NewClusterRouter(ClusterConfig{
-		Enabled:  true,
-		Self:     self,
-		Members:  []ClusterMember{self, other},
-		PruneTTL: time.Hour,
-	})
-	key := keyOwnedBy(t, router, other.ID)
-
-	router.PruneMember(other.ID)
-
-	owner, ok := router.OwnerFor(key)
-	if !ok {
-		t.Fatal("expected an owner after pruning")
-	}
-	if owner.ID == other.ID {
-		t.Fatalf("expected pruned member not to own key, got %q", owner.ID)
-	}
-	if router.prunedCount() != 1 {
-		t.Fatalf("expected one pruned member, got %d", router.prunedCount())
-	}
 }
 
 func TestClusterRoutingPreservesRequestValidation(t *testing.T) {
@@ -246,8 +147,8 @@ func TestClusterSkipsAndPrunesDrainingOwner(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil || peerStore.GetJob(result.JobID) == nil {
 		t.Fatalf("expected peer to persist the rerouted job, response=%s err=%v", rec.Body.String(), err)
 	}
-	if router.prunedCount() != 1 {
-		t.Fatalf("expected draining owner to be soft-pruned, got %d", router.prunedCount())
+	if pruned := router.Snapshot()["pruned_members"]; pruned != 1 {
+		t.Fatalf("expected draining owner to be soft-pruned, got %v", pruned)
 	}
 }
 
@@ -289,8 +190,8 @@ func TestClusterJobsPruneFailedOwnerAndForwardToNextRankedPeer(t *testing.T) {
 	if rec.Header().Get("X-Aquifer-Cluster-Owner") != fallback.ID {
 		t.Fatalf("expected fallback owner header %q, got %q", fallback.ID, rec.Header().Get("X-Aquifer-Cluster-Owner"))
 	}
-	if router.prunedCount() != 1 {
-		t.Fatalf("expected failed owner to be pruned, got %d pruned", router.prunedCount())
+	if router.Snapshot()["pruned_members"] != 1 {
+		t.Fatalf("expected failed owner to be pruned, got %d pruned", router.Snapshot()["pruned_members"])
 	}
 	var result EnqueueResult
 	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
@@ -347,20 +248,6 @@ func TestClusterProxyForwardsAndRelaysDirectResponse(t *testing.T) {
 	}
 }
 
-func strconvItoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var buf [20]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(buf[i:])
-}
-
 func TestClusterRoutesSharedScopeBySharedKey(t *testing.T) {
 	t.Setenv("AQUIFER_SHARED_IDEMPOTENCY_ENABLED", "true")
 
@@ -385,7 +272,7 @@ func TestClusterRoutesSharedScopeBySharedKey(t *testing.T) {
 	// routing would have split them across both nodes.
 	var sharedKey string
 	for i := 0; i < 10000 && sharedKey == ""; i++ {
-		candidate := "weather:" + strconvItoa(i)
+		candidate := "weather:" + strconv.Itoa(i)
 		if owner, ok := routerA.OwnerFor("shared\x00" + candidate); ok && owner.ID == nodeA.ID {
 			sharedKey = candidate
 		}
@@ -473,8 +360,8 @@ func TestClusterForwardTimeoutAfterDeliveryDoesNotFailOver(t *testing.T) {
 	if slowHits.Load() != 1 || fallbackHits.Load() != 0 {
 		t.Fatalf("expected one delivery to the owner and none to the fallback, got owner=%d fallback=%d", slowHits.Load(), fallbackHits.Load())
 	}
-	if router.prunedCount() != 0 {
-		t.Fatalf("a slow owner must not be pruned, or the retry would go elsewhere; pruned %d", router.prunedCount())
+	if router.Snapshot()["pruned_members"] != 0 {
+		t.Fatalf("a slow owner must not be pruned, or the retry would go elsewhere; pruned %d", router.Snapshot()["pruned_members"])
 	}
 	if peerStore.Counts().TotalJobs != 0 {
 		t.Fatalf("expected no local job on the forwarding node, got %+v", peerStore.Counts())
@@ -492,9 +379,9 @@ func TestClusterOwnerRefusesForwardedRequestPastItsDeadline(t *testing.T) {
 		body, _ := json.Marshal(JobRequest{UserID: "u1", IdempotentKey: key,
 			URL: "http://upstream.invalid", Method: "POST", WebhookURL: "http://hook.invalid"})
 		req := httptest.NewRequest(http.MethodPost, "/jobs", bytes.NewReader(body))
-		req.Header.Set(clusterForwardedHeader, "true")
+		req.Header.Set(cluster.ForwardedHeader, "true")
 		if deadline != "" {
-			req.Header.Set(clusterForwardDeadlineHeader, deadline)
+			req.Header.Set(cluster.ForwardDeadlineHeader, deadline)
 		}
 		rec := httptest.NewRecorder()
 		routes.ServeHTTP(rec, req)
@@ -526,7 +413,7 @@ func TestClusterOwnerRefusesForwardedRequestPastItsDeadline(t *testing.T) {
 func TestClusterForwardSendsItsDeadline(t *testing.T) {
 	var got atomic.Value
 	owner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got.Store(r.Header.Get(clusterForwardDeadlineHeader))
+		got.Store(r.Header.Get(cluster.ForwardDeadlineHeader))
 		io.Copy(io.Discard, r.Body)
 		w.WriteHeader(http.StatusCreated)
 	}))
@@ -561,4 +448,41 @@ func TestClusterForwardSendsItsDeadline(t *testing.T) {
 	if deadline < want || deadline > want+1000 {
 		t.Fatalf("expected the deadline about 3s after sending (%d), got %d", want, deadline)
 	}
+}
+
+func testClusterRouter(self ClusterMember, members ...ClusterMember) *ClusterRouter {
+	return NewClusterRouter(ClusterConfig{
+		Enabled:  true,
+		Self:     self,
+		Members:  members,
+		PruneTTL: 30 * time.Second,
+	})
+}
+
+func keyOwnedBy(t *testing.T, router *ClusterRouter, ownerID string) string {
+	t.Helper()
+
+	for i := 0; i < 10000; i++ {
+		key := "user-" + strconv.Itoa(i)
+		owner, ok := router.OwnerFor(key)
+		if ok && owner.ID == ownerID {
+			return key
+		}
+	}
+	t.Fatalf("could not find a key owned by %s", ownerID)
+	return ""
+}
+
+func keyRankedBy(t *testing.T, router *ClusterRouter, firstID, secondID string) string {
+	t.Helper()
+
+	for i := 0; i < 10000; i++ {
+		key := "user-" + strconv.Itoa(i)
+		ranked := router.RankedOwners(key)
+		if len(ranked) >= 2 && ranked[0].ID == firstID && ranked[1].ID == secondID {
+			return key
+		}
+	}
+	t.Fatalf("could not find a key ranked %s then %s", firstID, secondID)
+	return ""
 }

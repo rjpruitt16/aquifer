@@ -6,6 +6,7 @@ package aquifer
 import (
 	"time"
 
+	"github.com/rjpruitt16/aquifer/internal/cluster"
 	"github.com/rjpruitt16/aquifer/internal/httpx"
 )
 
@@ -15,12 +16,12 @@ const nodeStateHeader = httpx.NodeStateHeader
 // shutting down.
 var ErrAquiferDraining = httpx.ErrDraining
 
-type LifecycleState string
+type LifecycleState = cluster.State
 
 const (
-	LifecycleStateActive   LifecycleState = "active"
-	LifecycleStateDraining LifecycleState = "draining"
-	LifecycleStateOffline  LifecycleState = "offline"
+	LifecycleStateActive   = cluster.StateActive
+	LifecycleStateDraining = cluster.StateDraining
+	LifecycleStateOffline  = cluster.StateOffline
 )
 
 func (a *Aquifer) BeginDrain(webSocketGrace time.Duration) bool {

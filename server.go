@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/rjpruitt16/aquifer/internal/cluster"
 	"github.com/rjpruitt16/aquifer/internal/httpx"
 	"github.com/rjpruitt16/aquifer/internal/region"
 	"github.com/rjpruitt16/aquifer/l8"
@@ -619,8 +620,8 @@ func (s *Server) streamExistingJob(w http.ResponseWriter, r *http.Request, job *
 }
 
 func (s *Server) forwardClusterRequest(w http.ResponseWriter, r *http.Request, path string, req JobRequest) bool {
-	if hasClusterForwardedHeader(r) {
-		if clusterForwardExpired(r, time.Now()) {
+	if cluster.HasForwardedHeader(r) {
+		if cluster.ForwardExpired(r, time.Now()) {
 			// The sender already answered its caller with 504, and that caller
 			// is retrying, possibly on a new owner if this node stalled past the
 			// instance TTL. Accepting now would run the job twice.
@@ -654,7 +655,7 @@ func (s *Server) forwardClusterRequest(w http.ResponseWriter, r *http.Request, p
 		if !ok {
 			break
 		}
-		if owner.ID == s.aquifer.clusterRouter.self.ID {
+		if owner.ID == s.aquifer.clusterRouter.SelfID() {
 			if s.aquifer.IsDraining() {
 				triedSet[owner.ID] = true
 				tried = append(tried, owner.ID)
@@ -673,8 +674,8 @@ func (s *Server) forwardClusterRequest(w http.ResponseWriter, r *http.Request, p
 			return true
 		}
 		outbound.Header.Set("Content-Type", "application/json")
-		outbound.Header.Set(clusterForwardedHeader, "true")
-		outbound.Header.Set(clusterForwardDeadlineHeader, strconv.FormatInt(time.Now().Add(clusterForwardResponseTimeout).UnixMilli(), 10))
+		outbound.Header.Set(cluster.ForwardedHeader, "true")
+		outbound.Header.Set(cluster.ForwardDeadlineHeader, strconv.FormatInt(time.Now().Add(clusterForwardResponseTimeout).UnixMilli(), 10))
 		if accountQueue := pacingHeader(r.Header, "Account-Queue"); accountQueue != "" {
 			setLoadHeader(outbound.Header, "Account-Queue", accountQueue)
 		}
@@ -747,7 +748,7 @@ func (s *Server) trackLocalClusterRequest(w http.ResponseWriter, req JobRequest)
 	if s.aquifer == nil || s.aquifer.clusterRouter == nil || req.UserID == "" {
 		return func() {}
 	}
-	w.Header().Set("X-Aquifer-Cluster-Owner", s.aquifer.clusterRouter.self.ID)
+	w.Header().Set("X-Aquifer-Cluster-Owner", s.aquifer.clusterRouter.SelfID())
 	s.aquifer.clusterRouter.TrackLocalJob(clusterRoutingKey(req))
 	return func() {
 		s.aquifer.clusterRouter.CompleteLocalJob(clusterRoutingKey(req))
