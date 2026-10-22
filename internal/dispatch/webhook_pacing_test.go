@@ -269,6 +269,7 @@ func testL8Receiver(t *testing.T) (*httptest.Server, <-chan http.Header) {
 	t.Helper()
 	dir := t.TempDir()
 	receiver := l8.NewRegistry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"))
+	t.Cleanup(receiver.Close)
 
 	captured := make(chan http.Header, 8)
 	mux := http.NewServeMux()

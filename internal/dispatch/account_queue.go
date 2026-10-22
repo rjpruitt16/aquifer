@@ -77,13 +77,13 @@ type jobDoneMsg struct {
 	retryAt time.Time
 }
 
-// webhookEnqueuer queues a webhook delivery through the same account-queue
+// WebhookEnqueuer queues a webhook delivery through the same account-queue
 // pacing machinery as forward dispatch — see Registry.EnqueueWebhook.
 // Threaded down from Registry through URLWorker and AccountQueue as a
 // closure (matching the existing onIdle pattern) rather than a *Registry
 // back-reference, so AccountQueue/execute only get the one capability they
 // actually need.
-type webhookEnqueuer func(originalJobID, userID, webhookURL string, maxRetries int, payload map[string]any)
+type WebhookEnqueuer func(originalJobID, userID, webhookURL string, maxRetries int, payload map[string]any)
 
 type AccountQueue struct {
 	// accountQueueSignal, when set, hears the destination's
@@ -100,7 +100,7 @@ type AccountQueue struct {
 	broker             *Broker
 	l8                 *l8.Registry
 	metrics            MetricsAdapter
-	enqueueWebhook     webhookEnqueuer
+	enqueueWebhook     WebhookEnqueuer
 	resultRecorder     storage.ResultRecorder
 	workerActiveQueues *atomic.Int64
 	workerBacklog      *atomic.Int64
@@ -203,7 +203,7 @@ func (q *AccountQueue) Throttle(rps float64) {
 	}
 }
 
-func NewAccountQueue(key, upstream string, rps float64, maxConc int, pool *Pool, store storage.Store, broker *Broker, l8 *l8.Registry, metrics MetricsAdapter, enqueueWebhook webhookEnqueuer, resultRecorder storage.ResultRecorder, workerActiveQueues, workerBacklog *atomic.Int64, onJobDone func(*jobs.Job), onIdle func(string), slowStart bool, onSlowStartSignal func(bool), onMaxBacklogSignal func(int64)) *AccountQueue {
+func NewAccountQueue(key, upstream string, rps float64, maxConc int, pool *Pool, store storage.Store, broker *Broker, l8 *l8.Registry, metrics MetricsAdapter, enqueueWebhook WebhookEnqueuer, resultRecorder storage.ResultRecorder, workerActiveQueues, workerBacklog *atomic.Int64, onJobDone func(*jobs.Job), onIdle func(string), slowStart bool, onSlowStartSignal func(bool), onMaxBacklogSignal func(int64)) *AccountQueue {
 	q := &AccountQueue{
 		key:                key,
 		upstream:           upstream,
@@ -643,7 +643,7 @@ func (q *AccountQueue) dropExpiredJobs(queue []*jobs.Job) []*jobs.Job {
 // 5xx, 408, 429) with retries left comes back as msg.retry: the run loop
 // holds the job until msg.retryAt and frees its concurrency slot meanwhile,
 // instead of the attempt sleeping while it holds the slot.
-func execute(ctx context.Context, job *jobs.Job, dispatchURL, upstream string, store storage.Store, broker *Broker, l8 *l8.Registry, metrics MetricsAdapter, pool *Pool, member *PoolMember, flowRate float64, activeQueues int, upstreamBacklog int64, enqueueWebhook webhookEnqueuer, resultRecorder storage.ResultRecorder) jobDoneMsg {
+func execute(ctx context.Context, job *jobs.Job, dispatchURL, upstream string, store storage.Store, broker *Broker, l8 *l8.Registry, metrics MetricsAdapter, pool *Pool, member *PoolMember, flowRate float64, activeQueues int, upstreamBacklog int64, enqueueWebhook WebhookEnqueuer, resultRecorder storage.ResultRecorder) jobDoneMsg {
 	metrics = EnsureMetrics(metrics)
 	startedAt := time.Now()
 
@@ -765,7 +765,7 @@ func publishTerminal(broker *Broker, jobID string, event SSEEvent) bool {
 	return broker.PublishTerminal(jobID, event, wait)
 }
 
-func failJob(job *jobs.Job, upstream, reason string, responseStatus int, body []byte, store storage.Store, broker *Broker, metrics MetricsAdapter, enqueueWebhook webhookEnqueuer, resultRecorder storage.ResultRecorder) {
+func failJob(job *jobs.Job, upstream, reason string, responseStatus int, body []byte, store storage.Store, broker *Broker, metrics MetricsAdapter, enqueueWebhook WebhookEnqueuer, resultRecorder storage.ResultRecorder) {
 	store.UpdateStatus(job.ID, jobs.StatusFailed)
 	SaveLocalResult(store, job, jobs.StatusFailed, responseStatus, "", string(body))
 	resultKey := recordJobResult(job, resultRecorder, jobs.StatusFailed, responseStatus, "", string(body))
@@ -858,7 +858,7 @@ func defaultRetryBackoff(attempts int) time.Duration {
 	return retry.Jitter(backoff)
 }
 
-func failExpiredJob(job *jobs.Job, upstream string, store storage.Store, broker *Broker, metrics MetricsAdapter, enqueueWebhook webhookEnqueuer, resultRecorder storage.ResultRecorder) {
+func failExpiredJob(job *jobs.Job, upstream string, store storage.Store, broker *Broker, metrics MetricsAdapter, enqueueWebhook WebhookEnqueuer, resultRecorder storage.ResultRecorder) {
 	const reason = "execution_deadline_exceeded"
 	store.UpdateStatus(job.ID, jobs.StatusFailed)
 	SaveLocalResult(store, job, jobs.StatusFailed, 0, "", "")

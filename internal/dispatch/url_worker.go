@@ -52,7 +52,7 @@ type URLWorker struct {
 	broker            *Broker
 	l8                *l8.Registry
 	metrics           MetricsAdapter
-	enqueueWebhook    webhookEnqueuer
+	enqueueWebhook    WebhookEnqueuer
 	resultRecorder    storage.ResultRecorder
 	onJobDone         func(*jobs.Job)
 	onIdle            func(string, *URLWorker)
@@ -127,7 +127,7 @@ func (w *URLWorker) QueueActive() bool {
 	return false
 }
 
-func NewURLWorker(domain string, rps float64, maxConc int, pool *Pool, store storage.Store, broker *Broker, l8 *l8.Registry, metrics MetricsAdapter, enqueueWebhook webhookEnqueuer, resultRecorder storage.ResultRecorder, onJobDone func(*jobs.Job), onIdle func(string, *URLWorker)) *URLWorker {
+func NewURLWorker(domain string, rps float64, maxConc int, pool *Pool, store storage.Store, broker *Broker, l8 *l8.Registry, metrics MetricsAdapter, enqueueWebhook WebhookEnqueuer, resultRecorder storage.ResultRecorder, onJobDone func(*jobs.Job), onIdle func(string, *URLWorker)) *URLWorker {
 	w := &URLWorker{
 		domain:         domain,
 		rps:            rps,

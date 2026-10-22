@@ -3,7 +3,11 @@
 
 package aquifer
 
-import "github.com/rjpruitt16/aquifer/internal/dispatch"
+import (
+	"sync/atomic"
+
+	"github.com/rjpruitt16/aquifer/internal/dispatch"
+)
 
 // The dispatch path (per-target-API workers, per-tenant queues, pools,
 // webhook delivery, drain mode and registration) lives in internal/dispatch.
@@ -22,6 +26,7 @@ type (
 	DrainConfig        = dispatch.DrainConfig
 	DrainState         = dispatch.DrainState
 	RegistrationConfig = dispatch.RegistrationConfig
+	WebhookEnqueuer    = dispatch.WebhookEnqueuer
 )
 
 const (
@@ -43,3 +48,11 @@ func LoadConfig(path string) *Config { return dispatch.LoadConfig(path) }
 func LoadDrainConfig() DrainConfig { return dispatch.LoadDrainConfig() }
 
 func LoadRegistrationConfig() RegistrationConfig { return dispatch.LoadRegistrationConfig() }
+
+func NewURLWorker(domain string, rps float64, maxConc int, pool *Pool, store JobStore, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, enqueueWebhook WebhookEnqueuer, resultRecorder JobResultRecorder, onJobDone func(*Job), onIdle func(string, *URLWorker)) *URLWorker {
+	return dispatch.NewURLWorker(domain, rps, maxConc, pool, store, broker, l8, metrics, enqueueWebhook, resultRecorder, onJobDone, onIdle)
+}
+
+func NewAccountQueue(key, upstream string, rps float64, maxConc int, pool *Pool, store JobStore, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, enqueueWebhook WebhookEnqueuer, resultRecorder JobResultRecorder, workerActiveQueues, workerBacklog *atomic.Int64, onJobDone func(*Job), onIdle func(string), slowStart bool, onSlowStartSignal func(bool), onMaxBacklogSignal func(int64)) *AccountQueue {
+	return dispatch.NewAccountQueue(key, upstream, rps, maxConc, pool, store, broker, l8, metrics, enqueueWebhook, resultRecorder, workerActiveQueues, workerBacklog, onJobDone, onIdle, slowStart, onSlowStartSignal, onMaxBacklogSignal)
+}
