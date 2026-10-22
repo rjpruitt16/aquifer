@@ -72,7 +72,7 @@ type Pebble struct {
 	// Every write acknowledged before then is on disk; see SyncLag.
 	lastSyncStart atomic.Int64
 
-	// skipDrainEvents: see Store.skipDrainEvents. Recording an event costs
+	// skipDrainEvents: see SQLite.skipDrainEvents. Recording an event costs
 	// two reads and a write under drainMu, a global lock, so with drain
 	// mode off it also serialized every job completion.
 	skipDrainEvents atomic.Bool
@@ -464,7 +464,7 @@ func (s *Pebble) UpdateStatus(jobID string, status jobs.Status) {
 	}
 }
 
-// SetDrainEventsEnabled: see Store.SetDrainEventsEnabled.
+// SetDrainEventsEnabled: see SQLite.SetDrainEventsEnabled.
 func (s *Pebble) SetDrainEventsEnabled(enabled bool) { s.skipDrainEvents.Store(!enabled) }
 
 func (s *Pebble) recordDrainEvent(rec *pebbleRecord, status jobs.Status) {
