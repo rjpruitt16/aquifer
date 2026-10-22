@@ -349,3 +349,20 @@ func TestClusterRouterForgetsIdleScopesWhileTheStoreFails(t *testing.T) {
 		t.Fatalf("idle scopes should be forgotten even when Release fails, got %v", got)
 	}
 }
+
+// A missing or unusable Valkey URL falls back to plain rendezvous instead of
+// panicking on the first heartbeat.
+func TestRouterWithoutAUsableValkeyURLFallsBackToRendezvous(t *testing.T) {
+	for _, url := range []string{"", "http://valkey:6379"} {
+		router := NewRouter(Config{
+			Enabled:   true,
+			Provider:  clusterProviderValkey,
+			Self:      Member{ID: "node-a", Address: "http://node-a", Capacity: 10},
+			ValkeyURL: url,
+		})
+		if got := router.Snapshot()["algorithm"]; got != "rendezvous" {
+			t.Errorf("ValkeyURL %q: algorithm %v, want rendezvous", url, got)
+		}
+		router.Close()
+	}
+}

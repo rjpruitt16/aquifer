@@ -209,10 +209,13 @@ func NewRouter(cfg Config) *Router {
 
 	store := cfg.StateStore
 	if cfg.Provider == clusterProviderValkey && store == nil {
-		var err error
-		store, err = NewValkeyStateStore(cfg.ValkeyURL, cfg.ValkeyPrefix)
+		// Assign only on success: a nil *ValkeyStateStore in the StateStore
+		// interface isn't nil, and the first heartbeat would panic on it.
+		valkey, err := NewValkeyStateStore(cfg.ValkeyURL, cfg.ValkeyPrefix)
 		if err != nil {
 			log.Printf("cluster: Valkey coordination unavailable at startup, using cached/static rendezvous: %v", err)
+		} else {
+			store = valkey
 		}
 	}
 
