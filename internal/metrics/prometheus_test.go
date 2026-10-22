@@ -209,4 +209,9 @@ func TestFairnessSamplesAreDroppedForGoneTargets(t *testing.T) {
 	if len(m.samples) != 0 {
 		t.Fatalf("a target with no queues should be dropped, got %d", len(m.samples))
 	}
+	render(m, []TargetStats{queues(map[string]int64{"a": 1}, map[string]int64{"a": 1})})
+	render(m, []TargetStats{{Target: "api.example.com"}})
+	if len(m.samples) != 0 {
+		t.Fatalf("a live target with no queues should keep no samples, got %d", len(m.samples))
+	}
 }

@@ -239,6 +239,10 @@ func (m *Prometheus) pruneSamplesLocked(targets []TargetStats) {
 }
 
 func (m *Prometheus) fairnessLocked(stats TargetStats, now time.Time) (index float64, ok bool) {
+	if len(stats.Queues) == 0 {
+		delete(m.samples, stats.Target)
+		return 0, false
+	}
 	current := servedSample{at: now, served: make(map[string]int64, len(stats.Queues))}
 	for _, q := range stats.Queues {
 		current.served[q.Key] = q.Served
