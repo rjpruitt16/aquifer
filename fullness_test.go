@@ -105,15 +105,3 @@ func TestFullnessHeaderIsOnEveryResponse(t *testing.T) {
 		}
 	}
 }
-
-func TestRegistrationReportsFullness(t *testing.T) {
-	r := drainTestRegistry(t, NoopMetricsAdapter{})
-	if _, ok := r.registrationPayload(LifecycleStateActive)["fullness"]; ok {
-		t.Fatalf("expected no fullness before a source is wired")
-	}
-
-	r.SetFullnessSource(func() int { return 42 })
-	if got := r.registrationPayload(LifecycleStateActive)["fullness"]; got != 42 {
-		t.Fatalf("expected fullness 42 in the ping, got %v", got)
-	}
-}

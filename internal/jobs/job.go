@@ -68,7 +68,7 @@ type Job struct {
 }
 
 // LedgerEntry is one row of the drain-mode idempotency ledger -- hash-only,
-// never the plaintext idempotent key. See drain.go.
+// never the plaintext idempotent key. See internal/dispatch/drain.go.
 type LedgerEntry struct {
 	HashKey string `json:"idempotent_key_hash"`
 	JobID   string `json:"job_id"`

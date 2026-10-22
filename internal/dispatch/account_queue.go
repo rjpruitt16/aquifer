@@ -1,7 +1,7 @@
 // Copyright 2026 Rahmi Pruitt
 // SPDX-License-Identifier: Apache-2.0
 
-package aquifer
+package dispatch
 
 import (
 	"bytes"
@@ -17,30 +17,33 @@ import (
 	"time"
 
 	"github.com/rjpruitt16/aquifer/internal/env"
+	"github.com/rjpruitt16/aquifer/internal/jobs"
+	"github.com/rjpruitt16/aquifer/internal/nodeid"
 	"github.com/rjpruitt16/aquifer/internal/orca"
 	"github.com/rjpruitt16/aquifer/internal/retry"
 	"github.com/rjpruitt16/aquifer/internal/storage"
+	"github.com/rjpruitt16/aquifer/l8"
 )
 
 const (
-	minRPS                     = 0.5
+	MinRPS                     = 0.5
 	noPoolMembersRetryInterval = time.Second
 )
 
-var retrySleepFunc atomic.Value
-var poolEmptySleepFunc atomic.Value
+var RetrySleepFunc atomic.Value
+var PoolEmptySleepFunc atomic.Value
 
 func init() {
-	retryBackoffFunc.Store(defaultRetryBackoff)
-	retrySleepFunc.Store(time.Sleep)
-	poolEmptySleepFunc.Store(time.Sleep)
+	RetryBackoffFunc.Store(defaultRetryBackoff)
+	RetrySleepFunc.Store(time.Sleep)
+	PoolEmptySleepFunc.Store(time.Sleep)
 }
 
 func sleepBeforeRetry(d time.Duration) {
-	retrySleepFunc.Load().(func(time.Duration))(d)
+	RetrySleepFunc.Load().(func(time.Duration))(d)
 }
 
-func sleepBeforeRetryContext(ctx context.Context, d time.Duration) bool {
+func SleepBeforeRetryContext(ctx context.Context, d time.Duration) bool {
 	done := make(chan struct{})
 	go func() {
 		sleepBeforeRetry(d)
@@ -56,12 +59,12 @@ func sleepBeforeRetryContext(ctx context.Context, d time.Duration) bool {
 }
 
 func sleepWhilePoolEmpty(d time.Duration) {
-	poolEmptySleepFunc.Load().(func(time.Duration))(d)
+	PoolEmptySleepFunc.Load().(func(time.Duration))(d)
 }
 
 type jobDoneMsg struct {
 	userID        string
-	job           *Job
+	job           *jobs.Job
 	completed     bool
 	rps           *float64
 	maxConcurrent *int
@@ -70,7 +73,7 @@ type jobDoneMsg struct {
 	maxBacklog    *int64
 	// failed marks a retryable failure; the queue halves its rate for it.
 	failed  bool
-	retry   *Job
+	retry   *jobs.Job
 	retryAt time.Time
 }
 
@@ -91,17 +94,17 @@ type AccountQueue struct {
 	key                string
 	upstream           string
 	pool               *Pool // nil unless this queue dispatches into a registered pool instead of a fixed URL
-	cmds               chan *Job
+	cmds               chan *jobs.Job
 	done               chan jobDoneMsg
-	store              JobStore
+	store              storage.Store
 	broker             *Broker
-	l8                 *L8Registry
+	l8                 *l8.Registry
 	metrics            MetricsAdapter
 	enqueueWebhook     webhookEnqueuer
-	resultRecorder     JobResultRecorder
+	resultRecorder     storage.ResultRecorder
 	workerActiveQueues *atomic.Int64
 	workerBacklog      *atomic.Int64
-	onJobDone          func(*Job)
+	onJobDone          func(*jobs.Job)
 	currentRPS         atomic.Int64 // stored as rps * 100
 	// served counts jobs that left this queue for good (finished or failed),
 	// for the fairness gauge on /metrics.
@@ -200,17 +203,17 @@ func (q *AccountQueue) Throttle(rps float64) {
 	}
 }
 
-func NewAccountQueue(key, upstream string, rps float64, maxConc int, pool *Pool, store JobStore, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, enqueueWebhook webhookEnqueuer, resultRecorder JobResultRecorder, workerActiveQueues, workerBacklog *atomic.Int64, onJobDone func(*Job), onIdle func(string), slowStart bool, onSlowStartSignal func(bool), onMaxBacklogSignal func(int64)) *AccountQueue {
+func NewAccountQueue(key, upstream string, rps float64, maxConc int, pool *Pool, store storage.Store, broker *Broker, l8 *l8.Registry, metrics MetricsAdapter, enqueueWebhook webhookEnqueuer, resultRecorder storage.ResultRecorder, workerActiveQueues, workerBacklog *atomic.Int64, onJobDone func(*jobs.Job), onIdle func(string), slowStart bool, onSlowStartSignal func(bool), onMaxBacklogSignal func(int64)) *AccountQueue {
 	q := &AccountQueue{
 		key:                key,
 		upstream:           upstream,
 		pool:               pool,
-		cmds:               make(chan *Job, 1000),
+		cmds:               make(chan *jobs.Job, 1000),
 		done:               make(chan jobDoneMsg, 100),
 		store:              store,
 		broker:             broker,
 		l8:                 l8,
-		metrics:            ensureMetrics(metrics),
+		metrics:            EnsureMetrics(metrics),
 		enqueueWebhook:     enqueueWebhook,
 		resultRecorder:     resultRecorder,
 		workerActiveQueues: workerActiveQueues,
@@ -224,7 +227,7 @@ func NewAccountQueue(key, upstream string, rps float64, maxConc int, pool *Pool,
 	return q
 }
 
-func (q *AccountQueue) Enqueue(job *Job) bool {
+func (q *AccountQueue) Enqueue(job *jobs.Job) bool {
 	q.reserveBacklog()
 	return q.handoff(job)
 }
@@ -232,7 +235,7 @@ func (q *AccountQueue) Enqueue(job *Job) bool {
 // handoff gives an already-reserved job to the run loop. URLWorker calls it
 // after releasing its lock, so the store write and the channel send don't
 // serialize every submission and webhook on one lock.
-func (q *AccountQueue) handoff(job *Job) bool {
+func (q *AccountQueue) handoff(job *jobs.Job) bool {
 	q.store.SetQueueKey(job.ID, q.key)
 	select {
 	case q.cmds <- job:
@@ -329,12 +332,12 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 		// immediately -- the existing creep-back-up-toward-configuredRPS
 		// behavior below (msg.rps == nil branch) is the ramp; slow start
 		// only changes the starting point, not the mechanism.
-		rps = minRPS
+		rps = MinRPS
 	}
 	maxConc := configuredMaxConc
 	lastRequestAt := time.Time{}
 	inFlight := 0
-	queue := make([]*Job, 0, 64)
+	queue := make([]*jobs.Job, 0, 64)
 	// waiting holds jobs backing off before a retry; they still count toward
 	// this queue's backlog but not its concurrency.
 	var waiting []waitingJob
@@ -343,7 +346,7 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 	defer retryTimer.Stop()
 	// dispatchTimer fires when the pace allows the next dispatch. The loop
 	// waits for it in the select below instead of sleeping, so it keeps
-	// reading completions and new jobs while it waits: at minRPS a sleep
+	// reading completions and new jobs while it waits: at MinRPS a sleep
 	// lasted 2s per dispatch, and the successes that would raise the pace
 	// again went unread until maxConcurrent jobs were in flight.
 	dispatchTimer := time.NewTimer(time.Hour)
@@ -363,7 +366,7 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 		// this is cheap to call on every pass through the dispatch loop.
 		if q.pool != nil {
 			if cap := q.pool.TotalCapacity(); cap > 0 {
-				rps = math.Max(math.Min(cap, configuredRPS), minRPS)
+				rps = math.Max(math.Min(cap, configuredRPS), MinRPS)
 			}
 		}
 
@@ -415,14 +418,14 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 			currentRPS := rps
 			activeQueues, upstreamBacklog := qLoad(q.workerActiveQueues, q.workerBacklog)
 			q.wg.Add(1)
-			go func(j *Job, url string, m *PoolMember, flowRate float64, active int, backlog int64) {
+			go func(j *jobs.Job, url string, m *PoolMember, flowRate float64, active int, backlog int64) {
 				defer q.wg.Done()
 				defer func() {
 					if r := recover(); r != nil {
 						log.Printf("[AccountQueue] panic executing job %s: %v", j.ID, r)
-						q.store.UpdateStatus(j.ID, StatusFailed)
+						q.store.UpdateStatus(j.ID, jobs.StatusFailed)
 						q.metrics.JobFailed(j.UserID, q.upstream, "internal panic")
-						observeJobFinished(q.metrics, j, q.upstream, "failed", 0)
+						ObserveJobFinished(q.metrics, j, q.upstream, "failed", 0)
 						if !j.IsWebhookDelivery() && j.WebhookURL != "" {
 							q.enqueueWebhook(j.ID, j.UserID, j.WebhookURL, j.WebhookRetryLimit(), map[string]any{
 								"job_id": j.ID,
@@ -486,9 +489,9 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 				if msg.rps != nil {
 					next = math.Min(next, *msg.rps)
 				}
-				rps = math.Max(next, minRPS)
+				rps = math.Max(next, MinRPS)
 			case msg.rps != nil:
-				rps = math.Max(math.Min(*msg.rps, configuredRPS), minRPS)
+				rps = math.Max(math.Min(*msg.rps, configuredRPS), MinRPS)
 			case rps < configuredRPS:
 				rps = math.Min(rps*1.05, configuredRPS)
 			}
@@ -506,7 +509,7 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 				onMaxBacklogSignal(*msg.maxBacklog)
 			}
 			if msg.accountQueue != nil {
-				if on, ok := parseAccountQueueValue(*msg.accountQueue); ok {
+				if on, ok := ParseAccountQueueValue(*msg.accountQueue); ok {
 					if signal := q.accountQueueSignal.Load(); signal != nil {
 						(*signal)(on)
 					}
@@ -563,7 +566,7 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 }
 
 type waitingJob struct {
-	job *Job
+	job *jobs.Job
 	at  time.Time
 }
 
@@ -605,7 +608,7 @@ func (q *AccountQueue) dropExpiredWaiting(waiting []waitingJob) []waitingJob {
 	return kept
 }
 
-func (q *AccountQueue) dropExpiredJobs(queue []*Job) []*Job {
+func (q *AccountQueue) dropExpiredJobs(queue []*jobs.Job) []*jobs.Job {
 	if len(queue) == 0 {
 		q.nextDeadline = 0
 		return queue
@@ -640,8 +643,8 @@ func (q *AccountQueue) dropExpiredJobs(queue []*Job) []*Job {
 // 5xx, 408, 429) with retries left comes back as msg.retry: the run loop
 // holds the job until msg.retryAt and frees its concurrency slot meanwhile,
 // instead of the attempt sleeping while it holds the slot.
-func execute(ctx context.Context, job *Job, dispatchURL, upstream string, store JobStore, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, pool *Pool, member *PoolMember, flowRate float64, activeQueues int, upstreamBacklog int64, enqueueWebhook webhookEnqueuer, resultRecorder JobResultRecorder) jobDoneMsg {
-	metrics = ensureMetrics(metrics)
+func execute(ctx context.Context, job *jobs.Job, dispatchURL, upstream string, store storage.Store, broker *Broker, l8 *l8.Registry, metrics MetricsAdapter, pool *Pool, member *PoolMember, flowRate float64, activeQueues int, upstreamBacklog int64, enqueueWebhook webhookEnqueuer, resultRecorder storage.ResultRecorder) jobDoneMsg {
+	metrics = EnsureMetrics(metrics)
 	startedAt := time.Now()
 
 	if job.ExecutionExpired(startedAt) {
@@ -655,9 +658,9 @@ func execute(ctx context.Context, job *Job, dispatchURL, upstream string, store 
 	})
 
 	counts := store.Counts()
-	resp, err := makeRequest(ctx, job, dispatchURL, counts.TotalJobs, counts.QueueDepth, flowRate, activeQueues, upstreamBacklog, l8)
+	resp, err := MakeRequest(ctx, job, dispatchURL, counts.TotalJobs, counts.QueueDepth, flowRate, activeQueues, upstreamBacklog, l8)
 	if err != nil && ctx.Err() != nil {
-		store.UpdateStatus(job.ID, StatusQueued)
+		store.UpdateStatus(job.ID, jobs.StatusQueued)
 		return jobDoneMsg{}
 	}
 	if err != nil {
@@ -685,9 +688,9 @@ func execute(ctx context.Context, job *Job, dispatchURL, upstream string, store 
 			pool.RecordSuccess(member.ID)
 		}
 		body, _ = io.ReadAll(resp.Body)
-		store.UpdateStatus(job.ID, StatusCompleted)
-		saveLocalResult(store, job, StatusCompleted, resp.StatusCode, resp.Header.Get("Content-Type"), string(body))
-		resultKey := recordJobResult(job, resultRecorder, StatusCompleted, resp.StatusCode, resp.Header.Get("Content-Type"), string(body))
+		store.UpdateStatus(job.ID, jobs.StatusCompleted)
+		SaveLocalResult(store, job, jobs.StatusCompleted, resp.StatusCode, resp.Header.Get("Content-Type"), string(body))
+		resultKey := recordJobResult(job, resultRecorder, jobs.StatusCompleted, resp.StatusCode, resp.Header.Get("Content-Type"), string(body))
 		streamed := publishTerminal(broker, job.ID, SSEEvent{
 			Event: "completed",
 			Data: map[string]any{
@@ -697,7 +700,7 @@ func execute(ctx context.Context, job *Job, dispatchURL, upstream string, store 
 			},
 		})
 		metrics.JobCompleted(job.UserID, upstream, time.Since(startedAt).Milliseconds())
-		observeJobFinished(metrics, job, upstream, "completed", resp.StatusCode)
+		ObserveJobFinished(metrics, job, upstream, "completed", resp.StatusCode)
 		if !job.IsWebhookDelivery() && job.WebhookURL != "" && !streamed {
 			payload := map[string]any{
 				"job_id":          job.ID,
@@ -762,10 +765,10 @@ func publishTerminal(broker *Broker, jobID string, event SSEEvent) bool {
 	return broker.PublishTerminal(jobID, event, wait)
 }
 
-func failJob(job *Job, upstream, reason string, responseStatus int, body []byte, store JobStore, broker *Broker, metrics MetricsAdapter, enqueueWebhook webhookEnqueuer, resultRecorder JobResultRecorder) {
-	store.UpdateStatus(job.ID, StatusFailed)
-	saveLocalResult(store, job, StatusFailed, responseStatus, "", string(body))
-	resultKey := recordJobResult(job, resultRecorder, StatusFailed, responseStatus, "", string(body))
+func failJob(job *jobs.Job, upstream, reason string, responseStatus int, body []byte, store storage.Store, broker *Broker, metrics MetricsAdapter, enqueueWebhook webhookEnqueuer, resultRecorder storage.ResultRecorder) {
+	store.UpdateStatus(job.ID, jobs.StatusFailed)
+	SaveLocalResult(store, job, jobs.StatusFailed, responseStatus, "", string(body))
+	resultKey := recordJobResult(job, resultRecorder, jobs.StatusFailed, responseStatus, "", string(body))
 	streamed := publishTerminal(broker, job.ID, SSEEvent{
 		Event: "failed",
 		Data:  map[string]any{"job_id": job.ID, "reason": reason, "response_status": responseStatus, "body": string(body), "attempts": job.Attempts + 1},
@@ -775,7 +778,7 @@ func failJob(job *Job, upstream, reason string, responseStatus int, body []byte,
 	if reason == "execution_deadline_exceeded" {
 		outcome = "expired"
 	}
-	observeJobFinished(metrics, job, upstream, outcome, responseStatus)
+	ObserveJobFinished(metrics, job, upstream, outcome, responseStatus)
 	if !job.IsWebhookDelivery() && job.WebhookURL != "" && !streamed {
 		payload := map[string]any{
 			"job_id":          job.ID,
@@ -799,7 +802,7 @@ func retryableStatus(code int) bool {
 
 func pacingSignals(header http.Header) jobDoneMsg {
 	msg := jobDoneMsg{}
-	if val := pacingHeader(header, "Rps"); val != "" {
+	if val := PacingHeader(header, "Rps"); val != "" {
 		var rps float64
 		fmt.Sscanf(val, "%f", &rps)
 		msg.rps = &rps
@@ -809,19 +812,19 @@ func pacingSignals(header http.Header) jobDoneMsg {
 		// --orca_formats) sent one. An explicit X-Aqueduct-Rps always wins.
 		msg.rps = rps
 	}
-	if val := pacingHeader(header, "Max-Concurrent"); val != "" {
+	if val := PacingHeader(header, "Max-Concurrent"); val != "" {
 		var max int
 		fmt.Sscanf(val, "%d", &max)
 		msg.maxConcurrent = &max
 	}
-	if val := pacingHeader(header, "Account-Queue"); val != "" {
+	if val := PacingHeader(header, "Account-Queue"); val != "" {
 		msg.accountQueue = &val
 	}
-	if val := pacingHeader(header, "Slow-Start"); val == "true" || val == "false" {
+	if val := PacingHeader(header, "Slow-Start"); val == "true" || val == "false" {
 		enabled := val == "true"
 		msg.slowStart = &enabled
 	}
-	if val := pacingHeader(header, "Max-Backlog"); val != "" {
+	if val := PacingHeader(header, "Max-Backlog"); val != "" {
 		var max int64
 		if _, err := fmt.Sscanf(val, "%d", &max); err == nil && max >= 0 {
 			msg.maxBacklog = &max
@@ -832,7 +835,7 @@ func pacingSignals(header http.Header) jobDoneMsg {
 
 const defaultRetryMaxBackoffSeconds = 300
 
-var retryBackoffFunc atomic.Value
+var RetryBackoffFunc atomic.Value
 
 // retryDelay grows exponentially with the attempts already made (1s, 2s,
 // 4s, ...) up to AQUIFER_RETRY_MAX_BACKOFF_SECONDS, with jitter. A
@@ -843,7 +846,7 @@ func retryDelay(attempts int, header http.Header) time.Duration {
 			return time.Duration(secs) * time.Second
 		}
 	}
-	return retryBackoffFunc.Load().(func(int) time.Duration)(attempts)
+	return RetryBackoffFunc.Load().(func(int) time.Duration)(attempts)
 }
 
 func defaultRetryBackoff(attempts int) time.Duration {
@@ -855,16 +858,16 @@ func defaultRetryBackoff(attempts int) time.Duration {
 	return retry.Jitter(backoff)
 }
 
-func failExpiredJob(job *Job, upstream string, store JobStore, broker *Broker, metrics MetricsAdapter, enqueueWebhook webhookEnqueuer, resultRecorder JobResultRecorder) {
+func failExpiredJob(job *jobs.Job, upstream string, store storage.Store, broker *Broker, metrics MetricsAdapter, enqueueWebhook webhookEnqueuer, resultRecorder storage.ResultRecorder) {
 	const reason = "execution_deadline_exceeded"
-	store.UpdateStatus(job.ID, StatusFailed)
-	saveLocalResult(store, job, StatusFailed, 0, "", "")
-	resultKey := recordJobResult(job, resultRecorder, StatusFailed, 0, "", "")
+	store.UpdateStatus(job.ID, jobs.StatusFailed)
+	SaveLocalResult(store, job, jobs.StatusFailed, 0, "", "")
+	resultKey := recordJobResult(job, resultRecorder, jobs.StatusFailed, 0, "", "")
 	broker.Publish(job.ID, SSEEvent{Event: "failed", Data: map[string]any{
 		"job_id": job.ID, "reason": reason,
 	}})
 	metrics.JobFailed(job.UserID, upstream, reason)
-	observeJobFinished(metrics, job, upstream, "expired", 0)
+	ObserveJobFinished(metrics, job, upstream, "expired", 0)
 	if !job.IsWebhookDelivery() && job.WebhookURL != "" {
 		payload := map[string]any{"job_id": job.ID, "status": "failed", "reason": reason}
 		if resultKey != "" {
@@ -876,14 +879,14 @@ func failExpiredJob(job *Job, upstream string, store JobStore, broker *Broker, m
 
 const defaultLocalResultMaxBytes = 64 * 1024
 
-// saveLocalResult keeps the terminal response with the job (bounded by
+// SaveLocalResult keeps the terminal response with the job (bounded by
 // AQUIFER_RESULT_MAX_BYTES) so GET /jobs/{id} can return it.
-func saveLocalResult(store JobStore, job *Job, status Status, responseStatus int, contentType, body string) {
+func SaveLocalResult(store storage.Store, job *jobs.Job, status jobs.Status, responseStatus int, contentType, body string) {
 	if job.IsWebhookDelivery() {
 		return
 	}
 	truncated, wasTruncated := storage.TruncateStringBytes(body, env.Int64("AQUIFER_RESULT_MAX_BYTES", defaultLocalResultMaxBytes))
-	store.PutResult(job.ID, JobResult{
+	store.PutResult(job.ID, jobs.Result{
 		JobID:          job.ID,
 		Status:         status,
 		ResponseStatus: responseStatus,
@@ -895,11 +898,11 @@ func saveLocalResult(store JobStore, job *Job, status Status, responseStatus int
 	})
 }
 
-func recordJobResult(job *Job, recorder JobResultRecorder, status Status, responseStatus int, contentType string, body string) string {
+func recordJobResult(job *jobs.Job, recorder storage.ResultRecorder, status jobs.Status, responseStatus int, contentType string, body string) string {
 	if recorder == nil || job.IsWebhookDelivery() {
 		return ""
 	}
-	key, ok := recorder.RecordResult(job.IdempotencyHash(), JobResult{
+	key, ok := recorder.RecordResult(job.IdempotencyHash(), jobs.Result{
 		JobID:          job.ID,
 		Status:         status,
 		ResponseStatus: responseStatus,
@@ -914,14 +917,14 @@ func recordJobResult(job *Job, recorder JobResultRecorder, status Status, respon
 	return key
 }
 
-func pacingHeader(headers http.Header, name string) string {
+func PacingHeader(headers http.Header, name string) string {
 	if val := headers.Get("X-Aqueduct-" + name); val != "" {
 		return val
 	}
 	return headers.Get("X-Aquifer-" + name)
 }
 
-func makeRequest(ctx context.Context, job *Job, dispatchURL string, totalJobs, queueDepth int64, flowRate float64, activeQueues int, upstreamBacklog int64, l8 *L8Registry) (*http.Response, error) {
+func MakeRequest(ctx context.Context, job *jobs.Job, dispatchURL string, totalJobs, queueDepth int64, flowRate float64, activeQueues int, upstreamBacklog int64, l8 *l8.Registry) (*http.Response, error) {
 	// L8 signing and encryption prove Aquifer's identity to (and keep the
 	// payload private for) the *receiver* of a webhook — they have no meaning
 	// for forward dispatch to an arbitrary target API, so this only applies
@@ -959,12 +962,12 @@ func makeRequest(ctx context.Context, job *Job, dispatchURL string, totalJobs, q
 		req.Header.Set(k, v)
 	}
 
-	setLoadHeader(req.Header, "Total-Jobs", fmt.Sprintf("%d", totalJobs))
-	setLoadHeader(req.Header, "Queue-Depth", fmt.Sprintf("%d", queueDepth))
-	setLoadHeader(req.Header, "Flow-Rate", fmt.Sprintf("%.2f", flowRate))
-	setLoadHeader(req.Header, "Active-Queues", fmt.Sprintf("%d", activeQueues))
-	setLoadHeader(req.Header, "Upstream-Backlog", fmt.Sprintf("%d", upstreamBacklog))
-	setLoadHeader(req.Header, "Node-Id", NodeID())
+	SetLoadHeader(req.Header, "Total-Jobs", fmt.Sprintf("%d", totalJobs))
+	SetLoadHeader(req.Header, "Queue-Depth", fmt.Sprintf("%d", queueDepth))
+	SetLoadHeader(req.Header, "Flow-Rate", fmt.Sprintf("%.2f", flowRate))
+	SetLoadHeader(req.Header, "Active-Queues", fmt.Sprintf("%d", activeQueues))
+	SetLoadHeader(req.Header, "Upstream-Backlog", fmt.Sprintf("%d", upstreamBacklog))
+	SetLoadHeader(req.Header, "Node-Id", nodeid.Get())
 
 	// Opt in to ORCA endpoint-load-metrics on every dispatch. In current
 	// vLLM, this is entirely request-driven -- the backend only includes
@@ -985,20 +988,20 @@ func makeRequest(ctx context.Context, job *Job, dispatchURL string, totalJobs, q
 		req.Header.Set(orca.RequestHeaderName, "text")
 	}
 
-	resp, err := dispatchClient.Do(req)
+	resp, err := DispatchClient.Do(req)
 	if err == nil {
-		l8.ObserveSchemaHash(dispatchURL, pacingHeader(resp.Header, "Schema-Hash"))
+		l8.ObserveSchemaHash(dispatchURL, PacingHeader(resp.Header, "Schema-Hash"))
 	}
 	return resp, err
 }
 
-// dispatchClient is shared by every target API and webhook dispatch so
+// DispatchClient is shared by every target API and webhook dispatch so
 // connections are reused. A fresh client per request fell back to Go's
 // default transport, which keeps only 2 idle connections per host: at a few
 // hundred requests a second to one target API, nearly every request opened
 // (and then closed) a new TCP connection, costing Aquifer CPU and the
 // target API a connection per call.
-var dispatchClient = &http.Client{
+var DispatchClient = &http.Client{
 	Timeout: 30 * time.Second,
 	Transport: func() *http.Transport {
 		t := http.DefaultTransport.(*http.Transport).Clone()
@@ -1008,7 +1011,7 @@ var dispatchClient = &http.Client{
 	}(),
 }
 
-func setLoadHeader(headers http.Header, name, value string) {
+func SetLoadHeader(headers http.Header, name, value string) {
 	headers.Set("X-Aqueduct-"+name, value)
 	headers.Set("X-Aquifer-"+name, value)
 }

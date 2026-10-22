@@ -1,17 +1,23 @@
 // Copyright 2026 Rahmi Pruitt
 // SPDX-License-Identifier: Apache-2.0
 
-package aquifer
+package dispatch
 
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/rjpruitt16/aquifer/internal/admission"
+	"github.com/rjpruitt16/aquifer/internal/cluster"
+	"github.com/rjpruitt16/aquifer/internal/httpx"
 	"github.com/rjpruitt16/aquifer/internal/jobs"
+	"github.com/rjpruitt16/aquifer/internal/metrics"
+	"github.com/rjpruitt16/aquifer/internal/storage"
+	"github.com/rjpruitt16/aquifer/l8"
 )
 
 type Registry struct {
@@ -24,15 +30,15 @@ type Registry struct {
 	// worker being retired when idle (guarded by mu).
 	accountQueueDefault     bool
 	destinationAccountQueue map[string]bool
-	store                   JobStore
+	store                   storage.Store
 	cfg                     *Config
 	broker                  *Broker
-	l8                      *L8Registry
+	l8                      *l8.Registry
 	metrics                 MetricsAdapter
 	pools                   *PoolRegistry
-	clusterRouter           *ClusterRouter
-	drainRemote             RemoteIdempotency
-	resultRecorder          JobResultRecorder
+	clusterRouter           *cluster.Router
+	drainRemote             storage.Remote
+	resultRecorder          storage.ResultRecorder
 	users                   *userLoadTracker
 	totalJobs               atomic.Int64
 	queueDepth              atomic.Int64
@@ -42,7 +48,7 @@ type Registry struct {
 	drainWatchdog           bool
 	drainBatch              bool
 	registrationCfg         RegistrationConfig
-	registrationState       atomic.Value // LifecycleState
+	registrationState       atomic.Value // cluster.State
 	// fullnessSource reports the whole instance's fullness (Aquifer.Fullness,
 	// which needs the admission limits the registry doesn't own) for the
 	// registration ping. Set after construction, so read atomically.
@@ -56,7 +62,7 @@ type Registry struct {
 	wg         sync.WaitGroup
 }
 
-func (r *Registry) SetClusterRouter(router *ClusterRouter) {
+func (r *Registry) SetClusterRouter(router *cluster.Router) {
 	if r == nil {
 		return
 	}
@@ -70,7 +76,7 @@ func (r *Registry) SetClusterRouter(router *ClusterRouter) {
 // set, matching NewPebbleStore's existing precedent of reading its own
 // opt-in env vars internally. Callers wanting a programmatic override
 // (RuntimeOptions.DrainConfig) call ConfigureDrain after construction.
-func NewRegistry(store JobStore, cfg *Config, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, pools *PoolRegistry) *Registry {
+func NewRegistry(store storage.Store, cfg *Config, broker *Broker, l8 *l8.Registry, metrics MetricsAdapter, pools *PoolRegistry) *Registry {
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &Registry{
 		users:                   newUserLoadTracker(),
@@ -81,7 +87,7 @@ func NewRegistry(store JobStore, cfg *Config, broker *Broker, l8 *L8Registry, me
 		cfg:                     cfg,
 		broker:                  broker,
 		l8:                      l8,
-		metrics:                 ensureMetrics(metrics),
+		metrics:                 EnsureMetrics(metrics),
 		pools:                   pools,
 		drainCfg:                LoadDrainConfig(),
 		registrationCfg:         LoadRegistrationConfig(),
@@ -94,7 +100,7 @@ func NewRegistry(store JobStore, cfg *Config, broker *Broker, l8 *L8Registry, me
 	r.totalJobs.Store(counts.TotalJobs)
 	r.queueDepth.Store(counts.QueueDepth)
 	r.drainState.Store(DrainStateActive)
-	r.registrationState.Store(LifecycleStateActive)
+	r.registrationState.Store(cluster.StateActive)
 	if r.drainCfg.Enabled {
 		r.startDrainLoops()
 	}
@@ -108,7 +114,7 @@ func (r *Registry) BeginDrain() {
 	if r == nil {
 		return
 	}
-	r.registrationState.Store(LifecycleStateDraining)
+	r.registrationState.Store(cluster.StateDraining)
 	if r.registrationCfg.Enabled() {
 		r.wg.Add(1)
 		go func() {
@@ -122,7 +128,7 @@ func (r *Registry) WaitIdle(ctx context.Context) error {
 	if r == nil {
 		return nil
 	}
-	ticker := time.NewTicker(shutdownIdlePollInterval)
+	ticker := time.NewTicker(idlePollInterval)
 	defer ticker.Stop()
 	for {
 		if r.idleForShutdown() {
@@ -248,10 +254,10 @@ func (r *Registry) ConfigureDrain(cfg DrainConfig) {
 	}
 }
 
-func (r *Registry) SetDrainRemote(remote RemoteIdempotency) {
+func (r *Registry) SetDrainRemote(remote storage.Remote) {
 	r.mu.Lock()
 	r.drainRemote = remote
-	if recorder, ok := remote.(JobResultRecorder); ok {
+	if recorder, ok := remote.(storage.ResultRecorder); ok {
 		r.resultRecorder = recorder
 	} else {
 		r.resultRecorder = nil
@@ -259,7 +265,7 @@ func (r *Registry) SetDrainRemote(remote RemoteIdempotency) {
 	r.mu.Unlock()
 }
 
-func (r *Registry) drainRemoteOrNil() RemoteIdempotency {
+func (r *Registry) drainRemoteOrNil() storage.Remote {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.drainRemote
@@ -310,24 +316,24 @@ func (r *Registry) startRegistrationLoop() {
 // forcing it off — the mode is shared per target API domain, so one request
 // that doesn't care about it shouldn't be able to flip it off for every
 // other concurrent tenant relying on it being on.
-func (r *Registry) Enqueue(job *Job, accountQueueHeader string) {
+func (r *Registry) Enqueue(job *jobs.Job, accountQueueHeader string) {
 	_, _ = r.enqueue(job, accountQueueHeader, false)
 }
 
-func (r *Registry) AdmitAndEnqueue(job *Job, accountQueueHeader string) (QueueSnapshot, error) {
+func (r *Registry) AdmitAndEnqueue(job *jobs.Job, accountQueueHeader string) (admission.QueueSnapshot, error) {
 	return r.enqueue(job, accountQueueHeader, true)
 }
 
-func (r *Registry) enqueue(job *Job, accountQueueHeader string, enforceAdmission bool) (QueueSnapshot, error) {
+func (r *Registry) enqueue(job *jobs.Job, accountQueueHeader string, enforceAdmission bool) (admission.QueueSnapshot, error) {
 	if r.stopping() {
-		return QueueSnapshot{}, ErrAquiferDraining
+		return admission.QueueSnapshot{}, httpx.ErrDraining
 	}
 
 	// userLoadTracker has its own lock, so this runs before the registry
 	// lock (which now covers only resolving the worker).
 	if enforceAdmission && !job.IsWebhookDelivery() {
 		if rejected, limit, backlog := r.users.webhookBacklogDecision(job.UserID, admission.RandomDraw()); rejected {
-			return QueueSnapshot{}, &AdmissionRejectedError{Decision: AdmissionDecision{
+			return admission.QueueSnapshot{}, &admission.RejectedError{Decision: admission.Decision{
 				Allowed: false,
 				Reason:  "webhook_backlog",
 				Limit:   limit,
@@ -343,7 +349,7 @@ func (r *Registry) enqueue(job *Job, accountQueueHeader string, enforceAdmission
 		r.mu.Lock()
 		if r.stopping() {
 			r.mu.Unlock()
-			return QueueSnapshot{}, ErrAquiferDraining
+			return admission.QueueSnapshot{}, httpx.ErrDraining
 		}
 		key, w := r.resolveWorkerLocked(job)
 		r.enqueuing.Add(1)
@@ -367,7 +373,7 @@ func (r *Registry) enqueue(job *Job, accountQueueHeader string, enforceAdmission
 
 // enqueueOnWorker runs one attempt against w. done is false when the worker
 // had stopped and the caller should resolve a fresh one.
-func (r *Registry) enqueueOnWorker(key string, w *URLWorker, job *Job, accountQueueHeader string, enforceAdmission bool) (QueueSnapshot, error, bool) {
+func (r *Registry) enqueueOnWorker(key string, w *URLWorker, job *jobs.Job, accountQueueHeader string, enforceAdmission bool) (admission.QueueSnapshot, error, bool) {
 	{
 		if accountQueueHeader != "" {
 			w.handleAccountQueueHeader(accountQueueHeader)
@@ -376,8 +382,8 @@ func (r *Registry) enqueueOnWorker(key string, w *URLWorker, job *Job, accountQu
 		if r.clusterRouter != nil {
 			r.clusterRouter.TrackLocalJob(job.UserID)
 		}
-		var snapshot QueueSnapshot
-		var admissionErr *AdmissionRejectedError
+		var snapshot admission.QueueSnapshot
+		var admissionErr *admission.RejectedError
 		var workerLive bool
 		if enforceAdmission {
 			snapshot, admissionErr, workerLive = w.AdmitAndEnqueue(job)
@@ -404,11 +410,11 @@ func (r *Registry) enqueueOnWorker(key string, w *URLWorker, job *Job, accountQu
 		if r.clusterRouter != nil {
 			r.clusterRouter.CompleteLocalJob(job.UserID)
 		}
-		return QueueSnapshot{}, nil, false
+		return admission.QueueSnapshot{}, nil, false
 	}
 }
 
-func (r *Registry) QueueSnapshot() QueueSnapshot {
+func (r *Registry) QueueSnapshot() admission.QueueSnapshot {
 	r.mu.Lock()
 	workers := make([]*URLWorker, 0, len(r.workers))
 	for _, worker := range r.workers {
@@ -416,7 +422,7 @@ func (r *Registry) QueueSnapshot() QueueSnapshot {
 	}
 	r.mu.Unlock()
 
-	var snapshot QueueSnapshot
+	var snapshot admission.QueueSnapshot
 	for _, worker := range workers {
 		workerSnapshot := worker.Snapshot()
 		snapshot.ActiveQueues += workerSnapshot.ActiveQueues
@@ -425,12 +431,12 @@ func (r *Registry) QueueSnapshot() QueueSnapshot {
 	return snapshot
 }
 
-// workerFor resolves (creating if necessary) the URLWorker that would
+// WorkerFor resolves (creating if necessary) the URLWorker that would
 // handle this job's dispatch, without enqueueing anything onto it or
 // touching the queue-depth/metrics counters Enqueue updates. Used by proxy
 // mode's circuit breaker to check/trip breaker state before a job is ever
 // actually queued.
-func (r *Registry) workerFor(job *Job) *URLWorker {
+func (r *Registry) WorkerFor(job *jobs.Job) *URLWorker {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	_, w := r.resolveWorkerLocked(job)
@@ -440,8 +446,8 @@ func (r *Registry) workerFor(job *Job) *URLWorker {
 // resolveWorkerLocked must be called with r.mu held. Returns the job's
 // routing key and its (possibly newly created) URLWorker — the exact
 // key/worker resolution Enqueue already did inline, now shared with
-// workerFor.
-func (r *Registry) resolveWorkerLocked(job *Job) (string, *URLWorker) {
+// WorkerFor.
+func (r *Registry) resolveWorkerLocked(job *jobs.Job) (string, *URLWorker) {
 	var key string
 	var pool *Pool
 	var rc RateConfig
@@ -452,13 +458,13 @@ func (r *Registry) resolveWorkerLocked(job *Job) (string, *URLWorker) {
 		}
 		rc = r.cfg.Defaults
 	} else {
-		key = domainKey(job.URL)
+		key = DomainKey(job.URL)
 		rc = r.cfg.ForURL(job.URL)
 	}
 
 	w, ok := r.workers[key]
 	if !ok {
-		w = NewURLWorker(key, rc.RPS, rc.MaxConcurrent, pool, r.store, r.broker, r.l8, r.metrics, r.EnqueueWebhook, r.resultRecorder, func(job *Job) {
+		w = NewURLWorker(key, rc.RPS, rc.MaxConcurrent, pool, r.store, r.broker, r.l8, r.metrics, r.EnqueueWebhook, r.resultRecorder, func(job *jobs.Job) {
 			if r.clusterRouter != nil {
 				r.clusterRouter.CompleteLocalJob(job.UserID)
 			}
@@ -506,7 +512,7 @@ func (r *Registry) EnqueueWebhook(originalJobID, userID, webhookURL string, maxR
 	}
 
 	body, _ := json.Marshal(payload)
-	job := NewJob(&JobRequest{
+	job := jobs.New(&jobs.Request{
 		UserID:        userID,
 		IdempotentKey: "webhook:" + originalJobID,
 		URL:           webhookURL,
@@ -556,34 +562,72 @@ func (r *Registry) SetLoadSource(source func() Load) {
 	}
 }
 
-// acceptedJobs is how many jobs and webhook deliveries this instance has
+// AcceptedJobs is how many jobs and webhook deliveries this instance has
 // accepted since start.
-func (r *Registry) acceptedJobs() int64 {
+func (r *Registry) AcceptedJobs() int64 {
 	if r == nil {
 		return 0
 	}
 	return r.users.accepted.Load()
 }
 
-// activeUsers is how many users have work still owed on this instance.
-func (r *Registry) activeUsers() int64 {
+// ActiveUsers is how many users have work still owed on this instance.
+func (r *Registry) ActiveUsers() int64 {
 	if r == nil {
 		return 0
 	}
 	return r.users.active()
 }
 
-// TargetStats is every target API's live queue state, for /metrics.
-func (r *Registry) TargetStats() []TargetStats {
+// metrics.TargetStats is every target API's live queue state, for /metrics.
+func (r *Registry) TargetStats() []metrics.TargetStats {
 	r.mu.Lock()
 	workers := make([]*URLWorker, 0, len(r.workers))
 	for _, worker := range r.workers {
 		workers = append(workers, worker)
 	}
 	r.mu.Unlock()
-	stats := make([]TargetStats, 0, len(workers))
+	stats := make([]metrics.TargetStats, 0, len(workers))
 	for _, worker := range workers {
 		stats = append(stats, worker.Stats())
 	}
 	return stats
 }
+
+// idlePollInterval is how often WaitIdle checks for in-flight work.
+const idlePollInterval = 25 * time.Millisecond
+
+// BacklogFullnessRatio is the fullest target API's backlog against its own
+// backlog budget. Per target API, not summed: one target API at its limit is
+// already turning work away, however idle the others are.
+func (r *Registry) BacklogFullnessRatio() float64 {
+	r.mu.Lock()
+	workers := make([]*URLWorker, 0, len(r.workers))
+	for _, worker := range r.workers {
+		workers = append(workers, worker)
+	}
+	r.mu.Unlock()
+
+	var ratio float64
+	for _, worker := range workers {
+		snapshot := worker.Snapshot()
+		if snapshot.MaxBacklog > 0 {
+			ratio = math.Max(ratio, float64(snapshot.UpstreamBacklog)/float64(snapshot.MaxBacklog))
+		}
+	}
+	return ratio
+}
+
+// Metrics is the adapter this registry reports to.
+func (r *Registry) Metrics() MetricsAdapter { return r.metrics }
+
+// Worker is the worker for rawURL's target API, if one exists.
+func (r *Registry) Worker(rawURL string) (*URLWorker, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	w, ok := r.workers[DomainKey(rawURL)]
+	return w, ok
+}
+
+// Store is the job store this registry dispatches from.
+func (r *Registry) Store() storage.Store { return r.store }

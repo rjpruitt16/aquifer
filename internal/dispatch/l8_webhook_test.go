@@ -1,7 +1,7 @@
 // Copyright 2026 Rahmi Pruitt
 // SPDX-License-Identifier: Apache-2.0
 
-package aquifer
+package dispatch
 
 import (
 	"bytes"
@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/rjpruitt16/aquifer/internal/jobs"
 	"github.com/rjpruitt16/aquifer/l8"
 )
 
@@ -81,7 +82,7 @@ func newTestReceiver(t *testing.T, encrypt bool) *testReceiver {
 func newTestRegistry(t *testing.T) *l8.Registry {
 	t.Helper()
 	dir := t.TempDir()
-	r := NewL8Registry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"))
+	r := l8.NewRegistry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"))
 	t.Cleanup(r.Close)
 	return r
 }
@@ -144,9 +145,9 @@ func TestWebhookDeliveryWithoutEncryptionCapabilityStaysPlaintext(t *testing.T) 
 func TestQueuedWebhookJobIsEncrypted(t *testing.T) {
 	rcv := newTestReceiver(t, true)
 	registry := newTestRegistry(t)
-	job := &Job{ID: "w1", Method: "POST", URL: rcv.URL + "/hook", Body: `{"body":"secret"}`, Headers: map[string]string{"Content-Type": "application/json"}}
+	job := &jobs.Job{ID: "w1", Method: "POST", URL: rcv.URL + "/hook", Body: `{"body":"secret"}`, Headers: map[string]string{"Content-Type": "application/json"}}
 
-	resp, err := makeRequest(context.Background(), job, job.URL, 0, 0, 0, 0, 0, registry)
+	resp, err := MakeRequest(context.Background(), job, job.URL, 0, 0, 0, 0, 0, registry)
 	if err != nil {
 		t.Fatal(err)
 	}

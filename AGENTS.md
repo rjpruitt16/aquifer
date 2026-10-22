@@ -24,7 +24,8 @@ Shared contracts that must stay identical across Aquifer and Spillway: `X-Aquedu
 
 ## Where things live
 
-- `aquifer.go` (`PrepareJob`, `Enqueue`), `server.go` (HTTP routes), `proxy.go` (`/proxy`), `account_queue.go` (`execute`, `makeRequest`: the single target API dispatch path).
+- `aquifer.go` (`PrepareJob`, `Enqueue`), `server.go` (HTTP routes), `proxy.go` (`/proxy`).
+- `internal/dispatch`: the dispatch path. `Registry` (one `URLWorker` per target API), `AccountQueue` (per-tenant queues; `execute` and `MakeRequest` are the single target API dispatch path), pools, the SSE broker, webhook delivery, drain mode and registration. Root `dispatch.go` keeps `Registry`, `NewRegistry`, `Config` and the rest as aliases.
 - `internal/jobs`: `Job`, `Request`, `Result`, validation, `DedupHash` (the only place idempotency hashes are derived). Root `job.go` keeps `Job`, `JobRequest`, `JobResult` and the status and retry constants as aliases.
 - `internal/storage`: the `Store` interface, `SQLite`, `Pebble`, `Open` (picks the backend), and `Remote` (the shared idempotency and result ledger in Valkey). Root `store.go` keeps `JobStore`, `Store`, `PebbleStore` and their constructors as aliases.
 - `cluster_routing.go` (`clusterRoutingKey`).

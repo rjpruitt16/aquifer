@@ -1,7 +1,7 @@
 // Copyright 2026 Rahmi Pruitt
 // SPDX-License-Identifier: Apache-2.0
 
-package aquifer
+package dispatch
 
 import (
 	"math"
@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+
+	"github.com/rjpruitt16/aquifer/internal/jobs"
 )
 
 const defaultMaxPendingWebhooksPerUser int64 = 1000
@@ -32,7 +34,7 @@ func newUserLoadTracker() *userLoadTracker {
 	return &userLoadTracker{users: map[string]*userLoad{}}
 }
 
-func (t *userLoadTracker) add(job *Job) {
+func (t *userLoadTracker) add(job *jobs.Job) {
 	t.accepted.Add(1)
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -55,7 +57,7 @@ func (t *userLoadTracker) active() int64 {
 	return int64(len(t.users))
 }
 
-func (t *userLoadTracker) done(job *Job) {
+func (t *userLoadTracker) done(job *jobs.Job) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	load := t.users[job.UserID]
@@ -105,4 +107,15 @@ func configuredMaxPendingWebhooksPerUser() int64 {
 		return defaultMaxPendingWebhooksPerUser
 	}
 	return value
+}
+
+// UserLoad is how many of userID's jobs and completion webhooks this node
+// has pending.
+func (r *Registry) UserLoad(userID string) (jobs, webhooks int64) {
+	r.users.mu.Lock()
+	defer r.users.mu.Unlock()
+	if load := r.users.users[userID]; load != nil {
+		return load.jobs, load.webhooks
+	}
+	return 0, 0
 }

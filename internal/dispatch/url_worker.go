@@ -1,7 +1,7 @@
 // Copyright 2026 Rahmi Pruitt
 // SPDX-License-Identifier: Apache-2.0
 
-package aquifer
+package dispatch
 
 import (
 	"crypto/sha256"
@@ -18,6 +18,10 @@ import (
 	"time"
 
 	"github.com/rjpruitt16/aquifer/internal/admission"
+	"github.com/rjpruitt16/aquifer/internal/jobs"
+	"github.com/rjpruitt16/aquifer/internal/metrics"
+	"github.com/rjpruitt16/aquifer/internal/storage"
+	"github.com/rjpruitt16/aquifer/l8"
 )
 
 type URLWorker struct {
@@ -44,13 +48,13 @@ type URLWorker struct {
 	activeQueues      atomic.Int64
 	backlog           atomic.Int64
 	queues            map[string]*AccountQueue
-	store             JobStore
+	store             storage.Store
 	broker            *Broker
-	l8                *L8Registry
+	l8                *l8.Registry
 	metrics           MetricsAdapter
 	enqueueWebhook    webhookEnqueuer
-	resultRecorder    JobResultRecorder
-	onJobDone         func(*Job)
+	resultRecorder    storage.ResultRecorder
+	onJobDone         func(*jobs.Job)
 	onIdle            func(string, *URLWorker)
 	breakerUntil      time.Time // zero value means the breaker is closed
 	breakerKind       string    // "queue" or "reroute" — which kind of signal tripped it, see classifyOverload
@@ -123,7 +127,7 @@ func (w *URLWorker) QueueActive() bool {
 	return false
 }
 
-func NewURLWorker(domain string, rps float64, maxConc int, pool *Pool, store JobStore, broker *Broker, l8 *L8Registry, metrics MetricsAdapter, enqueueWebhook webhookEnqueuer, resultRecorder JobResultRecorder, onJobDone func(*Job), onIdle func(string, *URLWorker)) *URLWorker {
+func NewURLWorker(domain string, rps float64, maxConc int, pool *Pool, store storage.Store, broker *Broker, l8 *l8.Registry, metrics MetricsAdapter, enqueueWebhook webhookEnqueuer, resultRecorder storage.ResultRecorder, onJobDone func(*jobs.Job), onIdle func(string, *URLWorker)) *URLWorker {
 	w := &URLWorker{
 		domain:         domain,
 		rps:            rps,
@@ -133,7 +137,7 @@ func NewURLWorker(domain string, rps float64, maxConc int, pool *Pool, store Job
 		store:          store,
 		broker:         broker,
 		l8:             l8,
-		metrics:        ensureMetrics(metrics),
+		metrics:        EnsureMetrics(metrics),
 		enqueueWebhook: enqueueWebhook,
 		resultRecorder: resultRecorder,
 		onJobDone:      onJobDone,
@@ -226,7 +230,7 @@ func (w *URLWorker) checkAndThrottle() {
 
 	scale := ceiling / total
 	for _, q := range queues {
-		q.Throttle(math.Max(q.RPS()*scale, minRPS))
+		q.Throttle(math.Max(q.RPS()*scale, MinRPS))
 	}
 }
 
@@ -257,22 +261,22 @@ func (w *URLWorker) budgetCeiling() float64 {
 	return w.rps
 }
 
-func (w *URLWorker) Enqueue(job *Job) bool {
+func (w *URLWorker) Enqueue(job *jobs.Job) bool {
 	_, _, enqueued := w.enqueue(job, false)
 	return enqueued
 }
 
-func (w *URLWorker) AdmitAndEnqueue(job *Job) (QueueSnapshot, *AdmissionRejectedError, bool) {
+func (w *URLWorker) AdmitAndEnqueue(job *jobs.Job) (admission.QueueSnapshot, *admission.RejectedError, bool) {
 	return w.enqueue(job, true)
 }
 
-func (w *URLWorker) enqueue(job *Job, enforceAdmission bool) (QueueSnapshot, *AdmissionRejectedError, bool) {
+func (w *URLWorker) enqueue(job *jobs.Job, enforceAdmission bool) (admission.QueueSnapshot, *admission.RejectedError, bool) {
 	q, snapshot, rejected, ok := w.reserve(job, enforceAdmission)
 	if rejected != nil || !ok {
 		return snapshot, rejected, ok
 	}
 	if !q.handoff(job) {
-		return QueueSnapshot{}, nil, false
+		return admission.QueueSnapshot{}, nil, false
 	}
 	return snapshot, nil, true
 }
@@ -281,19 +285,19 @@ func (w *URLWorker) enqueue(job *Job, enforceAdmission bool) (QueueSnapshot, *Ad
 // under the worker lock, so concurrent submissions see each other in the
 // fair-admission math. The caller hands the job over after the lock is
 // released.
-func (w *URLWorker) reserve(job *Job, enforceAdmission bool) (*AccountQueue, QueueSnapshot, *AdmissionRejectedError, bool) {
+func (w *URLWorker) reserve(job *jobs.Job, enforceAdmission bool) (*AccountQueue, admission.QueueSnapshot, *admission.RejectedError, bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
 	select {
 	case <-w.stop:
-		return nil, QueueSnapshot{}, nil, false
+		return nil, admission.QueueSnapshot{}, nil, false
 	default:
 	}
 
-	key := sharedKey
+	key := SharedQueueKey
 	if w.accountQueueMode {
-		key = jobQueueKey(job)
+		key = JobQueueKey(job)
 	}
 
 	q, ok := w.queues[key]
@@ -323,7 +327,7 @@ func (w *URLWorker) reserve(job *Job, enforceAdmission bool) (*AccountQueue, Que
 		decision := admission.DecideFair(queuePending, totalPending, activeQueues, maxBacklog, admission.RandomDraw())
 		if !decision.Allowed {
 			snapshot := decision.Snapshot
-			return nil, snapshot, &AdmissionRejectedError{Decision: AdmissionDecision{
+			return nil, snapshot, &admission.RejectedError{Decision: admission.Decision{
 				Allowed: false,
 				Reason:  decision.Reason,
 				Limit:   maxBacklog,
@@ -362,7 +366,7 @@ func (w *URLWorker) reserve(job *Job, enforceAdmission bool) (*AccountQueue, Que
 		}, func(v int64) {
 			w.maxBacklog.Store(v)
 		})
-		destinationSignal := w.handleDestinationAccountQueue
+		destinationSignal := w.HandleDestinationAccountQueue
 		q.accountQueueSignal.Store(&destinationSignal)
 		w.queues[key] = q
 	}
@@ -371,8 +375,8 @@ func (w *URLWorker) reserve(job *Job, enforceAdmission bool) (*AccountQueue, Que
 	return q, w.snapshotForQueueLocked(key), nil, true
 }
 
-func (w *URLWorker) snapshotForQueueLocked(key string) QueueSnapshot {
-	snapshot := QueueSnapshot{MaxBacklog: w.maxBacklog.Load()}
+func (w *URLWorker) snapshotForQueueLocked(key string) admission.QueueSnapshot {
+	snapshot := admission.QueueSnapshot{MaxBacklog: w.maxBacklog.Load()}
 	for queueKey, q := range w.queues {
 		pending := q.Backlog()
 		if pending <= 0 {
@@ -395,7 +399,7 @@ func (w *URLWorker) snapshotForQueueLocked(key string) QueueSnapshot {
 	return snapshot
 }
 
-func (w *URLWorker) Snapshot() QueueSnapshot {
+func (w *URLWorker) Snapshot() admission.QueueSnapshot {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.snapshotForQueueLocked("")
@@ -407,7 +411,7 @@ func (w *URLWorker) Snapshot() QueueSnapshot {
 // would take isolation away from every other tenant sending there. Only
 // the node owner (AQUIFER_ACCOUNT_QUEUE) and the destination can.
 func (w *URLWorker) handleAccountQueueHeader(val string) {
-	on, ok := parseAccountQueueValue(val)
+	on, ok := ParseAccountQueueValue(val)
 	if !ok || !on {
 		return
 	}
@@ -429,9 +433,9 @@ func (w *URLWorker) setAccountQueuePolicy(nodeDefault bool, destination *bool, o
 	w.applyAccountQueueModeLocked()
 }
 
-// handleDestinationAccountQueue applies the destination's own
+// HandleDestinationAccountQueue applies the destination's own
 // X-Aqueduct-Account-Queue answer, which overrides everything else.
-func (w *URLWorker) handleDestinationAccountQueue(on bool) {
+func (w *URLWorker) HandleDestinationAccountQueue(on bool) {
 	w.mu.Lock()
 	changed := w.destinationMode == nil || *w.destinationMode != on
 	w.destinationMode = &on
@@ -451,10 +455,10 @@ func (w *URLWorker) applyAccountQueueModeLocked() {
 	w.accountQueueMode = w.nodeDefault || w.senderOptIn
 }
 
-// parseAccountQueueValue reads an X-Aqueduct-Account-Queue value: enabled,
+// ParseAccountQueueValue reads an X-Aqueduct-Account-Queue value: enabled,
 // true, on, yes or 1 for one queue per tenant; disabled, false, off, no or
 // 0 for one shared queue. ok is false for anything else.
-func parseAccountQueueValue(val string) (on bool, ok bool) {
+func ParseAccountQueueValue(val string) (on bool, ok bool) {
 	switch strings.ToLower(strings.TrimSpace(val)) {
 	case "enabled", "true", "on", "yes", "1":
 		return true, true
@@ -473,7 +477,7 @@ func accountQueueDefault() bool {
 	if val == "" {
 		return true
 	}
-	on, ok := parseAccountQueueValue(val)
+	on, ok := ParseAccountQueueValue(val)
 	if !ok {
 		log.Printf("AQUIFER_ACCOUNT_QUEUE=%q isn't on or off; using on", val)
 		return true
@@ -481,9 +485,9 @@ func accountQueueDefault() bool {
 	return on
 }
 
-const sharedKey = "__shared__"
+const SharedQueueKey = "__shared__"
 
-func jobQueueKey(job *Job) string {
+func JobQueueKey(job *jobs.Job) string {
 	apiKey := job.Headers["Authorization"]
 	if apiKey == "" {
 		apiKey = job.Headers["x-api-key"]
@@ -495,7 +499,7 @@ func jobQueueKey(job *Job) string {
 	return sha256String(raw)
 }
 
-func domainKey(rawURL string) string {
+func DomainKey(rawURL string) string {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return rawURL
@@ -508,12 +512,12 @@ func sha256String(s string) string {
 	return hex.EncodeToString(h[:])
 }
 
-func (w *URLWorker) Stats() TargetStats {
+func (w *URLWorker) Stats() metrics.TargetStats {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	stats := TargetStats{Target: w.domain, Queues: make([]QueueStat, 0, len(w.queues))}
+	stats := metrics.TargetStats{Target: w.domain, Queues: make([]metrics.QueueStat, 0, len(w.queues))}
 	for key, q := range w.queues {
-		qs := QueueStat{Key: key, Backlog: q.Backlog(), RPS: q.RPS(), Served: q.Served()}
+		qs := metrics.QueueStat{Key: key, Backlog: q.Backlog(), RPS: q.RPS(), Served: q.Served()}
 		if qs.Backlog > 0 {
 			stats.ActiveQueues++
 			stats.Backlog += qs.Backlog
@@ -522,4 +526,12 @@ func (w *URLWorker) Stats() TargetStats {
 		stats.Queues = append(stats.Queues, qs)
 	}
 	return stats
+}
+
+// AccountQueueMode reports whether this worker queues each tenant
+// separately (X-Aqueduct-Account-Queue).
+func (w *URLWorker) AccountQueueMode() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.accountQueueMode
 }

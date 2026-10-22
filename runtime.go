@@ -6,6 +6,8 @@ package aquifer
 import (
 	"context"
 	"log"
+
+	"github.com/rjpruitt16/aquifer/internal/dispatch"
 )
 
 type RuntimeOptions struct {
@@ -22,7 +24,7 @@ type RuntimeOptions struct {
 	// implementation (e.g. Postgres, rqlite) without needing to bypass
 	// NewRuntime and wire the lower-level constructors by hand.
 	Store JobStore
-	// DrainConfig overrides drain mode's config (see drain.go). If nil,
+	// DrainConfig overrides drain mode's config (see internal/dispatch/drain.go). If nil,
 	// the Registry reads AQUIFER_DRAIN_* env vars itself — disabled unless
 	// AQUIFER_DRAIN_ENABLED is explicitly set to true.
 	DrainConfig *DrainConfig
@@ -99,7 +101,7 @@ func NewRuntime(opts RuntimeOptions) *Runtime {
 		store = NewJobStore(dbPath)
 	}
 	broker := NewBroker()
-	metrics := ensureMetrics(opts.Metrics)
+	metrics := dispatch.EnsureMetrics(opts.Metrics)
 	pools := NewPoolRegistry()
 	registry := NewRegistry(store, cfg, broker, l8, metrics, pools)
 	if opts.DrainConfig != nil {
@@ -222,7 +224,7 @@ func RunAdapter(ctx context.Context, adapter FrameworkAdapter, opts RuntimeOptio
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), runtime.Shutdown.Timeout)
 	defer cancelShutdown()
 	runtime.BeginDrain()
-	if !sleepBeforeRetryContext(shutdownCtx, runtime.Shutdown.Quiesce) {
+	if !dispatch.SleepBeforeRetryContext(shutdownCtx, runtime.Shutdown.Quiesce) {
 		log.Printf("shutdown: quiesce window ended at deadline")
 	}
 	stopAdapter()

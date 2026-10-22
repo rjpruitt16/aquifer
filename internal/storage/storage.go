@@ -39,7 +39,7 @@ type Store interface {
 	GetQueuedJobs() []*jobs.Job
 
 	// ListIdempotentKeys and ClearIdempotentKeys back drain mode (see
-	// drain.go) -- an opt-in feature, off by default, so calling these on
+	// internal/dispatch/drain.go) -- an opt-in feature, off by default, so calling these on
 	// a deployment that never enables it is never reached.
 	ListIdempotentKeys() []jobs.LedgerEntry
 	ClearIdempotentKeys()

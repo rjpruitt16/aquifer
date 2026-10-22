@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/rjpruitt16/aquifer/internal/dispatch"
 	"github.com/rjpruitt16/aquifer/l8"
 )
 
@@ -59,11 +60,15 @@ func (u *schemaUpstream) set(schema, hash string) {
 func testAquiferWithL8(t *testing.T, opts ...l8.Option) (*Aquifer, *Store) {
 	t.Helper()
 	dir := t.TempDir()
-	registry := l8.NewRegistry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"), opts...)
-	t.Cleanup(registry.Close)
-	app, store := testAquiferWithLimits(t, AdmissionLimits{})
-	app.l8 = registry
-	app.registry.l8 = registry
+	trust := l8.NewRegistry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"), opts...)
+	t.Cleanup(trust.Close)
+	dbPath := filepath.Join(dir, "aquifer.db")
+	store := NewStore(dbPath)
+	broker := NewBroker()
+	cfg := &Config{Defaults: RateConfig{RPS: 100, MaxConcurrent: 1}}
+	registry := NewRegistry(store, cfg, broker, trust, NoopMetricsAdapter{}, nil)
+	app := NewAquifer(store, registry, broker, trust, NewAdmissionController(AdmissionLimits{}, dbPath), nil)
+	t.Cleanup(app.Close)
 	return app, store
 }
 
@@ -124,7 +129,7 @@ func TestSchemaHashHeaderObservedOnDispatch(t *testing.T) {
 
 	up.set(chatSchemaV2, "sha256:v2")
 	job := NewJob(&JobRequest{UserID: "u", IdempotentKey: "k", URL: url, Method: "POST", WebhookURL: "https://example.com/cb"})
-	resp, err := makeRequest(t.Context(), job, url, 0, 0, 0, 0, 0, app.l8)
+	resp, err := dispatch.MakeRequest(t.Context(), job, url, 0, 0, 0, 0, 0, app.l8)
 	if err != nil {
 		t.Fatal(err)
 	}

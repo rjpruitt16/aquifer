@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/rjpruitt16/aquifer/internal/cluster"
+	"github.com/rjpruitt16/aquifer/internal/dispatch"
 	"github.com/rjpruitt16/aquifer/internal/httpx"
 	"github.com/rjpruitt16/aquifer/internal/region"
 	"github.com/rjpruitt16/aquifer/l8"
@@ -153,7 +154,7 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 	// elsewhere. Empty means "no opinion," leaving the target API's current
 	// mode unchanged rather than forcing it off for every request that
 	// doesn't happen to set this.
-	req.AccountQueueMode = pacingHeader(r.Header, "Account-Queue")
+	req.AccountQueueMode = dispatch.PacingHeader(r.Header, "Account-Queue")
 	if err := applyMaxRetriesHeader(r.Header, &req); err != nil {
 		httpx.JSONError(w, err.Error(), http.StatusBadRequest)
 		return
@@ -339,13 +340,13 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request, job *Job, 
 		if proxyFallback.Status != 0 {
 			data["upstream_status"] = proxyFallback.Status
 		}
-		writeSSE(w, "proxy_fallback", data)
+		dispatch.WriteSSE(w, "proxy_fallback", data)
 	}
 
 	// Catchup events for states already passed before client connected
-	writeSSE(w, "queued", map[string]any{"job_id": job.ID, "status": "queued"})
+	dispatch.WriteSSE(w, "queued", map[string]any{"job_id": job.ID, "status": "queued"})
 	if job.Status == StatusInFlight {
-		writeSSE(w, "dispatching", map[string]any{"job_id": job.ID})
+		dispatch.WriteSSE(w, "dispatching", map[string]any{"job_id": job.ID})
 	}
 	flusher.Flush()
 
@@ -362,7 +363,7 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request, job *Job, 
 			if !ok {
 				return
 			}
-			writeErr := writeSSE(w, event.Event, event.Data)
+			writeErr := dispatch.WriteSSE(w, event.Event, event.Data)
 			if event.Event == "completed" || event.Event == "failed" {
 				// Confirm only a final event written and flushed while the
 				// client was still connected; anything else gets a webhook.
@@ -403,7 +404,7 @@ func (s *Server) proxyJob(w http.ResponseWriter, r *http.Request) {
 		httpx.JSONError(w, "invalid json", http.StatusBadRequest)
 		return
 	}
-	req.AccountQueueMode = pacingHeader(r.Header, "Account-Queue")
+	req.AccountQueueMode = dispatch.PacingHeader(r.Header, "Account-Queue")
 	if err := applyMaxRetriesHeader(r.Header, &req); err != nil {
 		httpx.JSONError(w, err.Error(), http.StatusBadRequest)
 		return
@@ -528,10 +529,10 @@ func (s *Server) proxyJob(w http.ResponseWriter, r *http.Request) {
 }
 
 func setQueueHeaders(headers http.Header, snapshot QueueSnapshot) {
-	setLoadHeader(headers, "Active-Queues", fmt.Sprintf("%d", snapshot.ActiveQueues))
-	setLoadHeader(headers, "Upstream-Backlog", fmt.Sprintf("%d", snapshot.UpstreamBacklog))
-	setLoadHeader(headers, "Queue-Backlog", fmt.Sprintf("%d", snapshot.QueueBacklog))
-	setLoadHeader(headers, "Admission-Pressure", fmt.Sprintf("%.3f", snapshot.AdmissionPressure))
+	dispatch.SetLoadHeader(headers, "Active-Queues", fmt.Sprintf("%d", snapshot.ActiveQueues))
+	dispatch.SetLoadHeader(headers, "Upstream-Backlog", fmt.Sprintf("%d", snapshot.UpstreamBacklog))
+	dispatch.SetLoadHeader(headers, "Queue-Backlog", fmt.Sprintf("%d", snapshot.QueueBacklog))
+	dispatch.SetLoadHeader(headers, "Admission-Pressure", fmt.Sprintf("%.3f", snapshot.AdmissionPressure))
 }
 
 // relaySSE forwards a redirected region's own SSE response byte-for-byte
@@ -565,7 +566,7 @@ func (s *Server) relaySSE(w http.ResponseWriter, r *http.Request, resp *http.Res
 	}
 	w.WriteHeader(http.StatusOK)
 	if region != "" {
-		writeSSE(w, "rerouted", map[string]any{"region": region})
+		dispatch.WriteSSE(w, "rerouted", map[string]any{"region": region})
 	}
 	flusher.Flush()
 
@@ -676,8 +677,8 @@ func (s *Server) forwardClusterRequest(w http.ResponseWriter, r *http.Request, p
 		outbound.Header.Set("Content-Type", "application/json")
 		outbound.Header.Set(cluster.ForwardedHeader, "true")
 		outbound.Header.Set(cluster.ForwardDeadlineHeader, strconv.FormatInt(time.Now().Add(clusterForwardResponseTimeout).UnixMilli(), 10))
-		if accountQueue := pacingHeader(r.Header, "Account-Queue"); accountQueue != "" {
-			setLoadHeader(outbound.Header, "Account-Queue", accountQueue)
+		if accountQueue := dispatch.PacingHeader(r.Header, "Account-Queue"); accountQueue != "" {
+			dispatch.SetLoadHeader(outbound.Header, "Account-Queue", accountQueue)
 		}
 
 		// Bound connection and response-header setup, but not the response body:
@@ -702,7 +703,7 @@ func (s *Server) forwardClusterRequest(w http.ResponseWriter, r *http.Request, p
 			s.aquifer.clusterRouter.MarkUnavailable(key, owner.ID)
 			continue
 		}
-		if resp.StatusCode == http.StatusServiceUnavailable && pacingHeader(resp.Header, "Node-State") == "draining" {
+		if resp.StatusCode == http.StatusServiceUnavailable && dispatch.PacingHeader(resp.Header, "Node-State") == "draining" {
 			resp.Body.Close()
 			s.aquifer.clusterRouter.MarkUnavailable(key, owner.ID)
 			continue
@@ -785,14 +786,14 @@ func writeSchemaMismatch(w http.ResponseWriter, err error) bool {
 // override the body's max_retries, and X-Aqueduct-Webhook-Max-Retries the
 // body's webhook_max_retries; -1 means retry until complete.
 func applyMaxRetriesHeader(header http.Header, req *JobRequest) error {
-	if raw := pacingHeader(header, "Max-Retries"); raw != "" {
+	if raw := dispatch.PacingHeader(header, "Max-Retries"); raw != "" {
 		n, err := strconv.Atoi(strings.TrimSpace(raw))
 		if err != nil {
 			return errors.New("X-Aqueduct-Max-Retries must be an integer: -1 (retry until complete) or 0-100")
 		}
 		req.MaxRetries = &n
 	}
-	if raw := pacingHeader(header, "Webhook-Max-Retries"); raw != "" {
+	if raw := dispatch.PacingHeader(header, "Webhook-Max-Retries"); raw != "" {
 		n, err := strconv.Atoi(strings.TrimSpace(raw))
 		if err != nil {
 			return errors.New("X-Aqueduct-Webhook-Max-Retries must be an integer: -1 (retry until delivered) or 0-100")
@@ -815,7 +816,7 @@ func setInboundRPS(w http.ResponseWriter, a *Aquifer, userID string) {
 // metrics serves GET /metrics when the node runs the built-in Prometheus
 // adapter (the aquifer binary's default); 404 otherwise.
 func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
-	prom, ok := s.aquifer.registry.metrics.(*PrometheusMetrics)
+	prom, ok := s.aquifer.registry.Metrics().(*PrometheusMetrics)
 	if !ok {
 		http.NotFound(w, r)
 		return
@@ -825,5 +826,5 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) observeRejected(reason string) {
-	observeRejected(s.aquifer.registry.metrics, reason)
+	dispatch.ObserveRejected(s.aquifer.registry.Metrics(), reason)
 }

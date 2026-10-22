@@ -37,7 +37,7 @@ type FlyAdapter struct {
 	// real .internal DNS builder by NewFlyAdapter; overridable in
 	// tests (which can't resolve real Fly private-network DNS) to point at
 	// local httptest servers instead -- same "injectable for testability,
-	// real by default" pattern as account_queue.go's retrySleepFunc.
+	// real by default" pattern as internal/dispatch/account_queue.go's RetrySleepFunc.
 	healthCheckURL func(region string) string
 
 	mu   sync.RWMutex

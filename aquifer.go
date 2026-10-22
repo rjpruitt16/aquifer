@@ -42,7 +42,7 @@ type Aquifer struct {
 	// nil by NewAquifer deliberately -- SetRegionAdapter is how it gets
 	// wired in, so every existing NewAquifer caller (tests included) is
 	// unaffected by this feature's existence. regionAdapterOrDefault()
-	// falls back to NoopRegionAdapter, matching ensureMetrics' pattern.
+	// falls back to NoopRegionAdapter, matching dispatch.EnsureMetrics' pattern.
 	regionAdapter RegionAdapter
 	// redirectGate answers "is attempting cross-region redirect itself
 	// worth trying right now" -- see region_redirect.go. Always
