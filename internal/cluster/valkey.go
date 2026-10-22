@@ -1,10 +1,12 @@
 // Copyright 2026 Rahmi Pruitt
 // SPDX-License-Identifier: Apache-2.0
 
-package aquifer
+package cluster
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,16 +17,16 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-type ValkeyClusterStateStore struct {
+type ValkeyStateStore struct {
 	client *redis.Client
 	prefix string
 }
 
-func NewValkeyClusterStateStore(rawURL, prefix string) (*ValkeyClusterStateStore, error) {
+func NewValkeyStateStore(rawURL, prefix string) (*ValkeyStateStore, error) {
 	if rawURL == "" {
 		return nil, errors.New("AQUIFER_CLUSTER_VALKEY_URL or AQUIFER_VALKEY_URL is required for the Valkey cluster provider")
 	}
-	parsed, err := normalizeClusterValkeyURL(rawURL)
+	parsed, err := NormalizeValkeyURL(rawURL)
 	if err != nil {
 		return nil, err
 	}
@@ -38,10 +40,10 @@ func NewValkeyClusterStateStore(rawURL, prefix string) (*ValkeyClusterStateStore
 	if !strings.HasSuffix(prefix, ":") {
 		prefix += ":"
 	}
-	return &ValkeyClusterStateStore{client: redis.NewClient(opts), prefix: prefix}, nil
+	return &ValkeyStateStore{client: redis.NewClient(opts), prefix: prefix}, nil
 }
 
-func normalizeClusterValkeyURL(raw string) (string, error) {
+func NormalizeValkeyURL(raw string) (string, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return "", fmt.Errorf("parse cluster Valkey URL: %w", err)
@@ -58,7 +60,7 @@ func normalizeClusterValkeyURL(raw string) (string, error) {
 	return u.String(), nil
 }
 
-func (s *ValkeyClusterStateStore) Heartbeat(ctx context.Context, member ClusterMember, ttl time.Duration) error {
+func (s *ValkeyStateStore) Heartbeat(ctx context.Context, member Member, ttl time.Duration) error {
 	payload, err := json.Marshal(member)
 	if err != nil {
 		return err
@@ -70,7 +72,7 @@ func (s *ValkeyClusterStateStore) Heartbeat(ctx context.Context, member ClusterM
 	return err
 }
 
-func (s *ValkeyClusterStateStore) Members(ctx context.Context) ([]ClusterMember, error) {
+func (s *ValkeyStateStore) Members(ctx context.Context) ([]Member, error) {
 	ids, err := s.client.SMembers(ctx, s.instancesKey()).Result()
 	if err != nil || len(ids) == 0 {
 		return nil, err
@@ -83,14 +85,14 @@ func (s *ValkeyClusterStateStore) Members(ctx context.Context) ([]ClusterMember,
 	if err != nil {
 		return nil, err
 	}
-	members := make([]ClusterMember, 0, len(values))
+	members := make([]Member, 0, len(values))
 	var stale []any
 	for i, value := range values {
 		if value == nil {
 			stale = append(stale, ids[i])
 			continue
 		}
-		var member ClusterMember
+		var member Member
 		var payload []byte
 		switch value := value.(type) {
 		case string:
@@ -189,9 +191,9 @@ redis.call('ZADD', KEYS[3 + (selected - 1) * 2], now + ttl, scope)
 return redis.call('GET', KEYS[2 + (selected - 1) * 2])
 `)
 
-func (s *ValkeyClusterStateStore) Assign(ctx context.Context, scope string, candidates []ClusterMember, ttl time.Duration) (ClusterMember, error) {
+func (s *ValkeyStateStore) Assign(ctx context.Context, scope string, candidates []Member, ttl time.Duration) (Member, error) {
 	if len(candidates) == 0 {
-		return ClusterMember{}, nil
+		return Member{}, nil
 	}
 	hashed := hashKey(scope)
 	keys := make([]string, 1, 1+len(candidates)*2)
@@ -208,14 +210,14 @@ func (s *ValkeyClusterStateStore) Assign(ctx context.Context, scope string, cand
 	}
 	payload, err := assignClusterScopeScript.Run(ctx, s.client, keys, args...).Text()
 	if err != nil {
-		return ClusterMember{}, err
+		return Member{}, err
 	}
 	if payload == "" {
-		return ClusterMember{}, nil
+		return Member{}, nil
 	}
-	var member ClusterMember
+	var member Member
 	if err := json.Unmarshal([]byte(payload), &member); err != nil {
-		return ClusterMember{}, fmt.Errorf("decode assigned cluster member: %w", err)
+		return Member{}, fmt.Errorf("decode assigned cluster member: %w", err)
 	}
 	return member, nil
 }
@@ -229,7 +231,7 @@ redis.call('ZADD', KEYS[2], now + ARGV[2], ARGV[3])
 return 1
 `
 
-func (s *ValkeyClusterStateStore) Renew(ctx context.Context, scopes []string, nodeID string, ttl time.Duration) error {
+func (s *ValkeyStateStore) Renew(ctx context.Context, scopes []string, nodeID string, ttl time.Duration) error {
 	if len(scopes) == 0 {
 		return nil
 	}
@@ -253,7 +255,7 @@ redis.call('ZREM', KEYS[2], ARGV[2])
 return 1
 `)
 
-func (s *ValkeyClusterStateStore) Release(ctx context.Context, scope, nodeID string) error {
+func (s *ValkeyStateStore) Release(ctx context.Context, scope, nodeID string) error {
 	hashed := hashKey(scope)
 	return releaseClusterScopeScript.Run(ctx, s.client,
 		[]string{s.assignmentKey(hashed), s.instanceAssignmentsKey(nodeID)},
@@ -261,7 +263,7 @@ func (s *ValkeyClusterStateStore) Release(ctx context.Context, scope, nodeID str
 	).Err()
 }
 
-func (s *ValkeyClusterStateStore) RemoveInstance(ctx context.Context, nodeID string) error {
+func (s *ValkeyStateStore) RemoveInstance(ctx context.Context, nodeID string) error {
 	pipe := s.client.TxPipeline()
 	pipe.Del(ctx, s.instanceKey(nodeID), s.instanceAssignmentsKey(nodeID))
 	pipe.SRem(ctx, s.instancesKey(), nodeID)
@@ -269,13 +271,20 @@ func (s *ValkeyClusterStateStore) RemoveInstance(ctx context.Context, nodeID str
 	return err
 }
 
-func (s *ValkeyClusterStateStore) Close() error { return s.client.Close() }
+func (s *ValkeyStateStore) Close() error { return s.client.Close() }
 
-func (s *ValkeyClusterStateStore) instancesKey() string         { return s.prefix + "instances" }
-func (s *ValkeyClusterStateStore) instanceKey(id string) string { return s.prefix + "instance:" + id }
-func (s *ValkeyClusterStateStore) instanceAssignmentsKey(id string) string {
+func (s *ValkeyStateStore) instancesKey() string         { return s.prefix + "instances" }
+func (s *ValkeyStateStore) instanceKey(id string) string { return s.prefix + "instance:" + id }
+func (s *ValkeyStateStore) instanceAssignmentsKey(id string) string {
 	return s.prefix + "instance:" + id + ":assignments"
 }
-func (s *ValkeyClusterStateStore) assignmentKey(scopeHash string) string {
+func (s *ValkeyStateStore) assignmentKey(scopeHash string) string {
 	return s.prefix + "assignment:" + scopeHash
+}
+
+// hashKey keeps scope names out of Valkey keys, the same hash the job
+// store uses for idempotency keys.
+func hashKey(key string) string {
+	h := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(h[:])
 }

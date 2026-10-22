@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"github.com/rjpruitt16/aquifer/internal/cluster"
 	"github.com/rjpruitt16/aquifer/internal/env"
 )
 
@@ -150,7 +151,7 @@ func NewValkeyRemoteIdempotency(cfg RemoteIdempotencyConfig) RemoteIdempotency {
 // cross-node check silently fell back to local-only exactly when load was
 // highest.
 func newRemoteIdempotencyClient(cfg RemoteIdempotencyConfig) (*redis.Client, error) {
-	normalized, err := normalizeClusterValkeyURL(cfg.URL)
+	normalized, err := cluster.NormalizeValkeyURL(cfg.URL)
 	if err != nil {
 		return nil, err
 	}

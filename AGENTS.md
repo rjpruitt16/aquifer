@@ -26,9 +26,11 @@ Shared contracts that must stay identical across Aquifer and Spillway: `X-Aquedu
 
 - `aquifer.go` (`PrepareJob`, `Enqueue`), `server.go` (HTTP routes), `proxy.go` (`/proxy`), `account_queue.go` (`execute`, `makeRequest`: the single target API dispatch path).
 - `job.go`: `JobRequest`, `Job`, validation, `dedupHash` (the only place idempotency hashes are derived).
-- `store.go` (SQLite), `pebble_store.go`, `remote_idempotency.go` (Valkey), `cluster.go` (`clusterRoutingKey`).
+- `store.go` (SQLite), `pebble_store.go`, `remote_idempotency.go` (Valkey), `cluster_routing.go` (`clusterRoutingKey`).
 - `l8/` (public package `github.com/rjpruitt16/aquifer/l8`): L8 handshake, signing, payload encryption, request-schema validation. `l8_compat.go` keeps the old root names (`NewL8Registry`, `L8Registry`, ...) as aliases.
 - `internal/websocket`: the durable WebSocket proxy (`Manager`, Valkey transcripts, follower, scheduler, transcript export). `websocket.go` keeps the old root names (`WebSocketManager`, `NewWebSocketManager`, ...) as aliases.
+- `internal/admission` (admission limits, fair admission, inbound rate), `internal/region` (region discovery, redirect helpers), `internal/cluster` (membership, routing, Valkey coordination, `State`). Root `admission.go`, `region.go`, `cluster.go` and `lifecycle.go` keep the old root names as aliases.
+- `mcpadapter/` and `a2aadapter/`: the MCP and A2A adapters, outside the root package.
 - `internal/env`, `internal/httpx`, `internal/retry`, `internal/nodeid`, `internal/urlpolicy`: small helpers shared by the root and the internal packages (env parsing, JSON errors and drain responses, jitter, node ID, the URL allowlist).
 - `internal/` packages can't be imported from outside this module, so they can change freely; the root package and `l8/` are the public API.
 - `API.md` is the endpoint and env-var reference; `README.md` is the overview.
