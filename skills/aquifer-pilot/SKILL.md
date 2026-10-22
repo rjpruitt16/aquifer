@@ -124,7 +124,7 @@ A feedback loop on the backend's own saturation signal corrects itself either wa
 
 ### The control loop
 
-Aquifer follows the backend. The backend should run the control loop on the headers it returns. **Additive increase, multiplicative decrease** (AIMD) is a good default: TCP congestion control uses it, and so does Aquifer for its own intake (`inbound_rate.go`).
+Aquifer follows the backend. The backend should run the control loop on the headers it returns. **Additive increase, multiplicative decrease** (AIMD) is a good default: TCP congestion control uses it, and so does Aquifer for its own intake (`internal/admission/inbound_rate.go`).
 
 - While healthy, raise the advertised rate by a fixed step: `X-Aqueduct-Rps: <rate>`, and optionally `X-Aqueduct-Max-Concurrent`.
 - On a sign of saturation, cut it by a factor (×0.5–0.7) and wait a round trip before cutting again.

@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/rjpruitt16/aquifer/internal/admission"
 	"github.com/rjpruitt16/aquifer/internal/region"
 	"github.com/rjpruitt16/aquifer/l8"
 )
@@ -32,7 +33,7 @@ type Aquifer struct {
 	pools     *PoolRegistry
 	// fullnessSample caches Fullness() (see fullness.go), which goes on
 	// every response.
-	fullnessSample sampledInt64
+	fullnessSample admission.Sampled
 	remote         RemoteIdempotency
 	// regionAdapter backs /proxy's cross-region redirect (proxy.go). Left
 	// nil by NewAquifer deliberately -- SetRegionAdapter is how it gets

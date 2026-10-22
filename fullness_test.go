@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/rjpruitt16/aquifer/internal/admission"
 )
 
 func TestFullnessPercentRoundsAndClamps(t *testing.T) {
@@ -80,7 +82,7 @@ func TestFullnessFollowsAnUpstreamsBacklogAgainstItsBudget(t *testing.T) {
 	}
 
 	// Past the 250ms sample window, so the reading reflects all five jobs.
-	time.Sleep(admissionSampleTTL + 50*time.Millisecond)
+	time.Sleep(admission.SampleTTL + 50*time.Millisecond)
 	rec := httptest.NewRecorder()
 	routes.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
 

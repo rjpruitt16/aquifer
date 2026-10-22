@@ -3,7 +3,7 @@
 
 //go:build unix
 
-package aquifer
+package admission
 
 import "syscall"
 
