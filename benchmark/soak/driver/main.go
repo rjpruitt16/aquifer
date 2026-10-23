@@ -100,6 +100,55 @@ type driver struct {
 	wsSessions sync.Map     // index -> *wsSession
 
 	obs *observer
+
+	// Why submissions counted as client errors failed, by kind, so a
+	// spike can be told apart: the driver's own connection failures, a
+	// status it doesn't expect, or an answer without a job id.
+	errorKinds   map[string]uint64
+	errorKindsMu sync.Mutex
+}
+
+func (d *driver) clientError(seq uint64, kind string) {
+	d.ledger.clientError(seq)
+	d.win.clientErr.Add(1)
+	d.errorKindsMu.Lock()
+	if d.errorKinds == nil {
+		d.errorKinds = map[string]uint64{}
+	}
+	// Bounded, whatever errors turn up: past maxErrorKinds, new kinds are
+	// counted together.
+	if _, seen := d.errorKinds[kind]; !seen && len(d.errorKinds) >= maxErrorKinds {
+		kind = "other"
+	}
+	d.errorKinds[kind]++
+	d.errorKindsMu.Unlock()
+}
+
+func (d *driver) clientErrorKinds() map[string]uint64 {
+	d.errorKindsMu.Lock()
+	defer d.errorKindsMu.Unlock()
+	out := make(map[string]uint64, len(d.errorKinds))
+	for k, v := range d.errorKinds {
+		out[k] = v
+	}
+	return out
+}
+
+const maxErrorKinds = 50
+
+// errorKind is a transport error reduced to a countable kind: addresses,
+// quoted URLs and other numbers (stream ids, byte counts) left out.
+var (
+	addrRe   = regexp.MustCompile(`\[?[0-9a-f:.]+\]?:\d+|"[^"]*"`)
+	numberRe = regexp.MustCompile(`\d+`)
+)
+
+func errorKind(err error) string {
+	kind := numberRe.ReplaceAllString(addrRe.ReplaceAllString(err.Error(), "ADDR"), "N")
+	if len(kind) > 120 {
+		kind = kind[:120]
+	}
+	return "transport: " + kind
 }
 
 // envOr lets the deploy config set a flag's default, so one image serves
@@ -359,8 +408,7 @@ func (d *driver) submit() {
 	start := time.Now()
 	status, owner, rb, err := d.post(body)
 	if err != nil {
-		d.ledger.clientError(seq)
-		d.win.clientErr.Add(1)
+		d.clientError(seq, errorKind(err))
 		return
 	}
 	now := time.Now()
@@ -393,8 +441,11 @@ func (d *driver) submit() {
 	case 200, 201:
 		m := jobIDRe.FindSubmatch(rb)
 		if m == nil {
-			d.ledger.clientError(seq)
-			d.win.clientErr.Add(1)
+			kind := fmt.Sprintf("status %d without job_id", status)
+			if bytes.Contains(rb, []byte("canalis_timeout")) {
+				kind += " (canalis_timeout)"
+			}
+			d.clientError(seq, kind)
 			return
 		}
 		d.ledger.acceptedOn(seq, string(m[1]), owner, now)
@@ -404,8 +455,7 @@ func (d *driver) submit() {
 		d.ledger.shed()
 		d.win.shed.Add(1)
 	default:
-		d.ledger.clientError(seq)
-		d.win.clientErr.Add(1)
+		d.clientError(seq, fmt.Sprintf("status %d", status))
 	}
 }
 
