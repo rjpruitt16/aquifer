@@ -115,6 +115,11 @@ func (d *driver) clientError(seq uint64, kind string) {
 	if d.errorKinds == nil {
 		d.errorKinds = map[string]uint64{}
 	}
+	// Bounded, whatever errors turn up: past maxErrorKinds, new kinds are
+	// counted together.
+	if _, seen := d.errorKinds[kind]; !seen && len(d.errorKinds) >= maxErrorKinds {
+		kind = "other"
+	}
 	d.errorKinds[kind]++
 	d.errorKindsMu.Unlock()
 }
@@ -129,12 +134,17 @@ func (d *driver) clientErrorKinds() map[string]uint64 {
 	return out
 }
 
-// errorKind is a transport error reduced to a countable kind, its
-// addresses and ports left out.
-var addrRe = regexp.MustCompile(`\[?[0-9a-f:.]+\]?:\d+|"[^"]*"`)
+const maxErrorKinds = 50
+
+// errorKind is a transport error reduced to a countable kind: addresses,
+// quoted URLs and other numbers (stream ids, byte counts) left out.
+var (
+	addrRe   = regexp.MustCompile(`\[?[0-9a-f:.]+\]?:\d+|"[^"]*"`)
+	numberRe = regexp.MustCompile(`\d+`)
+)
 
 func errorKind(err error) string {
-	kind := addrRe.ReplaceAllString(err.Error(), "ADDR")
+	kind := numberRe.ReplaceAllString(addrRe.ReplaceAllString(err.Error(), "ADDR"), "N")
 	if len(kind) > 120 {
 		kind = kind[:120]
 	}
