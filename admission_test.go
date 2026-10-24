@@ -6,6 +6,7 @@ package aquifer
 import (
 	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -192,5 +193,55 @@ func TestPebbleSyncLagStaysNearTheFlushInterval(t *testing.T) {
 	defer synced.Close()
 	if lag := synced.SyncLag(); lag != 0 {
 		t.Fatalf("syncing every write: lag %v, want 0", lag)
+	}
+}
+
+// A retry that arrives while the first request for its key is inserted but
+// not yet admitted must not be handed that job's ID: admission then rejects
+// and deletes the job, and the retry's caller would hold an ID that 404s
+// and never finishes (lost accepted jobs in the Canalis soak).
+func TestRetryDuringARejectedInsertIsNotGivenTheDeletedJob(t *testing.T) {
+	app, store := testAquiferWithLimits(t, AdmissionLimits{MemoryLimitMB: 1})
+	inserted := make(chan struct{})
+	proceed := make(chan struct{})
+	var once sync.Once
+	app.afterInsert = func() {
+		once.Do(func() {
+			close(inserted)
+			<-proceed
+		})
+	}
+
+	firstErr := make(chan error, 1)
+	go func() {
+		_, err := app.Enqueue(sampleJobRequest("user-1", "key-1"))
+		firstErr <- err
+	}()
+	<-inserted
+
+	type outcome struct {
+		result EnqueueResult
+		err    error
+	}
+	retry := make(chan outcome, 1)
+	go func() {
+		result, err := app.Enqueue(sampleJobRequest("user-1", "key-1"))
+		retry <- outcome{result, err}
+	}()
+	time.Sleep(100 * time.Millisecond)
+	close(proceed)
+
+	var admissionErr *AdmissionRejectedError
+	if err := <-firstErr; !errors.As(err, &admissionErr) {
+		t.Fatalf("expected the first request to be rejected by admission, got %v", err)
+	}
+	got := <-retry
+	if got.err == nil && got.result.Duplicate {
+		if store.GetJob(got.result.JobID) == nil {
+			t.Fatalf("retry was told job %s exists, but it was deleted", got.result.JobID)
+		}
+	}
+	if !errors.As(got.err, &admissionErr) {
+		t.Fatalf("expected the retry to be judged on its own (rejected), got result=%+v err=%v", got.result, got.err)
 	}
 }
