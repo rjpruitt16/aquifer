@@ -219,6 +219,14 @@ func (a *Aquifer) prepareJob(req JobRequest) (job *Job, duplicate *EnqueueResult
 	// deciding, then sees its outcome: the job if it was queued, nothing if
 	// it was rejected and deleted.
 	release = a.newKeys.claim(job.IdempotencyHash())
+	// The caller can't defer release until this returns; a panic before
+	// then would hold the key forever and block every retry for it.
+	defer func() {
+		if r := recover(); r != nil {
+			release()
+			panic(r)
+		}
+	}()
 
 	// Idempotency check comes first: a retried job that already exists must
 	// still succeed even while the system is over an admission limit.

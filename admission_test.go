@@ -245,3 +245,24 @@ func TestRetryDuringARejectedInsertIsNotGivenTheDeletedJob(t *testing.T) {
 		t.Fatalf("expected the retry to be judged on its own (rejected), got result=%+v err=%v", got.result, got.err)
 	}
 }
+
+func TestAPanicAfterClaimingAKeyReleasesIt(t *testing.T) {
+	app, _ := testAquiferWithLimits(t, AdmissionLimits{})
+	app.afterInsert = func() { panic("boom") }
+	func() {
+		defer func() { _ = recover() }()
+		_, _ = app.Enqueue(sampleJobRequest("user-1", "key-panic"))
+	}()
+	app.afterInsert = nil
+
+	done := make(chan struct{})
+	go func() {
+		_, _ = app.Enqueue(sampleJobRequest("user-1", "key-panic"))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a retry waited on a key whose holder panicked")
+	}
+}
