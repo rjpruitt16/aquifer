@@ -45,8 +45,8 @@ func NewWebSocketManagerFromConfig(cfg WebSocketConfig) (*WebSocketManager, erro
 	return websocket.NewManagerFromConfig(cfg)
 }
 
-func NewRedisWebSocketStreamStore(rawURL, prefix string, maxEvents int64, ttl time.Duration, readerShards int) (*RedisWebSocketStreamStore, error) {
-	return websocket.NewRedisStreamStore(rawURL, prefix, maxEvents, ttl, readerShards)
+func NewRedisWebSocketStreamStore(rawURL, prefix string, maxEvents int64, ttl time.Duration, readerShards, poolSize int) (*RedisWebSocketStreamStore, error) {
+	return websocket.NewRedisStreamStore(rawURL, prefix, maxEvents, ttl, readerShards, poolSize)
 }
 
 func NewWebSocketScheduler(cfg WebSocketSchedulerConfig) *WebSocketScheduler {

@@ -23,6 +23,9 @@ import (
 )
 
 const (
+	storeRetryFirstDelay = 100 * time.Millisecond
+	storeRetryMaxDelay   = 2 * time.Second
+
 	webSocketCapacityMaxHeader = "X-Aqueduct-WS-Max-Connections"
 	webSocketCapacityRPSHeader = "X-Aqueduct-WS-Connect-Rps"
 )
@@ -99,7 +102,7 @@ func NewManagerFromConfig(cfg Config) (*Manager, error) {
 	if !cfg.Enabled {
 		return nil, nil
 	}
-	store, err := NewRedisStreamStore(cfg.RedisURL, cfg.StreamPrefix, cfg.StreamMaxEvents, cfg.StreamTTL, cfg.ReaderShards)
+	store, err := NewRedisStreamStore(cfg.RedisURL, cfg.StreamPrefix, cfg.StreamMaxEvents, cfg.StreamTTL, cfg.ReaderShards, cfg.StorePoolSize)
 	if err != nil {
 		return nil, err
 	}
@@ -412,7 +415,11 @@ func (s *webSocketSession) readClient() error {
 			_ = s.client.WriteJSON(Envelope{Type: "error", Reason: httpx.ErrDraining.Error()})
 			continue
 		}
-		streamID, err := s.manager.store.Append(s.ctx, s.sessionID, "client", message)
+		var streamID string
+		err = s.retryStore(s.ctx, "record a client command", func() (err error) {
+			streamID, err = s.manager.store.Append(s.ctx, s.sessionID, "client", message)
+			return err
+		})
 		if err != nil {
 			return err
 		}
@@ -437,7 +444,7 @@ func (s *webSocketSession) deliverStream() error {
 	}
 
 	for {
-		events, err := s.manager.store.ReadAfter(s.ctx, s.sessionID, s.cursor, s.manager.cfg.ReadBatch, -1)
+		events, err := s.readAfterCursor()
 		if err != nil {
 			return err
 		}
@@ -457,14 +464,18 @@ func (s *webSocketSession) deliverStream() error {
 
 	// Follow before the catch-up read, so an entry recorded between that read
 	// and the wait below still signals the follow.
-	follow, err := s.manager.store.Follow(s.ctx, s.sessionID, s.cursor)
+	var follow Follow
+	err := s.retryStore(s.ctx, "follow the transcript", func() (err error) {
+		follow, err = s.manager.store.Follow(s.ctx, s.sessionID, s.cursor)
+		return err
+	})
 	if err != nil {
 		return err
 	}
 	defer follow.Close()
 	for {
 		for {
-			events, err := s.manager.store.ReadAfter(s.ctx, s.sessionID, s.cursor, s.manager.cfg.ReadBatch, -1)
+			events, err := s.readAfterCursor()
 			if err != nil {
 				return err
 			}
@@ -481,6 +492,47 @@ func (s *webSocketSession) deliverStream() error {
 		case <-s.ctx.Done():
 			return s.ctx.Err()
 		}
+	}
+}
+
+func (s *webSocketSession) readAfterCursor() ([]StreamEvent, error) {
+	var events []StreamEvent
+	err := s.retryStore(s.ctx, "read the transcript", func() (err error) {
+		events, err = s.manager.store.ReadAfter(s.ctx, s.sessionID, s.cursor, s.manager.cfg.ReadBatch, -1)
+		return err
+	})
+	return events, err
+}
+
+// retryStore runs a transcript read or write until it succeeds, ctx ends,
+// or the store has kept failing for cfg.StoreRetry. On a busy instance a
+// Valkey call can time out waiting for a connection; ending the session on
+// the first one sent every session through the reconnect queue at once,
+// and commands recorded before it expired unanswered (#53). A retried write
+// may be recorded twice, which aqueduct.v1 allows: message IDs repeat, and
+// clients drop duplicates. Errors that retrying can't fix (an undecodable
+// entry, an invalid request) return at once.
+func (s *webSocketSession) retryStore(ctx context.Context, what string, op func() error) error {
+	deadline := time.Now().Add(s.manager.cfg.StoreRetry)
+	delay := storeRetryFirstDelay
+	for attempt := 1; ; attempt++ {
+		err := op()
+		if err == nil {
+			if attempt > 1 {
+				log.Printf("websocket session %s: %s succeeded after %d attempts", s.sessionID, what, attempt)
+			}
+			return nil
+		}
+		if ctx.Err() != nil || errors.Is(err, ErrWebSocketTranscriptInvalid) || errors.Is(err, ErrWebSocketProtocol) || time.Now().Add(delay).After(deadline) {
+			return err
+		}
+		if attempt == 1 {
+			log.Printf("websocket session %s: %s failed, retrying for up to %s: %v", s.sessionID, what, s.manager.cfg.StoreRetry, err)
+		}
+		if !retry.Sleep(ctx, retry.Jitter(delay)) {
+			return ctx.Err()
+		}
+		delay = min(delay*2, storeRetryMaxDelay)
 	}
 }
 
@@ -606,7 +658,10 @@ func (s *webSocketSession) relayUpstream(upstream *websocket.Conn, generation in
 				continue
 			}
 			message.Generation = generation
-			if _, err := s.manager.store.Append(relayCtx, s.sessionID, "backend", message); err != nil {
+			if err := s.retryStore(relayCtx, "record a backend message", func() error {
+				_, err := s.manager.store.Append(relayCtx, s.sessionID, "backend", message)
+				return err
+			}); err != nil {
 				errCh <- err
 				return
 			}

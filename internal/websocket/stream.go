@@ -57,7 +57,10 @@ type RedisStreamStore struct {
 // NewRedisStreamStore connects the transcript store. Live sessions
 // learn about new entries through readerShards shared pub/sub connections
 // (see streamFollower), so Valkey connections don't grow with sessions.
-func NewRedisStreamStore(rawURL, prefix string, maxEvents int64, ttl time.Duration, readerShards int) (*RedisStreamStore, error) {
+// poolSize > 0 sets the connection pool for appends and reads unless the URL
+// sets pool_size; go-redis's default (10 per CPU) is too few for a busy
+// one-CPU instance, where calls then time out waiting for a connection.
+func NewRedisStreamStore(rawURL, prefix string, maxEvents int64, ttl time.Duration, readerShards, poolSize int) (*RedisStreamStore, error) {
 	if rawURL == "" {
 		return nil, errors.New("AQUIFER_VALKEY_URL is required when WebSockets are enabled")
 	}
@@ -82,6 +85,9 @@ func NewRedisStreamStore(rawURL, prefix string, maxEvents int64, ttl time.Durati
 	// and in auto mode go-redis rewrites shared options when it fails, which
 	// races when the follower opens its dedicated connections concurrently.
 	opts.MaintNotificationsConfig = &maintnotifications.Config{Mode: maintnotifications.ModeDisabled}
+	if opts.PoolSize == 0 && poolSize > 0 {
+		opts.PoolSize = poolSize
+	}
 	client := redis.NewClient(opts)
 	return &RedisStreamStore{
 		client:    client,
@@ -260,11 +266,11 @@ func decodeWebSocketStreamEvent(raw redis.XMessage) (StreamEvent, error) {
 
 	generation, err := strconv.ParseInt(defaultString(value("generation"), "0"), 10, 64)
 	if err != nil {
-		return StreamEvent{}, fmt.Errorf("decode websocket event %s generation: %w", raw.ID, err)
+		return StreamEvent{}, fmt.Errorf("%w %s: generation: %w", ErrWebSocketTranscriptInvalid, raw.ID, err)
 	}
 	recordedAt, err := strconv.ParseInt(defaultString(value("recorded_at"), "0"), 10, 64)
 	if err != nil {
-		return StreamEvent{}, fmt.Errorf("decode websocket event %s recorded_at: %w", raw.ID, err)
+		return StreamEvent{}, fmt.Errorf("%w %s: recorded_at: %w", ErrWebSocketTranscriptInvalid, raw.ID, err)
 	}
 
 	event := StreamEvent{
@@ -280,7 +286,7 @@ func decodeWebSocketStreamEvent(raw redis.XMessage) (StreamEvent, error) {
 	}
 	if payload := value("payload"); payload != "" {
 		if !json.Valid([]byte(payload)) {
-			return StreamEvent{}, fmt.Errorf("decode websocket event %s payload: invalid json", raw.ID)
+			return StreamEvent{}, fmt.Errorf("%w %s: payload is not JSON", ErrWebSocketTranscriptInvalid, raw.ID)
 		}
 		event.Envelope.Payload = json.RawMessage(payload)
 	}

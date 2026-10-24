@@ -355,6 +355,77 @@ func TestWebSocketProxyReconnectsUpstreamAndKeepsClientConnected(t *testing.T) {
 	}
 }
 
+// A transcript store that fails for a moment, as Valkey calls do when a busy
+// instance runs out of connections, must not end the session or its backend
+// connection: commands recorded during it still get their answers (#53).
+func TestWebSocketSessionRidesOutAShortStoreOutage(t *testing.T) {
+	var connections atomic.Int32
+	commands := make(chan string, 4)
+	answer := make(chan struct{})
+	backendUpgrader := websocket.Upgrader{Subprotocols: []string{webSocketSubprotocol}, CheckOrigin: func(*http.Request) bool { return true }}
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := backendUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		connections.Add(1)
+		for {
+			var command Envelope
+			if err := conn.ReadJSON(&command); err != nil {
+				return
+			}
+			commands <- command.MessageID
+			<-answer
+			_ = conn.WriteJSON(Envelope{Type: "ack", MessageID: "ack-" + command.MessageID, CausedBy: command.MessageID})
+		}
+	}))
+	defer backend.Close()
+
+	store := newMemoryWebSocketStreamStore()
+	setAvailable := func(available bool) {
+		store.mu.Lock()
+		store.available = available
+		store.mu.Unlock()
+	}
+	cfg := testWebSocketConfig()
+	cfg.StoreRetry = 5 * time.Second
+	manager := NewManager(cfg, store)
+	server := serveManager(manager)
+	defer server.Close()
+	defer manager.Close()
+
+	headers := http.Header{webSocketUpstreamURLHeader: []string{toWebSocketURL(backend.URL)}}
+	client := dialAqueductWebSocket(t, server.URL+"/websocket?session_id=outage&after=0-0", headers)
+	defer client.Close()
+	readWebSocketUntil(t, client, func(m Envelope) bool { return m.Type == "status" && m.State == "connected" })
+
+	// The client's command arrives while the store is down.
+	setAvailable(false)
+	if err := client.WriteJSON(Envelope{Type: "command", MessageID: "c1", Payload: json.RawMessage(`{}`)}); err != nil {
+		t.Fatalf("write command: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	setAvailable(true)
+	readWebSocketUntil(t, client, func(m Envelope) bool { return m.Type == "command_recorded" && m.MessageID == "c1" })
+	select {
+	case <-commands:
+	case <-time.After(2 * time.Second):
+		t.Fatal("command never reached the backend")
+	}
+
+	// The backend's answer arrives while the store is down.
+	setAvailable(false)
+	close(answer)
+	time.Sleep(300 * time.Millisecond)
+	setAvailable(true)
+	readWebSocketUntil(t, client, func(m Envelope) bool { return m.Type == "ack" && m.CausedBy == "c1" })
+
+	if n := connections.Load(); n != 1 {
+		t.Fatalf("expected the backend connection to survive the outage, got %d connections", n)
+	}
+}
+
 func TestWebSocketDrainNotifiesClosesAndRejectsNewHandshakes(t *testing.T) {
 	backendUpgrader := websocket.Upgrader{Subprotocols: []string{webSocketSubprotocol}, CheckOrigin: func(*http.Request) bool { return true }}
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -640,4 +711,17 @@ func waitUntil(timeout time.Duration, condition func() bool) bool {
 		time.Sleep(10 * time.Millisecond)
 	}
 	return condition()
+}
+
+func TestWebSocketStoreRetryStopsAtErrorsRetryingCantFix(t *testing.T) {
+	s := &webSocketSession{manager: &Manager{cfg: Config{StoreRetry: 5 * time.Second}}, sessionID: "permanent"}
+	calls := 0
+	started := time.Now()
+	err := s.retryStore(context.Background(), "read the transcript", func() error {
+		calls++
+		return fmt.Errorf("%w 1-0: payload is not JSON", ErrWebSocketTranscriptInvalid)
+	})
+	if !errors.Is(err, ErrWebSocketTranscriptInvalid) || calls != 1 || time.Since(started) > time.Second {
+		t.Fatalf("expected one attempt returning the decode error, got calls=%d err=%v after %s", calls, err, time.Since(started))
+	}
 }

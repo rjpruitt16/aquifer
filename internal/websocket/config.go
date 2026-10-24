@@ -24,6 +24,8 @@ const (
 	defaultWebSocketHandshakeTimeout = 10 * time.Second
 	defaultWebSocketReconnectMax     = 30 * time.Second
 	defaultWebSocketStreamTTL        = 24 * time.Hour
+	defaultWebSocketStorePoolSize    = 64
+	defaultWebSocketStoreRetry       = 30 * time.Second
 )
 
 type Config struct {
@@ -38,7 +40,12 @@ type Config struct {
 	MaxMessageBytes  int64
 	HandshakeTimeout time.Duration
 	ReconnectMax     time.Duration
-	Scheduler        SchedulerConfig
+	// StorePoolSize is the transcript store's Valkey connection pool.
+	StorePoolSize int
+	// StoreRetry is how long a live session retries a failed transcript
+	// read or write before giving up on the session (0: no retry).
+	StoreRetry time.Duration
+	Scheduler  SchedulerConfig
 }
 
 func LoadConfig() Config {
@@ -54,6 +61,8 @@ func LoadConfig() Config {
 		MaxMessageBytes:  positiveEnvInt64("AQUIFER_WS_MAX_MESSAGE_BYTES", defaultWebSocketMaxMessageBytes),
 		HandshakeTimeout: time.Duration(positiveEnvInt64("AQUIFER_WS_HANDSHAKE_TIMEOUT_SECONDS", int64(defaultWebSocketHandshakeTimeout/time.Second))) * time.Second,
 		ReconnectMax:     time.Duration(positiveEnvInt64("AQUIFER_WS_RECONNECT_MAX_SECONDS", int64(defaultWebSocketReconnectMax/time.Second))) * time.Second,
+		StorePoolSize:    int(positiveEnvInt64("AQUIFER_WS_VALKEY_POOL_SIZE", defaultWebSocketStorePoolSize)),
+		StoreRetry:       time.Duration(positiveEnvInt64("AQUIFER_WS_STORE_RETRY_SECONDS", int64(defaultWebSocketStoreRetry/time.Second))) * time.Second,
 		Scheduler: SchedulerConfig{
 			MaxClients:   int(positiveEnvInt64("AQUIFER_WS_MAX_CLIENT_CONNECTIONS", defaultWebSocketMaxClients)),
 			MaxUpstreams: int(positiveEnvInt64("AQUIFER_WS_MAX_UPSTREAM_CONNECTIONS", defaultWebSocketMaxUpstreams)),
