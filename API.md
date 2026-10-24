@@ -394,6 +394,8 @@ Opening starts at `AQUIFER_WS_SLOW_START_RPS` for each Aquifer process. Every su
 | `AQUIFER_WS_MAX_MESSAGE_BYTES` | `1048576` | Maximum client or backend message size |
 | `AQUIFER_WS_HANDSHAKE_TIMEOUT_SECONDS` | `10` | Valkey check and target API handshake timeout |
 | `AQUIFER_WS_RECONNECT_MAX_SECONDS` | `30` | Maximum reconnect backoff before jitter |
+| `AQUIFER_WS_VALKEY_POOL_SIZE` | `64` | Valkey connections for transcript reads and writes (a `pool_size` in `AQUIFER_VALKEY_URL` wins) |
+| `AQUIFER_WS_STORE_RETRY_SECONDS` | `30` | How long a live session retries a failed transcript read or write before closing |
 | `AQUIFER_WS_MAX_CLIENT_CONNECTIONS` | `1000` | Client socket ceiling for this Aquifer instance |
 | `AQUIFER_WS_MAX_UPSTREAM_CONNECTIONS` | `1000` | Active backend socket ceiling for this instance |
 | `AQUIFER_WS_MAX_WAITING_CONNECTIONS` | `1000` | Local queue ceiling for sessions waiting on a target API slot |

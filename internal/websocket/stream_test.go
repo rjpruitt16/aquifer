@@ -90,7 +90,7 @@ func TestSharedFollowerSignalsManySessions(t *testing.T) {
 	}
 	sessions := 10*runtime.GOMAXPROCS(0) + 500
 	prefix := fmt.Sprintf("aqueduct:test:follow:%d:", time.Now().UnixNano())
-	store, err := NewRedisStreamStore(rawURL, prefix, 100, time.Minute, 4)
+	store, err := NewRedisStreamStore(rawURL, prefix, 100, time.Minute, 4, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

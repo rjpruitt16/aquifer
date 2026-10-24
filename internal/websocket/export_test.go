@@ -90,7 +90,7 @@ func exportTestStore(t *testing.T) *RedisStreamStore {
 		t.Skip("set AQUIFER_TEST_VALKEY_URL to run the real Valkey integration test")
 	}
 	prefix := fmt.Sprintf("aquifer-test:%d:", time.Now().UnixNano())
-	store, err := NewRedisStreamStore(rawURL, prefix, 100, time.Minute, 1)
+	store, err := NewRedisStreamStore(rawURL, prefix, 100, time.Minute, 1, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
