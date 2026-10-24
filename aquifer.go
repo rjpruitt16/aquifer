@@ -220,9 +220,15 @@ func (a *Aquifer) prepareJob(req JobRequest) (job *Job, duplicate *EnqueueResult
 	// it was rejected and deleted.
 	release = a.newKeys.claim(job.IdempotencyHash())
 	// The caller can't defer release until this returns; a panic before
-	// then would hold the key forever and block every retry for it.
+	// then would hold the key forever and block every retry for it. A job
+	// already inserted is deleted first, so a retry doesn't find a row
+	// that will never be dispatched.
+	inserted := false
 	defer func() {
 		if r := recover(); r != nil {
+			if inserted {
+				a.store.DeleteJob(job.ID)
+			}
 			release()
 			panic(r)
 		}
@@ -232,6 +238,7 @@ func (a *Aquifer) prepareJob(req JobRequest) (job *Job, duplicate *EnqueueResult
 	// still succeed even while the system is over an admission limit.
 	insertStarted := time.Now()
 	existingID, isDuplicate := a.store.CheckOrInsert(job)
+	inserted = !isDuplicate
 	a.inbound.Observe(req.UserID, time.Since(insertStarted), !isDuplicate)
 	if !isDuplicate && a.afterInsert != nil {
 		a.afterInsert()

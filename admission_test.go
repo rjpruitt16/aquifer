@@ -247,13 +247,17 @@ func TestRetryDuringARejectedInsertIsNotGivenTheDeletedJob(t *testing.T) {
 }
 
 func TestAPanicAfterClaimingAKeyReleasesIt(t *testing.T) {
-	app, _ := testAquiferWithLimits(t, AdmissionLimits{})
+	app, store := testAquiferWithLimits(t, AdmissionLimits{})
+	before := store.Counts().TotalJobs
 	app.afterInsert = func() { panic("boom") }
 	func() {
 		defer func() { _ = recover() }()
 		_, _ = app.Enqueue(sampleJobRequest("user-1", "key-panic"))
 	}()
 	app.afterInsert = nil
+	if after := store.Counts().TotalJobs; after != before {
+		t.Fatalf("the panicked job's row was left behind: before=%d after=%d", before, after)
+	}
 
 	done := make(chan struct{})
 	go func() {
