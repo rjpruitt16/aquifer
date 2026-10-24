@@ -5,6 +5,7 @@ package aquifer
 
 import (
 	"errors"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -60,6 +61,12 @@ type Aquifer struct {
 	webSockets        *WebSocketManager
 	draining          atomic.Bool
 	inbound           *InboundRateController
+	// newKeys holds an idempotency key from its job's insert until the job
+	// is queued or deleted (see claimNewKey).
+	newKeys keyClaims
+	// afterInsert, when set, runs right after a new job's row is inserted.
+	// Tests use it to hold a job between insert and admission.
+	afterInsert func()
 }
 
 func NewAquifer(store JobStore, registry *Registry, broker *Broker, l8 *L8Registry, admission *AdmissionController, pools *PoolRegistry) *Aquifer {
@@ -159,7 +166,8 @@ func (a *Aquifer) RegisterPoolMember(poolID, memberID, address string, declaredR
 }
 
 func (a *Aquifer) Enqueue(req JobRequest) (EnqueueResult, error) {
-	job, duplicate, err := a.PrepareJob(req)
+	job, duplicate, release, err := a.prepareJob(req)
+	defer release()
 	if err != nil {
 		return EnqueueResult{}, err
 	}
@@ -181,26 +189,66 @@ func (a *Aquifer) Enqueue(req JobRequest) (EnqueueResult, error) {
 // duplicate result if this idempotent_key already exists; job is nil in
 // that case. Behavior is otherwise identical to Enqueue's first half.
 func (a *Aquifer) PrepareJob(req JobRequest) (job *Job, duplicate *EnqueueResult, err error) {
+	job, duplicate, release, err := a.prepareJob(req)
+	release()
+	return job, duplicate, err
+}
+
+// prepareJob is PrepareJob holding the job's idempotency key until the
+// caller runs release, which it must always do. Enqueue holds it through
+// Dispatch, whose rejection deletes the job too.
+//
+// Without the hold, a retry with the same key arriving between the insert
+// and a rejection's DeleteJob was answered as a duplicate with the ID of a
+// job about to be deleted: the caller had a job ID that 404s and never
+// finishes. Canalis retries a hand-off that ran past its timeout, so under
+// load (rejections for WAL sync lag or a full upstream queue) this lost
+// accepted jobs in the Canalis soak.
+func (a *Aquifer) prepareJob(req JobRequest) (job *Job, duplicate *EnqueueResult, release func(), err error) {
+	release = func() {}
 	if a.IsDraining() {
-		return nil, nil, ErrAquiferDraining
+		return nil, nil, release, ErrAquiferDraining
 	}
 	if msg := req.Validate(); msg != "" {
-		return nil, nil, errors.New(msg)
+		return nil, nil, release, errors.New(msg)
 	}
 
 	job = NewJob(&req)
+
+	// A retry waits here while an earlier request for the same key is still
+	// deciding, then sees its outcome: the job if it was queued, nothing if
+	// it was rejected and deleted.
+	release = a.newKeys.claim(job.IdempotencyHash())
+	// The caller can't defer release until this returns; a panic before
+	// then would hold the key forever and block every retry for it. A job
+	// already inserted is deleted first, so a retry doesn't find a row
+	// that will never be dispatched.
+	inserted := false
+	defer func() {
+		if r := recover(); r != nil {
+			if inserted {
+				a.store.DeleteJob(job.ID)
+			}
+			release()
+			panic(r)
+		}
+	}()
 
 	// Idempotency check comes first: a retried job that already exists must
 	// still succeed even while the system is over an admission limit.
 	insertStarted := time.Now()
 	existingID, isDuplicate := a.store.CheckOrInsert(job)
+	inserted = !isDuplicate
 	a.inbound.Observe(req.UserID, time.Since(insertStarted), !isDuplicate)
+	if !isDuplicate && a.afterInsert != nil {
+		a.afterInsert()
+	}
 	if isDuplicate {
 		return nil, &EnqueueResult{
 			JobID:     existingID,
 			Status:    StatusQueued,
 			Duplicate: true,
-		}, nil
+		}, release, nil
 	}
 
 	if a.remote != nil {
@@ -212,7 +260,7 @@ func (a *Aquifer) PrepareJob(req JobRequest) (job *Job, duplicate *EnqueueResult
 				Status:    entry.Status,
 				Duplicate: true,
 				ResultKey: entry.ResultKey,
-			}, nil
+			}, release, nil
 		}
 	}
 
@@ -222,17 +270,17 @@ func (a *Aquifer) PrepareJob(req JobRequest) (job *Job, duplicate *EnqueueResult
 	if job.URL != "" {
 		if err := a.l8.ValidateRequestBody(job.URL, job.Method, job.Body); err != nil {
 			a.store.DeleteJob(job.ID)
-			return nil, nil, err
+			return nil, nil, release, err
 		}
 	}
 	if a.admission != nil {
 		if decision := a.admission.Check(); !decision.Allowed {
 			a.store.DeleteJob(job.ID)
-			return nil, nil, &AdmissionRejectedError{Decision: decision}
+			return nil, nil, release, &AdmissionRejectedError{Decision: decision}
 		}
 	}
 
-	return job, nil, nil
+	return job, nil, release, nil
 }
 
 // Dispatch hands an already-persisted, admission-approved job to the
@@ -372,4 +420,37 @@ func (a *Aquifer) ConfirmDelivered(jobID string) {
 // pacing is disabled.
 func (a *Aquifer) InboundRPS(userID string) float64 {
 	return a.inbound.AdvertisedRPS(userID)
+}
+
+// keyClaims is a lock per key, held by at most one caller at a time.
+type keyClaims struct {
+	mu   sync.Mutex
+	held map[string]chan struct{}
+}
+
+// claim waits until key is free, takes it, and returns its release.
+func (k *keyClaims) claim(key string) func() {
+	for {
+		k.mu.Lock()
+		done, busy := k.held[key]
+		if !busy {
+			if k.held == nil {
+				k.held = make(map[string]chan struct{})
+			}
+			done = make(chan struct{})
+			k.held[key] = done
+			k.mu.Unlock()
+			var once sync.Once
+			return func() {
+				once.Do(func() {
+					k.mu.Lock()
+					delete(k.held, key)
+					k.mu.Unlock()
+					close(done)
+				})
+			}
+		}
+		k.mu.Unlock()
+		<-done
+	}
 }
