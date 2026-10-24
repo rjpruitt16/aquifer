@@ -712,3 +712,16 @@ func waitUntil(timeout time.Duration, condition func() bool) bool {
 	}
 	return condition()
 }
+
+func TestWebSocketStoreRetryStopsAtErrorsRetryingCantFix(t *testing.T) {
+	s := &webSocketSession{manager: &Manager{cfg: Config{StoreRetry: 5 * time.Second}}, sessionID: "permanent"}
+	calls := 0
+	started := time.Now()
+	err := s.retryStore(context.Background(), "read the transcript", func() error {
+		calls++
+		return fmt.Errorf("%w 1-0: payload is not JSON", ErrWebSocketTranscriptInvalid)
+	})
+	if !errors.Is(err, ErrWebSocketTranscriptInvalid) || calls != 1 || time.Since(started) > time.Second {
+		t.Fatalf("expected one attempt returning the decode error, got calls=%d err=%v after %s", calls, err, time.Since(started))
+	}
+}

@@ -510,7 +510,8 @@ func (s *webSocketSession) readAfterCursor() ([]StreamEvent, error) {
 // the first one sent every session through the reconnect queue at once,
 // and commands recorded before it expired unanswered (#53). A retried write
 // may be recorded twice, which aqueduct.v1 allows: message IDs repeat, and
-// clients drop duplicates.
+// clients drop duplicates. Errors that retrying can't fix (an undecodable
+// entry, an invalid request) return at once.
 func (s *webSocketSession) retryStore(ctx context.Context, what string, op func() error) error {
 	deadline := time.Now().Add(s.manager.cfg.StoreRetry)
 	delay := storeRetryFirstDelay
@@ -522,7 +523,7 @@ func (s *webSocketSession) retryStore(ctx context.Context, what string, op func(
 			}
 			return nil
 		}
-		if ctx.Err() != nil || time.Now().Add(delay).After(deadline) {
+		if ctx.Err() != nil || errors.Is(err, ErrWebSocketTranscriptInvalid) || errors.Is(err, ErrWebSocketProtocol) || time.Now().Add(delay).After(deadline) {
 			return err
 		}
 		if attempt == 1 {

@@ -17,6 +17,9 @@ const (
 var (
 	ErrWebSocketProtocol  = errors.New("invalid aqueduct websocket message")
 	ErrWebSocketReplayGap = errors.New("websocket replay cursor is older than retained history")
+	// ErrWebSocketTranscriptInvalid marks a transcript entry that can't be
+	// decoded; reading it again won't help.
+	ErrWebSocketTranscriptInvalid = errors.New("invalid websocket transcript entry")
 )
 
 // Envelope is the application and control protocol shared by the

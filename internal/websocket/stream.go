@@ -266,11 +266,11 @@ func decodeWebSocketStreamEvent(raw redis.XMessage) (StreamEvent, error) {
 
 	generation, err := strconv.ParseInt(defaultString(value("generation"), "0"), 10, 64)
 	if err != nil {
-		return StreamEvent{}, fmt.Errorf("decode websocket event %s generation: %w", raw.ID, err)
+		return StreamEvent{}, fmt.Errorf("%w %s: generation: %w", ErrWebSocketTranscriptInvalid, raw.ID, err)
 	}
 	recordedAt, err := strconv.ParseInt(defaultString(value("recorded_at"), "0"), 10, 64)
 	if err != nil {
-		return StreamEvent{}, fmt.Errorf("decode websocket event %s recorded_at: %w", raw.ID, err)
+		return StreamEvent{}, fmt.Errorf("%w %s: recorded_at: %w", ErrWebSocketTranscriptInvalid, raw.ID, err)
 	}
 
 	event := StreamEvent{
@@ -286,7 +286,7 @@ func decodeWebSocketStreamEvent(raw redis.XMessage) (StreamEvent, error) {
 	}
 	if payload := value("payload"); payload != "" {
 		if !json.Valid([]byte(payload)) {
-			return StreamEvent{}, fmt.Errorf("decode websocket event %s payload: invalid json", raw.ID)
+			return StreamEvent{}, fmt.Errorf("%w %s: payload is not JSON", ErrWebSocketTranscriptInvalid, raw.ID)
 		}
 		event.Envelope.Payload = json.RawMessage(payload)
 	}
