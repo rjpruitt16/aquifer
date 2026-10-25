@@ -18,6 +18,11 @@ const (
 // admission starts turning work away.
 const FairStart = 0.70
 
+// FairCeiling is how far past its budget a target API's backlog may grow
+// while queues at or below their fair share keep entering. Past it, every
+// request is refused.
+const FairCeiling = 1.25
+
 // QueueSnapshot is the per-target-API state used for fair admission and
 // returned to callers as response headers. Counts include the request being
 // evaluated, so an accepted response describes the queue after admission.
@@ -65,8 +70,15 @@ func DecideFair(queuePending, totalPending int64, activeQueues int, maxBacklog i
 	if maxBacklog <= 0 {
 		return FairDecision{Allowed: true, Snapshot: snapshot}
 	}
+	fairShare := float64(maxBacklog) / float64(activeQueues)
 	if projectedTotal > maxBacklog {
+		// Past the budget only queues above their fair share are refused, so
+		// one large queue filling the budget doesn't lock out small ones.
+		underShare := activeQueues > 1 && float64(projectedQueue) <= fairShare
 		snapshot.AdmissionPressure = 1
+		if underShare && float64(projectedTotal) <= FairCeiling*float64(maxBacklog) {
+			return FairDecision{Allowed: true, Snapshot: snapshot}
+		}
 		snapshot.RejectionProbability = 1
 		return FairDecision{Allowed: false, Reason: "upstream_queue", Snapshot: snapshot}
 	}
@@ -76,8 +88,9 @@ func DecideFair(queuePending, totalPending int64, activeQueues int, maxBacklog i
 
 	start := FairStart * float64(maxBacklog)
 	pressure := Clamp((float64(projectedTotal)-start)/(float64(maxBacklog)-start), 0, 1)
-	fairShare := float64(maxBacklog) / float64(activeQueues)
-	excess := Clamp((float64(projectedQueue)-fairShare)/(float64(maxBacklog)-fairShare), 0, 1)
+	// A queue at twice its fair share or more is fully in excess, so at full
+	// pressure it is refused every time, before the budget fills.
+	excess := Clamp((float64(projectedQueue)-fairShare)/fairShare, 0, 1)
 	probability := pressure * excess
 
 	snapshot.AdmissionPressure = pressure
