@@ -55,3 +55,32 @@ func TestFairAdmissionBecomesLessAggressiveAsCompetitorsLeave(t *testing.T) {
 			withOneCompetitor.Snapshot.RejectionProbability)
 	}
 }
+
+func TestFairAdmissionAdmitsUnderShareQueuePastBudget(t *testing.T) {
+	// One queue filled the budget; a small queue still enters.
+	decision := DecideFair(5, 10_200, 7, 10_000, 0.99)
+	if !decision.Allowed {
+		t.Fatalf("queue under its fair share should enter past the budget: %+v", decision)
+	}
+
+	large := DecideFair(10_000, 10_200, 7, 10_000, 0)
+	if large.Allowed || large.Reason != "upstream_queue" {
+		t.Fatalf("queue above its fair share should be refused past the budget: %+v", large)
+	}
+}
+
+func TestFairAdmissionCeilingRefusesEveryQueue(t *testing.T) {
+	decision := DecideFair(5, 12_500, 7, 10_000, 0.99)
+	if decision.Allowed || decision.Reason != "upstream_queue" {
+		t.Fatalf("request past the ceiling should be refused: %+v", decision)
+	}
+}
+
+func TestFairAdmissionFullyRefusesQueueAtTwiceItsShare(t *testing.T) {
+	// Seven queues share 10,000: F is about 1,429. At full pressure, a queue
+	// at 2F or more is refused with certainty before the budget fills.
+	decision := DecideFair(9_000, 9_999, 7, 10_000, 0.99)
+	if decision.Allowed || decision.Snapshot.RejectionProbability != 1 {
+		t.Fatalf("queue far above its share should be refused at full pressure: %+v", decision)
+	}
+}
