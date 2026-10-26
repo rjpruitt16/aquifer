@@ -95,7 +95,10 @@ func TestFairAdmissionKeepsSmallTenantsInWhenOneFillsTheBudget(t *testing.T) {
 		if rec.Code != http.StatusTooManyRequests {
 			t.Fatalf("small-%d: unexpected %d: %s", i, rec.Code, rec.Body.String())
 		}
-		backlog, _ := strconv.Atoi(rec.Header().Get("X-Aqueduct-Upstream-Backlog"))
+		backlog, err := strconv.Atoi(rec.Header().Get("X-Aqueduct-Upstream-Backlog"))
+		if err != nil {
+			t.Fatalf("small-%d: refusal without a valid X-Aqueduct-Upstream-Backlog: %v", i, err)
+		}
 		if backlog > 13 {
 			t.Fatalf("refused only at backlog %d; the ceiling should stop it at 13", backlog)
 		}
