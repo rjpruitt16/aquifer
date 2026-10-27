@@ -125,6 +125,11 @@ func (a *Aquifer) AttemptDirect(ctx context.Context, req JobRequest, timeout tim
 	if worker.QueueActive() {
 		return a.fallbackOutcome(ctx, req, job, "domain_degraded", 0, timeout, false)
 	}
+	// A direct attempt counts toward the destination's advertised in-flight
+	// total like a queued dispatch; at the total, the job is queued instead.
+	if !worker.TryDirect() {
+		return a.fallbackOutcome(ctx, req, job, "destination_busy", 0, timeout, false)
+	}
 
 	attemptCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -132,6 +137,7 @@ func (a *Aquifer) AttemptDirect(ctx context.Context, req JobRequest, timeout tim
 	counts := a.store.Counts()
 	queues := worker.Snapshot()
 	resp, attemptErr := dispatch.MakeRequest(attemptCtx, job, job.URL, counts.TotalJobs, counts.QueueDepth, 0, queues.ActiveQueues, queues.UpstreamBacklog, a.l8)
+	worker.DirectDone(resp)
 	if attemptErr != nil {
 		return a.fallbackOutcome(ctx, req, job, "upstream_unreachable", 0, timeout, true)
 	}
