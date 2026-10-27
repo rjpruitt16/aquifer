@@ -5,6 +5,7 @@ package main
 
 import (
 	"encoding/gob"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -58,6 +59,8 @@ type lostJob struct {
 	JobID      string `json:"job_id"`
 	AcceptedAt string `json:"accepted_at"`
 	Kind       string `json:"kind"`
+	Node       string `json:"node,omitempty"`
+	LostAt     string `json:"lost_at,omitempty"`
 }
 
 // Counters is the ledger's running totals, reported on /status.
@@ -106,6 +109,9 @@ type ledger struct {
 	s    ledgerState
 	path string
 	seqF string
+	// lostF gets one JSON line per lost job, so every one can be traced
+	// afterwards; the state keeps only the last 200 of them.
+	lostF string
 
 	failedIsTerminal bool // storm -no-webhook, see resolve
 }
@@ -113,7 +119,8 @@ type ledger struct {
 const seqBlock = 100_000
 
 func openLedger(dir string) *ledger {
-	l := &ledger{path: filepath.Join(dir, "ledger.gob"), seqF: filepath.Join(dir, "seq.reserved")}
+	l := &ledger{path: filepath.Join(dir, "ledger.gob"), seqF: filepath.Join(dir, "seq.reserved"),
+		lostF: filepath.Join(dir, "lost.jsonl")}
 	l.s.Outstanding = map[uint64]*pending{}
 	if f, err := os.Open(l.path); err == nil {
 		if err := gob.NewDecoder(f).Decode(&l.s); err != nil {
@@ -321,8 +328,11 @@ func (l *ledger) resolve(seq uint64, status string, now time.Time) (closed strin
 		delete(l.s.Outstanding, seq)
 		l.s.Closed.set(seq)
 		if kind != "" {
-			l.s.Lost = append(l.s.Lost, lostJob{Seq: seq, JobID: p.JobID,
-				AcceptedAt: time.UnixMilli(p.AcceptedAt).UTC().Format(time.RFC3339Nano), Kind: kind})
+			j := lostJob{Seq: seq, JobID: p.JobID,
+				AcceptedAt: time.UnixMilli(p.AcceptedAt).UTC().Format(time.RFC3339Nano), Kind: kind,
+				Node: p.Node, LostAt: now.UTC().Format(time.RFC3339Nano)}
+			l.s.Lost = append(l.s.Lost, j)
+			l.recordLost(j)
 			if len(l.s.Lost) > 200 {
 				l.s.Lost = l.s.Lost[len(l.s.Lost)-200:]
 			}
@@ -371,6 +381,21 @@ func (l *ledger) resolve(seq uint64, status string, now time.Time) (closed strin
 		}
 	}
 	return ""
+}
+
+// recordLost appends j to lost.jsonl. Lost jobs are rare, so opening the
+// file each time is fine.
+func (l *ledger) recordLost(j lostJob) {
+	line, _ := json.Marshal(j)
+	f, err := os.OpenFile(l.lostF, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		logf("ledger: could not record lost job %d: %v", j.Seq, err)
+		return
+	}
+	defer f.Close()
+	if _, err := f.Write(append(line, '\n')); err != nil {
+		logf("ledger: could not record lost job %d: %v", j.Seq, err)
+	}
 }
 
 func (l *ledger) acceptedJustBeforeRestart(acceptedAt int64) bool {

@@ -511,11 +511,23 @@ func (o *observer) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /status/minutes", o.handleMinutes)
 	mux.HandleFunc("GET /status/daily", o.handleDaily)
 	mux.HandleFunc("GET /events", o.handleEvents)
+	mux.HandleFunc("GET /lost", o.handleLost)
 	mux.HandleFunc("GET /logs", o.handleLogs)
 	mux.HandleFunc("POST /control/{action}", o.handleControl)
 	mux.HandleFunc("GET /reports", o.d.reports.handleList)
 	mux.HandleFunc("POST /reports", o.d.reports.handlePost)
 	mux.HandleFunc("GET /{$}", o.handleIndex)
+}
+
+// handleLost serves every lost job as JSON lines, not just recent_lost.
+func (o *observer) handleLost(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	f, err := os.Open(o.d.ledger.lostF)
+	if err != nil {
+		return // none lost yet
+	}
+	defer f.Close()
+	io.Copy(w, f)
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

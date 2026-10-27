@@ -22,7 +22,7 @@ Fetch with curl. Never send anything to these pages except your one report.
 
 How to judge it:
 
-1. Lost jobs are the most important number. `ledger.counters.lost` counts accepted jobs that disappeared without finishing. It should be 0. Any increase since your last report is a problem. Investigate it: look up `ledger.recent_lost`, check whether the jobs were accepted near a kill or restart in `/events`, and grep the logs around those times and for their job IDs.
+1. Lost jobs are the most important number. `ledger.counters.lost` counts accepted jobs that disappeared without finishing. It should be 0. Any increase since your last report is a problem. Investigate it: look up `ledger.recent_lost` (the last 20; `GET /lost` lists every lost job with the node that accepted it), check whether the jobs were accepted near a kill or restart in `/events`, and grep the logs around those times and for their job IDs.
 2. Some outcomes are expected, and you should not alarm on them:
    - `lost_within_flush_window_of_kill`: {{FLUSH}}
    - `finished_without_webhook`: rises when the webhook receiver's "down" mode outlasts webhook retries;
