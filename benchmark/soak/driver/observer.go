@@ -519,17 +519,28 @@ func (o *observer) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /{$}", o.handleIndex)
 }
 
+// lostReaders lets one GET /lost run at a time.
+var lostReaders = make(chan struct{}, 1)
+
 // handleLost serves every lost job as JSON lines, not just recent_lost.
+// The page is public, so it streams the file (memory stays flat however
+// long it grows), under a write deadline, one reader at a time.
 func (o *observer) handleLost(w http.ResponseWriter, r *http.Request) {
-	// Read it whole and bound the write: the page is public, and a slow
-	// reader shouldn't hold the file or the handler open.
-	raw, err := os.ReadFile(o.d.ledger.lostF)
-	if err != nil {
-		raw = nil // none lost yet
+	select {
+	case lostReaders <- struct{}{}:
+		defer func() { <-lostReaders }()
+	default:
+		http.Error(w, "busy; try again", http.StatusServiceUnavailable)
+		return
 	}
 	http.NewResponseController(w).SetWriteDeadline(time.Now().Add(30 * time.Second))
 	w.Header().Set("Content-Type", "application/x-ndjson")
-	w.Write(raw)
+	f, err := os.Open(o.d.ledger.lostF)
+	if err != nil {
+		return // none lost yet
+	}
+	defer f.Close()
+	io.Copy(w, f)
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
