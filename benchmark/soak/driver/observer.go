@@ -521,13 +521,15 @@ func (o *observer) routes(mux *http.ServeMux) {
 
 // handleLost serves every lost job as JSON lines, not just recent_lost.
 func (o *observer) handleLost(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/x-ndjson")
-	f, err := os.Open(o.d.ledger.lostF)
+	// Read it whole and bound the write: the page is public, and a slow
+	// reader shouldn't hold the file or the handler open.
+	raw, err := os.ReadFile(o.d.ledger.lostF)
 	if err != nil {
-		return // none lost yet
+		raw = nil // none lost yet
 	}
-	defer f.Close()
-	io.Copy(w, f)
+	http.NewResponseController(w).SetWriteDeadline(time.Now().Add(30 * time.Second))
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Write(raw)
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

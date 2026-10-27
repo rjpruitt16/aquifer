@@ -6,6 +6,8 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -62,5 +64,19 @@ func TestEveryLostJobIsWrittenDown(t *testing.T) {
 	}
 	if first.JobID != "j1" || first.Node != "b" || first.Kind != "lost" || first.LostAt == "" {
 		t.Fatalf("first line: %+v", first)
+	}
+}
+
+// Without a cluster, the job's node is the one target, so /lost still says
+// where each lost job went.
+func TestADirectPostNamesItsTarget(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(`{"job_id":"j1"}`))
+	}))
+	defer srv.Close()
+	d := &driver{client: srv.Client(), cfg: config{Target: srv.URL}}
+	if _, owner, _, err := d.post(`{}`); err != nil || owner != srv.URL {
+		t.Fatalf("owner %q, err %v; want %q", owner, err, srv.URL)
 	}
 }
