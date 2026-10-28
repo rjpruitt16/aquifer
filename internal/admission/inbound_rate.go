@@ -60,6 +60,7 @@ type InboundRateController struct {
 	// kill then loses everything since the last sync. This is the signal
 	// for that.
 	syncLag      func() time.Duration
+	syncLagLimit time.Duration
 	prevBacklog  int64
 	backlogGrows int
 	inserts      int
@@ -110,7 +111,9 @@ const (
 	// The disk is behind once acknowledged inserts have gone this long
 	// unsynced: several of the default 100ms flushes missed. Admission
 	// refuses new jobs at AQUIFER_MAX_SYNC_LAG_MS (1s); slowing callers
-	// first keeps the lag from getting there.
+	// first keeps the lag from getting there. A longer flush interval
+	// raises it to two intervals, so a healthy disk between syncs isn't
+	// mistaken for one falling behind.
 	inboundSyncLagLimit = 500 * time.Millisecond
 )
 
@@ -156,12 +159,14 @@ func (c *InboundRateController) SetBacklogSource(backlog func() int64) {
 }
 
 // SetSyncLagSource wires in the store's sync lag (see syncLag).
-func (c *InboundRateController) SetSyncLagSource(syncLag func() time.Duration) {
+// flushInterval is how often the store syncs on its own.
+func (c *InboundRateController) SetSyncLagSource(syncLag func() time.Duration, flushInterval time.Duration) {
 	if c == nil {
 		return
 	}
 	c.mu.Lock()
 	c.syncLag = syncLag
+	c.syncLagLimit = max(inboundSyncLagLimit, 2*flushInterval)
 	c.mu.Unlock()
 }
 
@@ -271,7 +276,7 @@ func (c *InboundRateController) tick(now time.Time) {
 	if c.syncLag != nil {
 		syncLag = c.syncLag()
 	}
-	diskBehind := syncLag > inboundSyncLagLimit
+	diskBehind := c.syncLag != nil && syncLag > c.syncLagLimit
 
 	healthy := latencyHealthy && !backlogOverloaded && !diskBehind
 	cutReason := "cut: insert latency"

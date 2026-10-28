@@ -140,6 +140,7 @@ func TestARejectedWebhookIsNotDelivered(t *testing.T) {
 // the disk is behind and how long the last sync took: the window a crash
 // loses acknowledged jobs from.
 func TestMetricsShowTheDisksSyncLag(t *testing.T) {
+	t.Setenv("AQUIFER_PEBBLE_FLUSH_INTERVAL_MS", "100")
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "aquifer.db")
 	store := NewPebbleStore(dbPath)
@@ -150,7 +151,9 @@ func TestMetricsShowTheDisksSyncLag(t *testing.T) {
 	t.Cleanup(app.Close)
 	srv := NewServer(app).Routes()
 
-	time.Sleep(250 * time.Millisecond) // a couple of 100ms flushes
+	for deadline := time.Now().Add(5 * time.Second); store.LastSyncDuration() <= 0 && time.Now().Before(deadline); {
+		time.Sleep(20 * time.Millisecond) // wait for a background flush
+	}
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	out := rec.Body.String()

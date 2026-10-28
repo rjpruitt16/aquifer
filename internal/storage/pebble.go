@@ -209,6 +209,10 @@ func (s *Pebble) syncWAL() {
 // LastSyncDuration is how long the newest completed WAL sync took. A slow
 // one is what lets SyncLag grow: writes acknowledged while it runs wait
 // for the next. Zero when every write waits for its own sync.
+// FlushInterval is how often the WAL is synced in the background, 0 when
+// every write waits for its own sync.
+func (s *Pebble) FlushInterval() time.Duration { return s.flushInterval }
+
 func (s *Pebble) LastSyncDuration() time.Duration {
 	return time.Duration(s.lastSyncTook.Load())
 }

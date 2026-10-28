@@ -136,7 +136,7 @@ func TestInboundRateSteadyBacklogAllowsRaises(t *testing.T) {
 func TestInboundRateCutsWhenTheDiskFallsBehind(t *testing.T) {
 	c := newInboundRateController(400, 40)
 	lag := 100 * time.Millisecond
-	c.SetSyncLagSource(func() time.Duration { return lag })
+	c.SetSyncLagSource(func() time.Duration { return lag }, 100*time.Millisecond)
 	feed(c, 160, time.Millisecond)
 	before := c.Snapshot().AdvertisedRPS
 
@@ -153,5 +153,21 @@ func TestInboundRateCutsWhenTheDiskFallsBehind(t *testing.T) {
 	}
 	if snap := feed(c, int(snap.AdvertisedRPS), time.Millisecond); snap.LastAdjustment != "raise" {
 		t.Fatalf("a disk that caught up should let the rate grow again, got %+v", snap)
+	}
+}
+
+// With a longer flush interval, the gap between two healthy syncs is longer
+// than 500ms; that alone isn't the disk falling behind.
+func TestInboundRateAllowsForALongFlushInterval(t *testing.T) {
+	c := newInboundRateController(400, 40)
+	lag := 1500 * time.Millisecond
+	c.SetSyncLagSource(func() time.Duration { return lag }, 2*time.Second)
+	feed(c, 160, time.Millisecond)
+	if snap := feed(c, 240, time.Millisecond); snap.LastAdjustment != "raise" {
+		t.Fatalf("1.5s between 2s flushes is healthy, got %+v", snap)
+	}
+	lag = 5 * time.Second
+	if snap := feed(c, 200, time.Millisecond); snap.LastAdjustment != "cut: disk behind" {
+		t.Fatalf("over two intervals behind is the disk falling behind, got %+v", snap)
 	}
 }
