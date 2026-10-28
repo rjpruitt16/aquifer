@@ -128,3 +128,46 @@ func TestInboundRateSteadyBacklogAllowsRaises(t *testing.T) {
 		t.Fatalf("a steady backlog must not block raises, got %+v", snap)
 	}
 }
+
+// Inserts don't wait for the disk, so they stay fast while it falls behind;
+// a kill then loses everything acknowledged since the last sync. Canalis
+// soak repro, 2026-10-27: jobs acknowledged 16-37s before a kill were lost.
+// The controller has to slow callers on the disk's lag, not just latency.
+func TestInboundRateCutsWhenTheDiskFallsBehind(t *testing.T) {
+	c := newInboundRateController(400, 40)
+	lag := 100 * time.Millisecond
+	c.SetSyncLagSource(func() time.Duration { return lag }, 100*time.Millisecond)
+	feed(c, 160, time.Millisecond)
+	before := c.Snapshot().AdvertisedRPS
+
+	lag = 2 * time.Second
+	snap := feed(c, 200, time.Millisecond)
+	if snap.LastAdjustment != "cut: disk behind" || snap.AdvertisedRPS != round2(before*0.7) || snap.SyncLagMs != 2000 {
+		t.Fatalf("expected a 30%% cut from %v with fast inserts but a 2s sync lag, got %+v", before, snap)
+	}
+
+	// Caught up again: no more cuts, and it grows once callers use the rate.
+	lag = 100 * time.Millisecond
+	for range inboundCutCooldownTicks {
+		feed(c, 0, time.Millisecond)
+	}
+	if snap := feed(c, int(snap.AdvertisedRPS), time.Millisecond); snap.LastAdjustment != "raise" {
+		t.Fatalf("a disk that caught up should let the rate grow again, got %+v", snap)
+	}
+}
+
+// With a longer flush interval, the gap between two healthy syncs is longer
+// than 500ms; that alone isn't the disk falling behind.
+func TestInboundRateAllowsForALongFlushInterval(t *testing.T) {
+	c := newInboundRateController(400, 40)
+	lag := 1500 * time.Millisecond
+	c.SetSyncLagSource(func() time.Duration { return lag }, 2*time.Second)
+	feed(c, 160, time.Millisecond)
+	if snap := feed(c, 240, time.Millisecond); snap.LastAdjustment != "raise" {
+		t.Fatalf("1.5s between 2s flushes is healthy, got %+v", snap)
+	}
+	lag = 5 * time.Second
+	if snap := feed(c, 200, time.Millisecond); snap.LastAdjustment != "cut: disk behind" {
+		t.Fatalf("over two intervals behind is the disk falling behind, got %+v", snap)
+	}
+}

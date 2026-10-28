@@ -114,22 +114,24 @@ A user alone on the instance is never rejected for this, however large their bac
 
 ### Inbound pacing (`X-Aqueduct-Rps`)
 
-Off by default. With `AQUIFER_INBOUND_RPS_ENABLED=true`, Aquifer tells its own callers how fast to submit: every `/jobs` and `/proxy` response carries `X-Aqueduct-Rps` (alias `X-Aquifer-Rps`), the same header a target API uses to pace Aquifer. An Aquifer calling another Aquifer, or any client that honors the header, slows down before the server has to start returning `429`s.
+Always on. Aquifer tells its own callers how fast to submit: every `/jobs` and `/proxy` response carries `X-Aqueduct-Rps` (alias `X-Aquifer-Rps`), the same header a target API uses to pace Aquifer. An Aquifer calling another Aquifer, or any client that honors the header, slows down before the server has to start returning `429`s.
+
+A caller that ignores the header loses nothing. Canalis honors it: it paces each tenant's hand-offs from its line by this header, so a burst of queued work reaches Aquifer at a rate its disk keeps up with instead of all at once.
 
 | Env var | Default | Description |
 |---|---:|---|
-| `AQUIFER_INBOUND_RPS_ENABLED` | `false` | Start the controller and send the header |
 | `AQUIFER_INBOUND_BENCHMARK_RPS` | `400` | Jobs per second you believe this machine can take end to end; the first guess at the knee |
 | `AQUIFER_INBOUND_START_PERCENT` | `40` | Where the advertised rate starts, as a percent of the benchmark |
 
-**How it moves.** Once a second the controller compares what callers sent against two signals:
+**How it moves.** Once a second the controller compares what callers sent against three signals:
 
 - **Insert latency.** The p95 time to durably store a job, against a healthy baseline (the lowest p95 seen, drifting up slowly). Above 1.5x the baseline plus 2ms means storage is saturated.
 - **Backlog growth.** Accepted work waiting to be dispatched. If it grows for 3 ticks in a row, Aquifer is accepting faster than it can dispatch, even when inserts still look fast. Intake and dispatch share the same storage writes, so this is usually the first signal to fire.
+- **Sync lag** (Pebble's default flush only). How long accepted jobs may have gone without reaching disk. Inserts don't wait for the disk, so their latency stays low however far behind it falls, and a crash loses everything since the last sync. Over 500ms (or two flush intervals, if `AQUIFER_PEBBLE_FLUSH_INTERVAL_MS` is longer), the disk is behind. Admission starts refusing at `AQUIFER_MAX_SYNC_LAG_MS` (1s); slowing callers first keeps the lag from getting there.
 
-When either signal trips, the rate is cut by 30%, and the rate just under where it failed becomes the learned knee. Within one congestion episode it cuts once, then holds for up to 10 ticks while admitted work drains, so one slow patch doesn't drive the rate to the floor. While healthy, it grows 1.5x per tick below the knee and 5% per tick above it, and only when callers actually use at least 80% of what was advertised (unused headroom is never inflated). If callers send more than 1.5x the advertised rate, it holds instead of cutting: that is a client ignoring the header, and admission control handles it.
+When any signal trips, the rate is cut by 30%, and the rate just under where it failed becomes the learned knee. Within one congestion episode it cuts once, then holds for up to 10 ticks while admitted work drains, so one slow patch doesn't drive the rate to the floor. While healthy, it grows 1.5x per tick below the knee and 5% per tick above it, and only when callers actually use at least 80% of what was advertised (unused headroom is never inflated). If callers send more than 1.5x the advertised rate, it holds instead of cutting: that is a client ignoring the header, and admission control handles it.
 
-The total is split evenly across active callers (any `user_id` seen in the last 3 seconds), so `X-Aqueduct-Rps` is a per-caller number.
+The total is split evenly across active callers (any `user_id` seen in the last 3 seconds), so `X-Aqueduct-Rps` is a per-caller number. A direct `/proxy` response carries one value: the lower of Aquifer's and the target's own `X-Aqueduct-Rps`.
 
 **Tuning.**
 
@@ -540,6 +542,8 @@ Prometheus text format, on the same port as `/health`. The `aquifer` binary serv
 | `aquifer_flow_rate_rps` | gauge | `target` | Sum of the active queues' current rates, after the target API's pacing headers |
 | `aquifer_fairness_jain` | gauge | `target` | [Jain's index](https://en.wikipedia.org/wiki/Fairness_measure) over queues with work waiting, by jobs each finished in about the last minute. `1` is perfectly even, `1/n` is one queue getting everything. Absent when nothing is waiting. |
 | `aquifer_node_info` | gauge | `node_id` | `1`, carrying the id sent as `X-Aqueduct-Node-Id` |
+| `aquifer_wal_sync_lag_seconds` | gauge | | Pebble's default flush only: how long accepted jobs may have gone without reaching disk. A crash loses them. Normally under about 0.15 |
+| `aquifer_wal_last_sync_seconds` | gauge | | Pebble's default flush only: how long the newest completed log sync took. Jobs accepted while a sync runs wait for the next one, so slow syncs are what make the lag grow |
 
 `target` is the target API's scheme and host (`https://api.example.com`), or `pool:<id>`. The first 1,000 targets seen get their own label and the rest share `other`, since URL jobs can name any host. There are no tenant labels by default: tenant IDs are unbounded, and often customer data. For a pilot, `AQUIFER_METRICS_TENANT_LABELS=true` adds `aquifer_tenant_jobs_total` and `aquifer_tenant_job_duration_seconds` with a `tenant` (`user_id`) label. The first 1,000 tenants seen get their own label, and the rest share `other`.
 

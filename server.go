@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptrace"
@@ -459,10 +460,19 @@ func (s *Server) proxyJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if outcome.Direct {
+		ours := w.Header().Get("X-Aqueduct-Rps")
 		for k, vs := range outcome.Header {
+			if k == "X-Aqueduct-Rps" || k == "X-Aquifer-Rps" {
+				continue
+			}
 			for _, v := range vs {
 				w.Header().Add(k, v)
 			}
+		}
+		// The caller gets one rate: the lower of Aquifer's and the target's.
+		if rps := lowerRPS(ours, dispatch.PacingHeader(outcome.Header, "Rps")); rps != "" {
+			w.Header().Set("X-Aqueduct-Rps", rps)
+			w.Header().Set("X-Aquifer-Rps", rps)
 		}
 		w.WriteHeader(outcome.Status)
 		_, writeErr := w.Write(outcome.Body)
@@ -803,11 +813,34 @@ func applyMaxRetriesHeader(header http.Header, req *JobRequest) error {
 	return nil
 }
 
+// lowerRPS is the lower of two X-Aqueduct-Rps values, ignoring one that
+// isn't a positive number; "" when neither is.
+func lowerRPS(a, b string) string {
+	av, aErr := strconv.ParseFloat(a, 64)
+	bv, bErr := strconv.ParseFloat(b, 64)
+	aOK := aErr == nil && av > 0 && !math.IsInf(av, 0)
+	bOK := bErr == nil && bv > 0 && !math.IsInf(bv, 0)
+	switch {
+	case aOK && bOK && bv < av:
+		return b
+	case aOK:
+		return a
+	case bOK:
+		return b
+	}
+	return ""
+}
+
 // setInboundRPS advertises this caller's share of Aquifer's own inbound
 // capacity, so a calling Aquifer paces itself without any special code.
 func setInboundRPS(w http.ResponseWriter, a *Aquifer, userID string) {
 	if rps := a.InboundRPS(userID); rps > 0 {
 		value := strconv.FormatFloat(rps, 'f', 2, 64)
+		if rps < 0.01 {
+			// Many callers at a low rate: two decimals would round a
+			// positive share to 0.00, which reads as no limit at all.
+			value = strconv.FormatFloat(rps, 'f', -1, 64)
+		}
 		w.Header().Set("X-Aqueduct-Rps", value)
 		w.Header().Set("X-Aquifer-Rps", value)
 	}
@@ -823,6 +856,26 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	prom.Write(w, NodeID(), s.aquifer.registry.TargetStats())
+	// Only in the default background-flush mode; with every write synced
+	// there's no lag to show.
+	if wal, ok := s.aquifer.store.(walSyncReporter); ok && wal.FlushInterval() > 0 {
+		fmt.Fprintf(w, "# HELP aquifer_wal_sync_lag_seconds How long acknowledged jobs may have gone without reaching disk; a crash loses them.\n# TYPE aquifer_wal_sync_lag_seconds gauge\naquifer_wal_sync_lag_seconds %g\n", wal.SyncLag().Seconds())
+		fmt.Fprintf(w, "# HELP aquifer_wal_last_sync_seconds How long the newest completed WAL sync took.\n# TYPE aquifer_wal_last_sync_seconds gauge\naquifer_wal_last_sync_seconds %g\n", wal.LastSyncDuration().Seconds())
+	}
+}
+
+// syncLagReporter is a store that can say how far its disk is behind; it's
+// all inbound pacing needs.
+type syncLagReporter interface {
+	SyncLag() time.Duration
+}
+
+// walSyncReporter is a store that acknowledges writes before they reach
+// disk and syncs them in the background (Pebble's default flush mode).
+type walSyncReporter interface {
+	FlushInterval() time.Duration
+	SyncLag() time.Duration
+	LastSyncDuration() time.Duration
 }
 
 func (s *Server) observeRejected(reason string) {

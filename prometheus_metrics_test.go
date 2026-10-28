@@ -135,3 +135,37 @@ func TestARejectedWebhookIsNotDelivered(t *testing.T) {
 		t.Errorf("webhook jobs aren't jobs:\n%s", out)
 	}
 }
+
+// With the Pebble store's default background flush, /metrics shows how far
+// the disk is behind and how long the last sync took: the window a crash
+// loses acknowledged jobs from.
+func TestMetricsShowTheDisksSyncLag(t *testing.T) {
+	t.Setenv("AQUIFER_PEBBLE_FLUSH_INTERVAL_MS", "100")
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "aquifer.db")
+	store := NewPebbleStore(dbPath)
+	broker := NewBroker()
+	l8 := NewL8Registry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"))
+	registry := NewRegistry(store, &Config{Defaults: RateConfig{RPS: 100, MaxConcurrent: 4}}, broker, l8, NewPrometheusMetrics(), nil)
+	app := NewAquifer(store, registry, broker, l8, NewAdmissionController(AdmissionLimits{}, dbPath), nil)
+	t.Cleanup(app.Close)
+	srv := NewServer(app).Routes()
+
+	for deadline := time.Now().Add(5 * time.Second); store.LastSyncDuration() <= 0 && time.Now().Before(deadline); {
+		time.Sleep(20 * time.Millisecond) // wait for a background flush
+	}
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	out := rec.Body.String()
+	for _, want := range []string{
+		"# TYPE aquifer_wal_sync_lag_seconds gauge\naquifer_wal_sync_lag_seconds ",
+		"# TYPE aquifer_wal_last_sync_seconds gauge\naquifer_wal_last_sync_seconds ",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	if store.LastSyncDuration() <= 0 {
+		t.Error("after a few flushes, the last sync's duration should be recorded")
+	}
+}
