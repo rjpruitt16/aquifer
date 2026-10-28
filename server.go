@@ -10,6 +10,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
+	"math"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/http/httptrace"
@@ -27,6 +30,8 @@ import (
 
 type Server struct {
 	aquifer *Aquifer
+	// streams caps the SSE streams held open for queued jobs (see limits.go).
+	streams *streamLimiter
 }
 
 // clusterForwardResponseTimeout is how long a forwarding node waits for the
@@ -43,7 +48,7 @@ var clusterForwardClient = func() *http.Client {
 }()
 
 func NewServer(aquifer *Aquifer) *Server {
-	return &Server{aquifer: aquifer}
+	return &Server{aquifer: aquifer, streams: newStreamLimiter(heldStreamLimit())}
 }
 
 type HTTPAdapter struct {
@@ -64,12 +69,23 @@ func (a *HTTPAdapter) Start(ctx context.Context, aquifer *Aquifer) error {
 		Handler: NewServer(aquifer).Routes(),
 	}
 
+	addr := a.addr
+	if addr == "" {
+		addr = ":http"
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	maxConns, maxStreams := connectionLimit(), heldStreamLimit()
+	log.Printf("[HTTP] open file limit %d: up to %d connections, %d held streams (0: no limit)", openFileLimit(), max(maxConns, 0), max(maxStreams, 0))
+
 	go func() {
 		<-ctx.Done()
 		ShutdownHTTPServer(server)
 	}()
 
-	err := server.ListenAndServe()
+	err = server.Serve(limitListen(ln, maxConns))
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
@@ -223,6 +239,9 @@ func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
 		"created_at":     job.CreatedAt,
 		"execute_before": job.ExecuteBefore,
 	}
+	if dispatch.ReadyEstimates() && job.Status != StatusCompleted && job.Status != StatusFailed {
+		w.Header().Set("Retry-After", strconv.Itoa(s.estimateFields(job, body)))
+	}
 	if result, ok := s.aquifer.JobResult(job.ID); ok {
 		body["result"] = map[string]any{
 			"response_status": result.ResponseStatus,
@@ -324,11 +343,17 @@ func (s *Server) streamJob(w http.ResponseWriter, r *http.Request) {
 func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request, job *Job, events <-chan SSEEvent, unsubscribe func(), proxyFallback *ProxyFallbackInfo) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
+		unsubscribe()
 		httpx.JSONError(w, "streaming not supported", http.StatusInternalServerError)
 		return
 	}
 
 	defer unsubscribe()
+	if !s.streams.acquire() {
+		s.writePollResponse(w, job, proxyFallback)
+		return
+	}
+	defer s.streams.release()
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -827,4 +852,56 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) observeRejected(reason string) {
 	dispatch.ObserveRejected(s.aquifer.registry.Metrics(), reason)
+}
+
+// writePollResponse answers a caller that would have been streamed a queued
+// job's events when no stream slot is free: 202 with where to poll and, in
+// Retry-After, when.
+func (s *Server) writePollResponse(w http.ResponseWriter, job *Job, proxyFallback *ProxyFallbackInfo) {
+	body := map[string]any{
+		"job_id": job.ID,
+		"status": job.Status,
+		"poll":   "/jobs/" + job.ID,
+		"reason": "streams_full",
+	}
+	if proxyFallback != nil {
+		body["proxy_fallback"] = proxyFallback.Reason
+	}
+	retryAfter := s.aquifer.RetryAfterSeconds()
+	if dispatch.ReadyEstimates() {
+		retryAfter = s.estimateFields(job, body)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(body)
+}
+
+// maxRetryAfterSeconds caps the Retry-After drawn from an estimate, so a bad
+// estimate can't park a caller for long.
+const maxRetryAfterSeconds = 60
+
+// estimateFields adds a queued job's queue_position and
+// estimated_ready_seconds (null while its queue has no recent rate to go
+// on) to body, and returns the seconds a polling caller should wait: the
+// estimate plus up to 20% jitter, so callers told the same time don't all
+// return together, within 1 and maxRetryAfterSeconds. A job in flight
+// should be done shortly; one with no estimate gets the configured
+// Retry-After.
+func (s *Server) estimateFields(job *Job, body map[string]any) int {
+	if job.Status == StatusInFlight {
+		return 1
+	}
+	est, ok := s.aquifer.registry.Estimate(job)
+	if !ok {
+		return s.aquifer.RetryAfterSeconds()
+	}
+	body["queue_position"] = est.Position
+	if est.Seconds < 0 {
+		body["estimated_ready_seconds"] = nil
+		return s.aquifer.RetryAfterSeconds()
+	}
+	body["estimated_ready_seconds"] = math.Round(est.Seconds*10) / 10
+	wait := math.Ceil(est.Seconds * (1 + 0.2*rand.Float64()))
+	return int(min(max(wait, 1), maxRetryAfterSeconds))
 }

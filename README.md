@@ -205,6 +205,9 @@ upstreams:
 | `AQUIFER_MAX_PENDING_PER_UPSTREAM` | `10000` | Shared per-target-API backlog budget used by fair admission; `0` disables it |
 | `AQUIFER_ACCOUNT_QUEUE` | `on` | `on`: each tenant gets its own queue at every target API; `off`: tenants share one queue per target API. A target API's own `X-Aqueduct-Account-Queue` response header overrides this; a sender can only ask for `on` |
 | `AQUIFER_SHARED_DESTINATION_LIMITS` | `false` | `true`: a target API's advertised `X-Aqueduct-Max-Concurrent` and `X-Aqueduct-Rps` are totals the node shares round-robin across its tenant queues and `/proxy` direct attempts; `false`: they apply to each queue, and a background check throttles the sum to the budget |
+| `AQUIFER_READY_ESTIMATES` | `false` | `true`: `GET /jobs/:id`, poll responses and `position` events tell a waiting caller its queue position and when its job is likely to be dispatched, with a matching `Retry-After` |
+| `AQUIFER_MAX_HELD_STREAMS` | half the open file limit | SSE streams held open for queued jobs at once; past it, callers get `202` with where and when to poll. `0` or less: no limit |
+| `AQUIFER_MAX_CONNECTIONS` | three quarters of the open file limit | Client connections held at once; past it, new ones wait in the kernel's accept queue. `0` or less: no limit |
 | `AQUIFER_METRICS_TENANT_LABELS` | `false` | `true` adds per-tenant (`user_id`) series to `GET /metrics`, for the first 1,000 tenants seen (the rest share `other`). Off by default because tenant IDs are unbounded and often customer data. See [API.md](API.md#get-metrics) |
 | `AQUIFER_NODE_ID` | `AQUIFER_CLUSTER_SELF_ID`, else `FLY_MACHINE_ID`, else the host name | This node's id, sent to target APIs as `X-Aqueduct-Node-Id` so a backend can count how many Aquifer nodes are sending to it |
 | `AQUIFER_RETRY_AFTER_SECONDS` | `5` | Base `Retry-After` value sent on `429` admission rejections |
