@@ -155,6 +155,7 @@ func TestGateDirectAttemptsCountTowardTheTotal(t *testing.T) {
 // total, X-Aqueduct-Max-Concurrent: 4. Once Aquifer has heard it, the
 // destination never sees more than 4 at once, and keeps all 4 busy.
 func TestTenantQueuesShareTheDestinationTotal(t *testing.T) {
+	t.Setenv("AQUIFER_SHARED_DESTINATION_LIMITS", "true")
 	const workers, tenants, perTenant = 4, 15, 8
 	var (
 		inFlight, peak atomic.Int64
@@ -203,5 +204,43 @@ func TestTenantQueuesShareTheDestinationTotal(t *testing.T) {
 	// 120 jobs of 20 ms on 4 workers take 0.6 s when every worker stays busy.
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("took %v; the advertised total was left unused", elapsed)
+	}
+}
+
+func TestSharedDestinationLimitsFlag(t *testing.T) {
+	t.Setenv("AQUIFER_SHARED_DESTINATION_LIMITS", "")
+	off := NewURLWorker("off.example", 10, 4, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	defer off.Stop()
+	if off.gate != nil || off.done == nil {
+		t.Fatalf("flag off: want the budget loop and no gate, got gate=%v done=%v", off.gate, off.done)
+	}
+	release, ok := off.TryDirect()
+	if !ok {
+		t.Fatalf("flag off: direct attempts must always go")
+	}
+	release()
+
+	t.Setenv("AQUIFER_SHARED_DESTINATION_LIMITS", "true")
+	on := NewURLWorker("on.example", 10, 4, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	defer on.Stop()
+	if on.gate == nil || on.done != nil {
+		t.Fatalf("flag on: want a gate and no budget loop")
+	}
+	limit := 1
+	on.gate.Advertised(&limit, nil, false)
+	release, ok = on.TryDirect()
+	if !ok {
+		t.Fatalf("flag on: first direct attempt should get the free turn")
+	}
+	if _, ok := on.TryDirect(); ok {
+		t.Fatalf("flag on: second direct attempt should find the total taken")
+	}
+	release()
+	release() // releasing twice must not free a second turn
+	if got := on.gate.InFlight(); got != 0 {
+		t.Fatalf("in flight after a double release = %d, want 0", got)
+	}
+	if _, ok := on.TryDirect(); !ok {
+		t.Fatalf("flag on: the released turn should be free again")
 	}
 }

@@ -1,0 +1,107 @@
+// Copyright 2026 Rahmi Pruitt
+// SPDX-License-Identifier: Apache-2.0
+
+package dispatch
+
+import (
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/rjpruitt16/aquifer/internal/storage"
+	"github.com/rjpruitt16/aquifer/l8"
+)
+
+// TestAggregateBudgetThrottlesSiblingQueues proves the fix for the gap
+// found this session: NewAccountQueue always received the URLWorker's
+// full configured RPS regardless of how many sibling queues already
+// existed for the same target API, so N simultaneously active tenants could
+// each independently dispatch at the full ceiling — real aggregate load
+// up to N times the intended rate. checkAndThrottle should bring the sum
+// back down to the worker's actual budget.
+func TestAggregateBudgetThrottlesSiblingQueues(t *testing.T) {
+	dir := t.TempDir()
+	store := storage.NewSQLite(filepath.Join(dir, "aquifer.db"))
+	broker := NewBroker()
+	l8 := l8.NewRegistry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"))
+	t.Cleanup(func() {
+		l8.Close()
+		store.Close()
+	})
+
+	const ceiling = 10.0
+	w := NewURLWorker("https://example.com", ceiling, 5, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, int, map[string]any) {}, nil, nil, func(string, *URLWorker) {})
+	t.Cleanup(w.Stop)
+
+	// Three tenant queues, each spawned with the worker's full ceiling —
+	// this exact call shape (w.rps, unchanged, per queue) is what
+	// url_worker.go:Enqueue does for every new AccountQueue, confirmed
+	// via code read earlier this session. Before the aggregate-budget
+	// fix, nothing bounded their combined rate.
+	q1 := NewAccountQueue("tenant-1", w.domain, ceiling, 5, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, int, map[string]any) {}, nil, nil, nil, nil, func(string) {}, false, func(bool) {}, nil)
+	q2 := NewAccountQueue("tenant-2", w.domain, ceiling, 5, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, int, map[string]any) {}, nil, nil, nil, nil, func(string) {}, false, func(bool) {}, nil)
+	q3 := NewAccountQueue("tenant-3", w.domain, ceiling, 5, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, int, map[string]any) {}, nil, nil, nil, nil, func(string) {}, false, func(bool) {}, nil)
+	q1.reserveBacklog()
+	q2.reserveBacklog()
+	q3.reserveBacklog()
+
+	// Give each queue's run() goroutine a moment to set its initial
+	// currentRPS before we read it.
+	time.Sleep(20 * time.Millisecond)
+
+	w.mu.Lock()
+	w.queues["tenant-1"] = q1
+	w.queues["tenant-2"] = q2
+	w.queues["tenant-3"] = q3
+	w.mu.Unlock()
+
+	before := q1.RPS() + q2.RPS() + q3.RPS()
+	if before <= ceiling {
+		t.Fatalf("test setup bug: expected the three queues to start out already over budget (3x%.0f), got sum %.2f", ceiling, before)
+	}
+
+	w.checkAndThrottle()
+
+	// Throttle() delivers asynchronously via each queue's done channel —
+	// give the dispatch loops a moment to apply it.
+	time.Sleep(50 * time.Millisecond)
+
+	after := q1.RPS() + q2.RPS() + q3.RPS()
+	if after > ceiling+0.01 {
+		t.Fatalf("expected aggregate rate to be throttled down to the %.0f budget, got %.2f (was %.2f before)", ceiling, after, before)
+	}
+}
+
+// TestAggregateBudgetLeavesSingleQueueAlone confirms a lone active queue
+// is never throttled by this mechanism — there's nothing to divide a
+// shared budget between with only one tenant active.
+func TestAggregateBudgetLeavesSingleQueueAlone(t *testing.T) {
+	dir := t.TempDir()
+	store := storage.NewSQLite(filepath.Join(dir, "aquifer.db"))
+	broker := NewBroker()
+	l8 := l8.NewRegistry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"))
+	t.Cleanup(func() {
+		l8.Close()
+		store.Close()
+	})
+
+	const ceiling = 10.0
+	w := NewURLWorker("https://example.com", ceiling, 5, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, int, map[string]any) {}, nil, nil, func(string, *URLWorker) {})
+	t.Cleanup(w.Stop)
+	q1 := NewAccountQueue("tenant-1", w.domain, ceiling, 5, nil, store, broker, l8, NoopMetricsAdapter{}, func(string, string, string, int, map[string]any) {}, nil, nil, nil, nil, func(string) {}, false, func(bool) {}, nil)
+	q1.reserveBacklog()
+
+	time.Sleep(20 * time.Millisecond)
+	w.mu.Lock()
+	w.queues["tenant-1"] = q1
+	w.mu.Unlock()
+
+	before := q1.RPS()
+	w.checkAndThrottle()
+	time.Sleep(50 * time.Millisecond)
+	after := q1.RPS()
+
+	if before != after {
+		t.Fatalf("a single active queue should never be throttled by the aggregate check, got %.2f -> %.2f", before, after)
+	}
+}

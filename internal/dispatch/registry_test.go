@@ -265,9 +265,9 @@ func TestIdleAccountQueueRemovesWorkerAndStopsBudgetLoop(t *testing.T) {
 	}
 
 	select {
-	case <-worker.stop:
+	case <-worker.done:
 	case <-time.After(time.Second):
-		t.Fatalf("expected idle worker to be stopped")
+		t.Fatalf("expected idle worker's aggregate-budget goroutine to stop")
 	}
 }
 

@@ -111,18 +111,18 @@ Aquifer scales by partitioning, not by sharing state:
 - **Drain mode:** a node takes one tenant's burst at a time.
 - **Canalis:** a gateway in front of many nodes.
 
-Partitioning matters for the pacing math. **The advertised values are totals per node.** `X-Aqueduct-Max-Concurrent` and `X-Aqueduct-Rps` are what the backend can take from one Aquifer node; the node shares them round-robin across its tenant queues, so the backend doesn't divide by queues. Nodes don't coordinate with each other, so the backend sees up to:
+Partitioning matters for the pacing math. **Pacing is per node and per queue.** A rate the backend advertises applies to each queue that received it. A node keeps the total across its own queues only within its configured budget, and nodes don't coordinate with each other. So the backend sees up to:
 
-> advertised totals × number of nodes
+> advertised rate × active queues per node × number of nodes
 
 Account for that in the AIMD:
-- **Count the nodes.** Tell them apart by `X-Aqueduct-Node-Id`, which every request carries.
-- **Divide by nodes.** Advertise each node `budget ÷ nodes sending`, not the whole budget.
-- **Scale the step.** An additive step of +5 rps lands on every node at once. With 4 nodes, that's +20 rps at the backend. Size the increase for the total, and cut on the total.
+- **Count the senders.** Read `X-Aqueduct-Active-Queues` per node. Tell nodes apart by `X-Aqueduct-Node-Id`, which every request carries. Add them up.
+- **Divide.** Advertise each queue `budget ÷ total active queues`, not the whole budget.
+- **Scale the step.** An additive step of +5 rps lands on every queue at once. With 20 queues across 4 nodes, that's +100 rps at the backend. Size the increase for the total, and cut on the total.
 
 A feedback loop on the backend's own saturation signal corrects itself either way, because it measures the real total. But dividing first means fewer overshoots.
 
-Before v0.16.0 the values applied to each queue, and backends divided by `X-Aqueduct-Active-Queues` as well. A backend that still does that will now get less than it can take: advertise the real total instead.
+With `AQUIFER_SHARED_DESTINATION_LIMITS=1` (v0.16.0, off by default), the advertised values are totals per node instead: the node shares them round-robin across its tenant queues, and the backend sees up to advertised totals × nodes. Divide by nodes only, not by `X-Aqueduct-Active-Queues`.
 
 ### The control loop
 
@@ -144,7 +144,7 @@ The right saturation signal depends on what the backend is:
 | GPU / inference | KV-cache or GPU memory nears full, or time-to-first-token rises. vLLM and Triton already report KV-cache use over ORCA, and Aquifer reads that with no backend change. |
 | App server or third-party API | the error rate or timeouts rise, or the API's own rate-limit headers drop |
 
-**Priority tenants.** With account queues on (the default), every tenant (`user_id` and API key) has its own queue, and the queues take equal turns at the backend's shared totals. A `429` halves only the queue it answered, so the backend can still slow one tenant without slowing the others; it recognizes them by their API key or a header on the job. Send every tenant the same `X-Aqueduct-Rps` and `X-Aqueduct-Max-Concurrent`: they are the node's totals, so a different number per tenant only moves the total up and down. Weighted turns for priority tenants aren't supported yet.
+**Priority tenants.** With account queues on (the default), every tenant (`user_id` and API key) has its own queue, and each queue follows the headers on its own responses, up to the configured ceiling. So the backend can favour priority customers today: cut them more gently (×0.8 instead of ×0.5), or advertise them a higher rate. It recognizes them by their API key or a header on the job. Slow priority tenants with a lower `X-Aqueduct-Rps` on successful responses, not with `429`s: every `429` halves that queue's rate, whatever the backend intended.
 
 ## 4. Shadow run
 

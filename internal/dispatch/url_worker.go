@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/rjpruitt16/aquifer/internal/admission"
+	"github.com/rjpruitt16/aquifer/internal/env"
 	"github.com/rjpruitt16/aquifer/internal/jobs"
 	"github.com/rjpruitt16/aquifer/internal/metrics"
 	"github.com/rjpruitt16/aquifer/internal/storage"
@@ -59,11 +61,22 @@ type URLWorker struct {
 	breakerUntil      time.Time // zero value means the breaker is closed
 	breakerKind       string    // "queue" or "reroute" — which kind of signal tripped it, see classifyOverload
 	// gate holds the destination's advertised totals, shared by every
-	// account queue here and by proxy mode's direct attempts.
+	// account queue here and by proxy mode's direct attempts. nil unless
+	// AQUIFER_SHARED_DESTINATION_LIMITS is on; then done is used instead,
+	// by the proportional budget loop.
 	gate      *Gate
 	closeOnce sync.Once
 	stopOnce  sync.Once
 	stop      chan struct{}
+	done      chan struct{}
+}
+
+// SharedDestinationLimits reports whether a destination's advertised
+// X-Aqueduct-Max-Concurrent and X-Aqueduct-Rps are totals shared by all its
+// account queues (one Gate per destination) rather than each queue's own,
+// with the proportional budget loop bounding the sum.
+func SharedDestinationLimits() bool {
+	return env.Bool("AQUIFER_SHARED_DESTINATION_LIMITS", false)
 }
 
 // BreakerOpen reports whether proxy mode should skip a direct dispatch
@@ -146,8 +159,13 @@ func NewURLWorker(domain string, rps float64, maxConc int, pool *Pool, store sto
 		onIdle:         onIdle,
 		stop:           make(chan struct{}),
 	}
-	w.gate = NewGate(w.budgetCeiling)
 	w.maxBacklog.Store(admission.MaxPendingPerUpstream())
+	if SharedDestinationLimits() {
+		w.gate = NewGate(w.budgetCeiling)
+	} else {
+		w.done = make(chan struct{})
+		go w.enforceAggregateBudget()
+	}
 	return w
 }
 
@@ -165,6 +183,9 @@ func (w *URLWorker) Stop() {
 		for _, q := range queues {
 			q.Stop()
 		}
+		if w.done != nil {
+			<-w.done
+		}
 	})
 }
 
@@ -174,18 +195,89 @@ func (w *URLWorker) signalStop() {
 	})
 }
 
+// enforceAggregateBudget periodically checks whether the sum of every
+// active account queue's current rate exceeds this worker's actual
+// budget (static config, or live pool capacity), and if so, throttles
+// each queue proportionally. Without this, account-queue mode isolates
+// tenants from each other but doesn't bound them collectively — N
+// simultaneously active tenant queues could each independently believe
+// they own the full ceiling, multiplying real load on the target API by N.
+// It runs only while shared destination limits are off; the Gate bounds
+// the sum when they are on.
+func (w *URLWorker) enforceAggregateBudget() {
+	defer close(w.done)
+
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			w.checkAndThrottle()
+		case <-w.stop:
+			return
+		}
+	}
+}
+
+// checkAndThrottle is the synchronous core of enforceAggregateBudget,
+// split out so it can be called directly and deterministically in tests
+// instead of waiting on the real ticker.
+func (w *URLWorker) checkAndThrottle() {
+	w.mu.Lock()
+	queues := make([]*AccountQueue, 0, len(w.queues))
+	for _, q := range w.queues {
+		if q.Active() {
+			queues = append(queues, q)
+		}
+	}
+	w.mu.Unlock()
+
+	if len(queues) < 2 {
+		// A single active queue (or none) can't exceed an aggregate
+		// budget by definition — nothing to throttle.
+		return
+	}
+
+	ceiling := w.budgetCeiling()
+	if ceiling <= 0 {
+		return
+	}
+
+	var total float64
+	for _, q := range queues {
+		total += q.RPS()
+	}
+	if total <= ceiling {
+		return
+	}
+
+	scale := ceiling / total
+	for _, q := range queues {
+		q.Throttle(math.Max(q.RPS()*scale, MinRPS))
+	}
+}
+
 // TryDirect takes a turn at this destination's in-flight total for a proxy
 // mode direct attempt. It returns false when the destination is at its
 // total or queues are waiting for a turn; the job should then be queued.
-func (w *URLWorker) TryDirect() bool {
-	return w.gate.TryDirect()
+// release ends the turn and may be called more than once; call it once the
+// response body has been read or closed. Without shared destination limits
+// every direct attempt may go, as before.
+func (w *URLWorker) TryDirect() (release func(), ok bool) {
+	if w.gate == nil {
+		return func() {}, true
+	}
+	if !w.gate.TryDirect() {
+		return nil, false
+	}
+	var once sync.Once
+	return func() { once.Do(w.gate.Release) }, true
 }
 
-// DirectDone ends a direct attempt's turn and applies the totals the
-// destination advertised on its response, if there was one.
-func (w *URLWorker) DirectDone(resp *http.Response) {
-	w.gate.Release()
-	if resp == nil {
+// DirectAdvertised applies the totals the destination advertised on a
+// direct attempt's response.
+func (w *URLWorker) DirectAdvertised(resp *http.Response) {
+	if w.gate == nil || resp == nil {
 		return
 	}
 	header := resp.Header
