@@ -413,7 +413,7 @@ func (d *driver) submit() {
 	}
 	now := time.Now()
 	if id, ok := lineAccept(status, rb); ok && d.cluster.isGateway() {
-		d.ledger.acceptedOn(seq, id, lineNode, now)
+		d.ledger.acceptedFromLine(seq, id, start, now)
 		d.cluster.lined.Add(1)
 		d.win.accepted.Add(1)
 		if outcome := lineOutcome(rb); outcome != "" {
@@ -673,7 +673,7 @@ func (d *driver) post(body string) (status int, owner string, rb []byte, err err
 	}
 	rb, _ = io.ReadAll(resp.Body)
 	resp.Body.Close()
-	return resp.StatusCode, "", rb, nil
+	return resp.StatusCode, d.cfg.Target, rb, nil
 }
 
 // jobStatus asks the node that kept the job. Any other node would 404.

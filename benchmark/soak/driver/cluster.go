@@ -148,6 +148,15 @@ type cluster struct {
 	results []*scenarioResult
 }
 
+func (c *cluster) isBackend(id string) bool {
+	for _, b := range c.backends {
+		if b.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
 func newCluster(nodes []*clusterNode, plan []scenario, valkey bool) *cluster {
 	c := &cluster{nodes: nodes, byID: map[string]*clusterNode{}, plan: plan}
 	for _, n := range nodes {
@@ -288,6 +297,11 @@ func (d *driver) act(sc scenario) error {
 		// one keeps its memory.
 		if sc.Action != "freeze" {
 			d.ledger.recordRestart(at)
+			// A drain is a SIGTERM: the instance syncs before it exits, so
+			// it isn't a flush-window loss.
+			if d.cluster.isBackend(id) && (sc.Action == "kill" || sc.Action == "hold") {
+				d.ledger.recordInstanceRestart(at)
+			}
 		}
 	}
 	if len(errs) > 0 {
@@ -350,6 +364,7 @@ func subCounters(a, b Counters) Counters {
 		GapWebhooks:              a.GapWebhooks - b.GapWebhooks,
 		Lost:                     a.Lost - b.Lost,
 		LostInFlushWindow:        a.LostInFlushWindow - b.LostInFlushWindow,
+		LostAfterInstanceRestart: a.LostAfterInstanceRestart - b.LostAfterInstanceRestart,
 		Stuck:                    a.Stuck - b.Stuck,
 		LostInLine:               a.LostInLine - b.LostInLine,
 		CompletedOnStream:        a.CompletedOnStream - b.CompletedOnStream,

@@ -5,6 +5,7 @@ package main
 
 import (
 	"encoding/gob"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -51,6 +52,7 @@ type pending struct {
 	SeenTerminal int64 // unix ms when GET /jobs first showed completed/failed
 	Checking     bool
 	Node         string // cluster test: the node that kept the job
+	SentAt       int64  // gateway mode: unix ms when the request started
 }
 
 type lostJob struct {
@@ -58,6 +60,8 @@ type lostJob struct {
 	JobID      string `json:"job_id"`
 	AcceptedAt string `json:"accepted_at"`
 	Kind       string `json:"kind"`
+	Node       string `json:"node,omitempty"`
+	LostAt     string `json:"lost_at,omitempty"`
 }
 
 // Counters is the ledger's running totals, reported on /status.
@@ -86,6 +90,13 @@ type Counters struct {
 	// result already reached the caller), so the stream is the record.
 	CompletedOnStream uint64 `json:"completed_on_stream"`
 	FailedOnStream    uint64 `json:"failed_on_stream"`
+	// LostAfterInstanceRestart is gateway mode's flush-window loss: the
+	// gateway handed the job over (the instance answered with its id), the
+	// instance restarted, and it no longer has the job. The gateway's line
+	// held it until then; the instance acknowledged it before it reached
+	// disk. The hand-off can be minutes after the job entered the line, so
+	// the 100ms rule can't be measured from acceptance.
+	LostAfterInstanceRestart uint64 `json:"lost_after_instance_restart"`
 }
 
 type ledgerState struct {
@@ -96,9 +107,13 @@ type ledgerState struct {
 	Outstanding    map[uint64]*pending
 	Gaps           [][2]uint64
 	Restarts       []int64 // unix ms of each kill -9 / machine restart
-	Counters       Counters
-	Lost           []lostJob
-	RunStarted     time.Time
+	// LastInstanceRestart: gateway mode, unix ms of the latest kill or hold
+	// of a backend instance (an Aquifer behind the gateway). The latest is
+	// all instanceRestartedSince needs.
+	LastInstanceRestart int64
+	Counters            Counters
+	Lost                []lostJob
+	RunStarted          time.Time
 }
 
 type ledger struct {
@@ -106,6 +121,9 @@ type ledger struct {
 	s    ledgerState
 	path string
 	seqF string
+	// lostF gets one JSON line per lost job, so every one can be traced
+	// afterwards; the state keeps only the last 200 of them.
+	lostF string
 
 	failedIsTerminal bool // storm -no-webhook, see resolve
 }
@@ -113,7 +131,8 @@ type ledger struct {
 const seqBlock = 100_000
 
 func openLedger(dir string) *ledger {
-	l := &ledger{path: filepath.Join(dir, "ledger.gob"), seqF: filepath.Join(dir, "seq.reserved")}
+	l := &ledger{path: filepath.Join(dir, "ledger.gob"), seqF: filepath.Join(dir, "seq.reserved"),
+		lostF: filepath.Join(dir, "lost.jsonl")}
 	l.s.Outstanding = map[uint64]*pending{}
 	if f, err := os.Open(l.path); err == nil {
 		if err := gob.NewDecoder(f).Decode(&l.s); err != nil {
@@ -279,6 +298,39 @@ func (l *ledger) recordRestart(at time.Time) {
 	l.mu.Unlock()
 }
 
+func (l *ledger) recordInstanceRestart(at time.Time) {
+	l.mu.Lock()
+	l.s.LastInstanceRestart = max(l.s.LastInstanceRestart, at.UnixMilli())
+	l.mu.Unlock()
+}
+
+// acceptedFromLine records a job the gateway's line accepted, and when the
+// request for it started.
+func (l *ledger) acceptedFromLine(seq uint64, jobID string, sent, at time.Time) {
+	l.acceptedOn(seq, jobID, lineNode, at)
+	l.mu.Lock()
+	if p := l.s.Outstanding[seq]; p != nil {
+		p.SentAt = sent.UnixMilli()
+	}
+	l.mu.Unlock()
+}
+
+// instanceRestartedSince reports whether an instance restarted after it
+// could have acknowledged the job. AcceptedAt is when the driver's request
+// finished, which for a job relayed from the line can be just after the
+// instance's ack and its kill (Canalis rerun 2026-10-28: jobs accepted up
+// to 0.7s after a kill were gone), so it allows the request's length: at
+// most the gateway's 5s line wait. A restart before the request started
+// can't have lost it.
+//
+// The driver can't tell which instance the gateway handed the job to, so a
+// restart of any instance counts. That can excuse a real loss on another
+// instance in the same window; the per-job lost.jsonl is there to check.
+func (l *ledger) instanceRestartedSince(p *pending) bool {
+	r := l.s.LastInstanceRestart
+	return r > 0 && r >= p.AcceptedAt-instanceAckSlack.Milliseconds() && r >= p.SentAt
+}
+
 // stragglers returns up to max jobs accepted more than minAge ago with no
 // webhook yet, oldest first, and marks them as being checked.
 func (l *ledger) stragglers(minAge time.Duration, max int) map[uint64]pending {
@@ -299,6 +351,8 @@ func (l *ledger) stragglers(minAge time.Duration, max int) map[uint64]pending {
 }
 
 const flushWindow = 300 * time.Millisecond
+
+const instanceAckSlack = 5 * time.Second
 
 // resolve applies the outcome of a GET /jobs/{id} check. status is the job's
 // status there, "" for 404, or "error" if the check itself failed.
@@ -321,8 +375,11 @@ func (l *ledger) resolve(seq uint64, status string, now time.Time) (closed strin
 		delete(l.s.Outstanding, seq)
 		l.s.Closed.set(seq)
 		if kind != "" {
-			l.s.Lost = append(l.s.Lost, lostJob{Seq: seq, JobID: p.JobID,
-				AcceptedAt: time.UnixMilli(p.AcceptedAt).UTC().Format(time.RFC3339Nano), Kind: kind})
+			j := lostJob{Seq: seq, JobID: p.JobID,
+				AcceptedAt: time.UnixMilli(p.AcceptedAt).UTC().Format(time.RFC3339Nano), Kind: kind,
+				Node: p.Node, LostAt: now.UTC().Format(time.RFC3339Nano)}
+			l.s.Lost = append(l.s.Lost, j)
+			l.recordLost(j)
 			if len(l.s.Lost) > 200 {
 				l.s.Lost = l.s.Lost[len(l.s.Lost)-200:]
 			}
@@ -357,6 +414,11 @@ func (l *ledger) resolve(seq uint64, status string, now time.Time) (closed strin
 			closeAs("")
 			return
 		}
+		if p.Node == lineNode && l.instanceRestartedSince(p) {
+			c.LostAfterInstanceRestart++
+			closeAs("lost_after_instance_restart")
+			return
+		}
 		if l.acceptedJustBeforeRestart(p.AcceptedAt) {
 			c.LostInFlushWindow++
 			closeAs("lost_within_flush_window")
@@ -371,6 +433,21 @@ func (l *ledger) resolve(seq uint64, status string, now time.Time) (closed strin
 		}
 	}
 	return ""
+}
+
+// recordLost appends j to lost.jsonl. Lost jobs are rare, so opening the
+// file each time is fine.
+func (l *ledger) recordLost(j lostJob) {
+	line, _ := json.Marshal(j)
+	f, err := os.OpenFile(l.lostF, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		logf("ledger: could not record lost job %d: %v", j.Seq, err)
+		return
+	}
+	defer f.Close()
+	if _, err := f.Write(append(line, '\n')); err != nil {
+		logf("ledger: could not record lost job %d: %v", j.Seq, err)
+	}
 }
 
 func (l *ledger) acceptedJustBeforeRestart(acceptedAt int64) bool {

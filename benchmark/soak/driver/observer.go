@@ -471,6 +471,9 @@ func (o *observer) alerts(v ledgerView, last *minute) []string {
 	if c.Lost > 0 {
 		out = append(out, fmt.Sprintf("%d accepted jobs lost (not explained by the 100ms flush window); see recent_lost", c.Lost))
 	}
+	if c.LostAfterInstanceRestart > 0 {
+		out = append(out, fmt.Sprintf("%d jobs the instance acknowledged were gone after it restarted (its flush window: see its aquifer_wal_sync_lag_seconds)", c.LostAfterInstanceRestart))
+	}
 	if c.Stuck > 0 {
 		out = append(out, fmt.Sprintf("%d jobs still unfinished after 24h", c.Stuck))
 	}
@@ -511,11 +514,36 @@ func (o *observer) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /status/minutes", o.handleMinutes)
 	mux.HandleFunc("GET /status/daily", o.handleDaily)
 	mux.HandleFunc("GET /events", o.handleEvents)
+	mux.HandleFunc("GET /lost", o.handleLost)
 	mux.HandleFunc("GET /logs", o.handleLogs)
 	mux.HandleFunc("POST /control/{action}", o.handleControl)
 	mux.HandleFunc("GET /reports", o.d.reports.handleList)
 	mux.HandleFunc("POST /reports", o.d.reports.handlePost)
 	mux.HandleFunc("GET /{$}", o.handleIndex)
+}
+
+// lostReaders lets one GET /lost run at a time.
+var lostReaders = make(chan struct{}, 1)
+
+// handleLost serves every lost job as JSON lines, not just recent_lost.
+// The page is public, so it streams the file (memory stays flat however
+// long it grows), under a write deadline, one reader at a time.
+func (o *observer) handleLost(w http.ResponseWriter, r *http.Request) {
+	select {
+	case lostReaders <- struct{}{}:
+		defer func() { <-lostReaders }()
+	default:
+		http.Error(w, "busy; try again", http.StatusServiceUnavailable)
+		return
+	}
+	http.NewResponseController(w).SetWriteDeadline(time.Now().Add(30 * time.Second))
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	f, err := os.Open(o.d.ledger.lostF)
+	if err != nil {
+		return // none lost yet
+	}
+	defer f.Close()
+	io.Copy(w, f)
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

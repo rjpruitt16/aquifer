@@ -207,3 +207,33 @@ func TestNodeSnapshotsDontWaitOnAStalledNode(t *testing.T) {
 		t.Fatalf("b should be down: %+v", got["b"])
 	}
 }
+
+// A job the gateway handed over (it named the instance's id) that the
+// instance no longer has after a restart was lost in the instance's flush
+// window, however long it first waited in the line. Canalis repro
+// 2026-10-27: soak-55368 entered the line at 20:30:48, was handed over at
+// 20:31:21 and was gone after the 20:31:37 kill.
+func TestAHandedOverJobGoneAfterTheInstanceRestartsIsTheInstancesLoss(t *testing.T) {
+	l := openLedger(t.TempDir())
+	now := time.Now()
+	kill := now.Add(-9 * time.Minute)
+	l.acceptedFromLine(1, "j1", now.Add(-10*time.Minute-time.Second), now.Add(-10*time.Minute))
+	l.acceptedFromLine(2, "j2", now.Add(-10*time.Minute-time.Second), now.Add(-10*time.Minute))
+	l.recordInstanceRestart(kill)
+	l.acceptedFromLine(3, "j3", now.Add(-8*time.Minute-time.Second), now.Add(-8*time.Minute))
+	// Its stream finished 0.7s after the kill; the ack came before it.
+	l.acceptedFromLine(4, "j4", kill.Add(-time.Second), kill.Add(700*time.Millisecond))
+	// Sent after the kill, so the kill can't have lost it, though it
+	// finished within the 5s slack.
+	l.acceptedFromLine(5, "j5", kill.Add(100*time.Millisecond), kill.Add(time.Second))
+	for _, seq := range []uint64{1, 3, 4, 5} {
+		l.resolve(seq, "", now)
+	}
+	c := l.view().Counters
+	if c.LostAfterInstanceRestart != 2 || c.Lost != 2 {
+		t.Fatalf("j1 and j4 (instance restarted after the ack) are the instance's; j3 and j5 (sent after the restart) are plain lost: %+v", c)
+	}
+	if !l.s.Closed.has(1) {
+		t.Fatal("j1 should be closed")
+	}
+}
