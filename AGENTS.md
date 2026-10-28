@@ -47,6 +47,7 @@ Shared contracts that must stay identical across Aquifer and Spillway: `X-Aquedu
 ## Conventions
 
 - New behavior is opt-in: gate it behind an env flag that defaults off. Background loops and processes should not start at all when their flag is off.
+  - Exception: inbound pacing (`X-Aqueduct-Rps` on `/jobs` and `/proxy` responses) is always on, by the owner's decision. A caller that ignores the header loses nothing, and a gateway like Canalis in front of Aquifer should get pacing without configuration.
 - Work on a feature branch and open a PR for review. Do not push to `main` or merge.
 - Commits: no `Co-Authored-By` or `Claude-Session` trailers.
 - Docs prose: avoid em dashes outside titles and headings.
