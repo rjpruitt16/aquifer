@@ -52,6 +52,7 @@ type pending struct {
 	SeenTerminal int64 // unix ms when GET /jobs first showed completed/failed
 	Checking     bool
 	Node         string // cluster test: the node that kept the job
+	SentAt       int64  // gateway mode: unix ms when the request started
 }
 
 type lostJob struct {
@@ -106,12 +107,13 @@ type ledgerState struct {
 	Outstanding    map[uint64]*pending
 	Gaps           [][2]uint64
 	Restarts       []int64 // unix ms of each kill -9 / machine restart
-	// InstanceRestarts: gateway mode, unix ms of each kill or hold of a
-	// backend instance (an Aquifer behind the gateway).
-	InstanceRestarts []int64
-	Counters         Counters
-	Lost             []lostJob
-	RunStarted       time.Time
+	// LastInstanceRestart: gateway mode, unix ms of the latest kill or hold
+	// of a backend instance (an Aquifer behind the gateway). The latest is
+	// all instanceRestartedSince needs.
+	LastInstanceRestart int64
+	Counters            Counters
+	Lost                []lostJob
+	RunStarted          time.Time
 }
 
 type ledger struct {
@@ -298,23 +300,35 @@ func (l *ledger) recordRestart(at time.Time) {
 
 func (l *ledger) recordInstanceRestart(at time.Time) {
 	l.mu.Lock()
-	l.s.InstanceRestarts = append(l.s.InstanceRestarts, at.UnixMilli())
+	l.s.LastInstanceRestart = max(l.s.LastInstanceRestart, at.UnixMilli())
+	l.mu.Unlock()
+}
+
+// acceptedFromLine records a job the gateway's line accepted, and when the
+// request for it started.
+func (l *ledger) acceptedFromLine(seq uint64, jobID string, sent, at time.Time) {
+	l.acceptedOn(seq, jobID, lineNode, at)
+	l.mu.Lock()
+	if p := l.s.Outstanding[seq]; p != nil {
+		p.SentAt = sent.UnixMilli()
+	}
 	l.mu.Unlock()
 }
 
 // instanceRestartedSince reports whether an instance restarted after it
-// could have acknowledged the job. acceptedAt is when the driver's request
+// could have acknowledged the job. AcceptedAt is when the driver's request
 // finished, which for a job relayed from the line can be just after the
 // instance's ack and its kill (Canalis rerun 2026-10-28: jobs accepted up
-// to 0.7s after a kill were gone), so it allows the request's length:
-// at most the gateway's 5s line wait.
-func (l *ledger) instanceRestartedSince(acceptedAt int64) bool {
-	for _, r := range l.s.InstanceRestarts {
-		if r >= acceptedAt-instanceAckSlack.Milliseconds() {
-			return true
-		}
-	}
-	return false
+// to 0.7s after a kill were gone), so it allows the request's length: at
+// most the gateway's 5s line wait. A restart before the request started
+// can't have lost it.
+//
+// The driver can't tell which instance the gateway handed the job to, so a
+// restart of any instance counts. That can excuse a real loss on another
+// instance in the same window; the per-job lost.jsonl is there to check.
+func (l *ledger) instanceRestartedSince(p *pending) bool {
+	r := l.s.LastInstanceRestart
+	return r > 0 && r >= p.AcceptedAt-instanceAckSlack.Milliseconds() && r >= p.SentAt
 }
 
 // stragglers returns up to max jobs accepted more than minAge ago with no
@@ -400,7 +414,7 @@ func (l *ledger) resolve(seq uint64, status string, now time.Time) (closed strin
 			closeAs("")
 			return
 		}
-		if p.Node == lineNode && l.instanceRestartedSince(p.AcceptedAt) {
+		if p.Node == lineNode && l.instanceRestartedSince(p) {
 			c.LostAfterInstanceRestart++
 			closeAs("lost_after_instance_restart")
 			return

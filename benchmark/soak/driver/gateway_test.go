@@ -216,18 +216,22 @@ func TestNodeSnapshotsDontWaitOnAStalledNode(t *testing.T) {
 func TestAHandedOverJobGoneAfterTheInstanceRestartsIsTheInstancesLoss(t *testing.T) {
 	l := openLedger(t.TempDir())
 	now := time.Now()
-	l.acceptedOn(1, "j1", lineNode, now.Add(-10*time.Minute))
-	l.acceptedOn(2, "j2", lineNode, now.Add(-10*time.Minute))
-	l.recordInstanceRestart(now.Add(-9 * time.Minute))
-	l.acceptedOn(3, "j3", lineNode, now.Add(-8*time.Minute))
+	kill := now.Add(-9 * time.Minute)
+	l.acceptedFromLine(1, "j1", now.Add(-10*time.Minute-time.Second), now.Add(-10*time.Minute))
+	l.acceptedFromLine(2, "j2", now.Add(-10*time.Minute-time.Second), now.Add(-10*time.Minute))
+	l.recordInstanceRestart(kill)
+	l.acceptedFromLine(3, "j3", now.Add(-8*time.Minute-time.Second), now.Add(-8*time.Minute))
 	// Its stream finished 0.7s after the kill; the ack came before it.
-	l.acceptedOn(4, "j4", lineNode, now.Add(-9*time.Minute+700*time.Millisecond))
-	l.resolve(1, "", now)
-	l.resolve(3, "", now)
-	l.resolve(4, "", now)
+	l.acceptedFromLine(4, "j4", kill.Add(-time.Second), kill.Add(700*time.Millisecond))
+	// Sent after the kill, so the kill can't have lost it, though it
+	// finished within the 5s slack.
+	l.acceptedFromLine(5, "j5", kill.Add(100*time.Millisecond), kill.Add(time.Second))
+	for _, seq := range []uint64{1, 3, 4, 5} {
+		l.resolve(seq, "", now)
+	}
 	c := l.view().Counters
-	if c.LostAfterInstanceRestart != 2 || c.Lost != 1 {
-		t.Fatalf("j1 and j4 (instance restarted after the ack) are the instance's; j3 (no restart since) is plain lost: %+v", c)
+	if c.LostAfterInstanceRestart != 2 || c.Lost != 2 {
+		t.Fatalf("j1 and j4 (instance restarted after the ack) are the instance's; j3 and j5 (sent after the restart) are plain lost: %+v", c)
 	}
 	if !l.s.Closed.has(1) {
 		t.Fatal("j1 should be closed")

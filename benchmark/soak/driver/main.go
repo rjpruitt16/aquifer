@@ -413,7 +413,7 @@ func (d *driver) submit() {
 	}
 	now := time.Now()
 	if id, ok := lineAccept(status, rb); ok && d.cluster.isGateway() {
-		d.ledger.acceptedOn(seq, id, lineNode, now)
+		d.ledger.acceptedFromLine(seq, id, start, now)
 		d.cluster.lined.Add(1)
 		d.win.accepted.Add(1)
 		if outcome := lineOutcome(rb); outcome != "" {
