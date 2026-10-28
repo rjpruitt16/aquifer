@@ -11,8 +11,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/rjpruitt16/aquifer/internal/env"
 )
 
 // InboundRateController decides the X-Aqueduct-Rps Aquifer advertises to
@@ -116,12 +114,11 @@ const (
 	inboundSyncLagLimit = 500 * time.Millisecond
 )
 
-// NewInboundRateController returns nil unless AQUIFER_INBOUND_RPS_ENABLED is
-// true, so no loop runs and no header is sent by default.
+// NewInboundRateController starts the controller that sets the
+// X-Aqueduct-Rps every caller is told. It always runs: a caller that ignores
+// the header loses nothing, and one that honors it (Canalis) slows before
+// admission has to refuse.
 func NewInboundRateController() *InboundRateController {
-	if !env.Bool("AQUIFER_INBOUND_RPS_ENABLED", false) {
-		return nil
-	}
 	benchmark := envFloat("AQUIFER_INBOUND_BENCHMARK_RPS", 400)
 	startPercent := envFloat("AQUIFER_INBOUND_START_PERCENT", 40)
 	c := newInboundRateController(benchmark, startPercent)

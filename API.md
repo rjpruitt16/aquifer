@@ -114,13 +114,12 @@ A user alone on the instance is never rejected for this, however large their bac
 
 ### Inbound pacing (`X-Aqueduct-Rps`)
 
-Off by default. With `AQUIFER_INBOUND_RPS_ENABLED=true`, Aquifer tells its own callers how fast to submit: every `/jobs` and `/proxy` response carries `X-Aqueduct-Rps` (alias `X-Aquifer-Rps`), the same header a target API uses to pace Aquifer. An Aquifer calling another Aquifer, or any client that honors the header, slows down before the server has to start returning `429`s.
+Always on. Aquifer tells its own callers how fast to submit: every `/jobs` and `/proxy` response carries `X-Aqueduct-Rps` (alias `X-Aquifer-Rps`), the same header a target API uses to pace Aquifer. An Aquifer calling another Aquifer, or any client that honors the header, slows down before the server has to start returning `429`s.
 
-Behind Canalis, turn it on: Canalis paces each tenant's hand-offs from its line by this header, so a burst of queued work reaches Aquifer at a rate its disk keeps up with instead of all at once.
+A caller that ignores the header loses nothing. Canalis honors it: it paces each tenant's hand-offs from its line by this header, so a burst of queued work reaches Aquifer at a rate its disk keeps up with instead of all at once.
 
 | Env var | Default | Description |
 |---|---:|---|
-| `AQUIFER_INBOUND_RPS_ENABLED` | `false` | Start the controller and send the header |
 | `AQUIFER_INBOUND_BENCHMARK_RPS` | `400` | Jobs per second you believe this machine can take end to end; the first guess at the knee |
 | `AQUIFER_INBOUND_START_PERCENT` | `40` | Where the advertised rate starts, as a percent of the benchmark |
 
