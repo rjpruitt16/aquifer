@@ -129,12 +129,15 @@ type AccountQueue struct {
 	issued    atomic.Int64
 	started   atomic.Int64
 	starts    rateMeter
-	stop      chan struct{}
-	stopped   chan struct{}
-	stopOnce  sync.Once
-	wg        sync.WaitGroup
-	ctx       context.Context
-	cancel    context.CancelFunc
+	runs      runTimer
+	// streamMaxWait is StreamMaxWait, read once.
+	streamMaxWait float64
+	stop          chan struct{}
+	stopped       chan struct{}
+	stopOnce      sync.Once
+	wg            sync.WaitGroup
+	ctx           context.Context
+	cancel        context.CancelFunc
 }
 
 func (q *AccountQueue) RPS() float64 {
@@ -235,6 +238,7 @@ func NewAccountQueue(key, upstream string, rps float64, maxConc int, pool *Pool,
 		onJobDone:          onJobDone,
 		turn:               NewGateTurn(),
 		estimates:          ReadyEstimates(),
+		streamMaxWait:      StreamMaxWait(),
 		stop:               make(chan struct{}),
 		stopped:            make(chan struct{}),
 	}
@@ -479,7 +483,9 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 						}
 					}
 				}()
+				began := time.Now()
 				msg := execute(q.ctx, j, url, q.upstream, q.store, q.broker, q.l8, q.metrics, q.pool, m, flowRate, active, backlog, q.enqueueWebhook, q.resultRecorder)
+				q.observeRun(time.Since(began))
 				msg.userID = j.UserID
 				msg.job = j
 				msg.completed = true
@@ -578,10 +584,15 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 				if !q.broker.HasSubscribers(j.ID) {
 					continue
 				}
+				if poll := q.pollEvent(j.ID, int64(i+1)); poll != nil {
+					// Too far back to hold a connection for: release it.
+					q.broker.Publish(j.ID, *poll)
+					continue
+				}
 				data := map[string]any{"job_id": j.ID, "position": i + 1}
 				if q.estimates {
-					if wait := q.waitFor(int64(i + 1)); wait >= 0 {
-						data["estimated_ready_seconds"] = wait
+					if ready := q.readyIn(int64(i + 1)); ready >= 0 {
+						data["estimated_ready_seconds"] = math.Round(ready*10) / 10
 					}
 				}
 				q.broker.Publish(j.ID, SSEEvent{Event: "position", Data: data})

@@ -4,6 +4,8 @@
 package dispatch
 
 import (
+	"math"
+	"math/rand/v2"
 	"sync"
 	"time"
 
@@ -18,12 +20,39 @@ func ReadyEstimates() bool {
 	return env.Bool("AQUIFER_READY_ESTIMATES", false)
 }
 
-// Estimate is where a queued job stands: its place in its account queue and,
-// when the queue has been dispatching, about how long until its turn.
+// StreamMaxWait is the longest expected wait Aquifer holds a stream open
+// for (AQUIFER_STREAM_MAX_WAIT_SECONDS, default 30; 0 or less: no limit).
+// A caller further back is told when to come back instead, so connections
+// are held only for jobs near the front. Applies with ReadyEstimates.
+func StreamMaxWait() float64 {
+	return float64(env.Int64("AQUIFER_STREAM_MAX_WAIT_SECONDS", 30))
+}
+
+// MaxPollAfter caps how long a caller is told to wait before polling, so a
+// bad estimate can't park it for long and a long wait is re-estimated at
+// least this often.
+const MaxPollAfter = 60 * time.Second
+
+// minPollAfter keeps a caller told "any moment now" from spinning.
+const minPollAfter = 100 * time.Millisecond
+
+// PollAfter is when a caller should come back for a result expected in
+// seconds: a little early, at 80-100% of the estimate, because arriving
+// early costs one more cheap poll and arriving late costs the caller time;
+// the spread keeps callers told the same time from all returning at once.
+func PollAfter(seconds float64) time.Duration {
+	d := time.Duration(seconds * (0.8 + 0.2*rand.Float64()) * float64(time.Second))
+	return min(max(d, minPollAfter), MaxPollAfter)
+}
+
+// Estimate is where a job stands in its account queue.
 type Estimate struct {
+	// Position is the job's place in line, or 0 when it isn't waiting in
+	// line: in flight, or waiting out a retry backoff.
 	Position int64
-	// Seconds is the expected wait until dispatch, or -1 when the queue
-	// hasn't dispatched anything recently to measure a rate from.
+	// Seconds is about how long until the job's result is ready: its wait
+	// for a turn plus the queue's average run time. -1 when the queue
+	// hasn't dispatched recently enough to tell.
 	Seconds float64
 }
 
@@ -36,6 +65,10 @@ type rateMeter struct {
 	mu      sync.Mutex
 	sec     int64
 	buckets [rateWindow + 1]int64
+	// first is the second the current run of events began, so a queue that
+	// just started (or restarted after going quiet) isn't averaged over
+	// seconds it wasn't running.
+	first int64
 }
 
 // advance moves the meter to second s, clearing the seconds it skipped.
@@ -54,22 +87,52 @@ func (m *rateMeter) Mark(now time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	s := now.Unix()
+	if s-m.sec > rateWindow {
+		m.first = s
+	}
 	m.advance(s)
 	m.buckets[s%(rateWindow+1)]++
 }
 
 // Rate is the events per second over the last rateWindow whole seconds,
-// leaving out the current, partial one.
+// leaving out the current, partial one, or over the whole seconds since
+// events began if fewer.
 func (m *rateMeter) Rate(now time.Time) float64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	s := now.Unix()
 	m.advance(s)
+	span := min(int64(rateWindow), s-m.first)
+	if span <= 0 {
+		return 0
+	}
 	var total int64
-	for i := s - rateWindow; i < s; i++ {
+	for i := s - span; i < s; i++ {
 		total += m.buckets[i%(rateWindow+1)]
 	}
-	return float64(total) / rateWindow
+	return float64(total) / float64(span)
+}
+
+// runTimer keeps a moving average of how long a queue's requests take.
+type runTimer struct {
+	mu  sync.Mutex
+	avg float64 // seconds; 0 until the first request finishes
+}
+
+func (r *runTimer) Observe(d time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.avg == 0 {
+		r.avg = d.Seconds()
+		return
+	}
+	r.avg += 0.1 * (d.Seconds() - r.avg)
+}
+
+func (r *runTimer) Seconds() float64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.avg
 }
 
 // issueTicket records that job joined the back of the queue. Only the run
@@ -92,29 +155,61 @@ func (q *AccountQueue) markStarted(job *jobs.Job) {
 	q.starts.Mark(time.Now())
 }
 
-// waitFor is the expected wait for the job at position, from the queue's
-// recent dispatch rate; -1 when there is no rate yet.
-func (q *AccountQueue) waitFor(position int64) float64 {
+// observeRun records how long one of this queue's requests took.
+func (q *AccountQueue) observeRun(d time.Duration) {
+	if q.estimates {
+		q.runs.Observe(d)
+	}
+}
+
+// readyIn is about how long until the result of the job at position is
+// ready: its wait for a turn at the queue's recent dispatch rate, plus the
+// average run time. -1 when there is no rate yet.
+func (q *AccountQueue) readyIn(position int64) float64 {
 	rate := q.starts.Rate(time.Now())
 	if rate <= 0 {
 		return -1
 	}
-	return float64(position) / rate
+	return float64(position)/rate + q.runs.Seconds()
 }
 
-// Estimate is jobID's place in this queue and its expected wait. ok is
-// false when the job isn't waiting in the queue: in flight, waiting out a
-// retry backoff, or not here.
+// Estimate is where jobID stands in this queue. A job not waiting in line
+// (in flight, or waiting out a retry) has position 0 and, once the queue
+// has finished a request, the average run time as its estimate. ok is
+// false when estimates are off.
 func (q *AccountQueue) Estimate(jobID string) (Estimate, bool) {
 	if !q.estimates {
 		return Estimate{}, false
 	}
 	v, ok := q.tickets.Load(jobID)
 	if !ok {
-		return Estimate{}, false
+		run := q.runs.Seconds()
+		if run <= 0 {
+			return Estimate{Seconds: -1}, true
+		}
+		return Estimate{Seconds: run}, true
 	}
 	position := max(v.(int64)-q.started.Load(), 1)
-	return Estimate{Position: position, Seconds: q.waitFor(position)}, true
+	return Estimate{Position: position, Seconds: q.readyIn(position)}, true
+}
+
+// pollEvent is the event that ends a stream whose job is expected to take
+// longer than StreamMaxWait, telling the caller when to come back; nil
+// when the stream should stay open.
+func (q *AccountQueue) pollEvent(jobID string, position int64) *SSEEvent {
+	if !q.estimates || q.streamMaxWait <= 0 {
+		return nil
+	}
+	ready := q.readyIn(position)
+	if ready <= q.streamMaxWait {
+		return nil
+	}
+	return &SSEEvent{Event: "poll", Data: map[string]any{
+		"job_id":                  jobID,
+		"position":                position,
+		"estimated_ready_seconds": math.Round(ready*10) / 10,
+		"retry_after_ms":          PollAfter(ready).Milliseconds(),
+	}}
 }
 
 // Estimate finds job's account queue on this worker and asks it.

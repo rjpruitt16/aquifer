@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/rjpruitt16/aquifer/internal/dispatch"
 )
 
 func TestLimitListenerHoldsAtMostItsLimit(t *testing.T) {
@@ -92,6 +94,7 @@ func TestFullStreamsAnswerWithPollAndEstimate(t *testing.T) {
 	t.Setenv("AQUIFER_READY_ESTIMATES", "true")
 	h := newStreamDeliveryHarness(t)
 
+	t.Setenv("AQUIFER_STREAM_MAX_WAIT_SECONDS", "0")
 	h.submit() // takes the only in-flight slot and holds it
 	waiting := h.submit()
 	queued := h.submit()
@@ -111,7 +114,7 @@ func TestFullStreamsAnswerWithPollAndEstimate(t *testing.T) {
 	if poll["poll"] != "/jobs/"+queued || poll["reason"] != "streams_full" {
 		t.Fatalf("poll response = %v", poll)
 	}
-	if n, err := strconv.Atoi(resp.Header.Get("Retry-After")); err != nil || n < 1 || n > maxRetryAfterSeconds {
+	if n, err := strconv.Atoi(resp.Header.Get("Retry-After")); err != nil || n < 1 || n > int(dispatch.MaxPollAfter/time.Second) {
 		t.Fatalf("Retry-After = %q", resp.Header.Get("Retry-After"))
 	}
 
@@ -146,5 +149,34 @@ func TestJobStatusHasNoEstimateByDefault(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&body)
 	if _, ok := body["queue_position"]; ok || resp.Header.Get("Retry-After") != "" {
 		t.Fatalf("estimates off: got %v, Retry-After %q", body, resp.Header.Get("Retry-After"))
+	}
+}
+
+// A caller whose job is expected to take longer than the stream limit is
+// told when to come back instead of being held.
+func TestLongWaitAnswersWithPoll(t *testing.T) {
+	t.Setenv("AQUIFER_READY_ESTIMATES", "true")
+	t.Setenv("AQUIFER_STREAM_MAX_WAIT_SECONDS", "1")
+	h := newStreamDeliveryHarness(t)
+
+	h.submit() // dispatched at once, then held: the queue's rate is 1 per second
+	h.submit()
+	far := h.submit()
+	time.Sleep(1100 * time.Millisecond)
+
+	resp, err := http.Get(h.server.URL + "/jobs/" + far + "/stream")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var poll map[string]any
+	json.NewDecoder(resp.Body).Decode(&poll)
+	if resp.StatusCode != http.StatusAccepted || poll["reason"] != "long_wait" {
+		t.Fatalf("far-back job: status %d, body %v; want 202 long_wait", resp.StatusCode, poll)
+	}
+	ready, _ := poll["estimated_ready_seconds"].(float64)
+	ms, err := strconv.Atoi(resp.Header.Get("X-Aqueduct-Retry-After-Ms"))
+	if err != nil || ready <= 1 || float64(ms) > ready*1000 || float64(ms) < ready*800-1 {
+		t.Fatalf("estimate %v s, retry after %q ms: want 80-100%% of the estimate", ready, resp.Header.Get("X-Aqueduct-Retry-After-Ms"))
 	}
 }
