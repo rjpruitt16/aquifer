@@ -4,6 +4,7 @@
 package aquifer
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"net"
@@ -178,5 +179,29 @@ func TestLongWaitAnswersWithPoll(t *testing.T) {
 	ms, err := strconv.Atoi(resp.Header.Get("X-Aqueduct-Retry-After-Ms"))
 	if err != nil || ready <= 1 || float64(ms) > ready*1000 || float64(ms) < ready*800-1 {
 		t.Fatalf("estimate %v s, retry after %q ms: want 80-100%% of the estimate", ready, resp.Header.Get("X-Aqueduct-Retry-After-Ms"))
+	}
+}
+
+func TestSubmitTellsWhenToPoll(t *testing.T) {
+	t.Setenv("AQUIFER_READY_ESTIMATES", "true")
+	h := newStreamDeliveryHarness(t)
+
+	h.submit() // dispatched at once, then held: the queue's rate is 1 per second
+	h.submit()
+	time.Sleep(1100 * time.Millisecond)
+
+	body, _ := json.Marshal(JobRequest{UserID: "u", IdempotentKey: "late", URL: h.upstream.URL, Method: "POST", WebhookURL: h.webhookURL})
+	resp, err := http.Post(h.server.URL+"/jobs", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var res map[string]any
+	json.NewDecoder(resp.Body).Decode(&res)
+	position, _ := res["queue_position"].(float64)
+	ready, _ := res["estimated_ready_seconds"].(float64)
+	ms, err := strconv.Atoi(resp.Header.Get("X-Aqueduct-Retry-After-Ms"))
+	if resp.StatusCode != http.StatusCreated || position < 2 || ready <= 1 || err != nil || float64(ms) > ready*1000 || float64(ms) < ready*800-1 {
+		t.Fatalf("status %d, body %v, retry after %q ms: want position 2+, an estimate and 80-100%% of it", resp.StatusCode, res, resp.Header.Get("X-Aqueduct-Retry-After-Ms"))
 	}
 }

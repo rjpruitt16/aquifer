@@ -212,6 +212,9 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 	if !result.Duplicate {
 		setQueueHeaders(w.Header(), result.Queue)
 	}
+	if result.EstimatedReadySeconds != nil {
+		setPollAfter(w, dispatch.PollAfter(*result.EstimatedReadySeconds))
+	}
 	w.Header().Set("Content-Type", "application/json")
 	if result.Duplicate {
 		w.WriteHeader(http.StatusOK)

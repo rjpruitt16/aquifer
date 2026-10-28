@@ -502,12 +502,14 @@ With `AQUIFER_READY_ESTIMATES=true` (default `false`), a job that hasn't finishe
 
 `X-Aqueduct-Retry-After-Ms` says when to come back: at 80–100% of the estimate, up to 60 seconds. It errs early because an early poll costs one more cheap request and a late one costs the caller time, and the spread keeps callers told the same time from all returning at once. `Retry-After` carries the same in whole seconds, rounded down, at least 1. Without an estimate both carry the configured `Retry-After` (1 second for a job in flight). Each poll re-estimates from the job's current place in line, so the estimates close in as the job nears the front. It runs high just after the target API gains capacity, until the rate catches up. Estimates are per node; in a cluster, ask the job's owner.
 
+The `201` from `POST /jobs` carries the same for the new job (`queue_position`, `estimated_ready_seconds` and both headers), counting it last in line, so a caller can wait out its first poll instead of asking at once. They're absent while the queue has no rate yet, and on a duplicate.
+
 ### Polling instead of backing off
 
 A retry with the same `idempotent_key` doesn't add work: it reattaches to the job Aquifer already holds. So a caller waiting on a job doesn't need exponential backoff, which only leaves it asleep when the result is ready. Instead:
 
 1. Submit once with an `idempotent_key` (and a `webhook_url` if the work can finish after you stop waiting).
-2. Hold the stream, or poll `GET /jobs/:id` when `X-Aqueduct-Retry-After-Ms` (or `Retry-After`) says to, with no retry limit. Aquifer may answer a stream request with when to poll instead (below).
+2. Hold the stream, or poll `GET /jobs/:id` when `X-Aqueduct-Retry-After-Ms` (or `Retry-After`) says to, starting from the one on the submit response, with no retry limit. Aquifer may answer a stream request with when to poll instead (below).
 3. Stop when the result arrives or your own deadline passes; the webhook still delivers a later result.
 4. Back off exponentially on your own only when Aquifer doesn't answer at all, or answers `429` because it's full.
 

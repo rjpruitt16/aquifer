@@ -193,6 +193,19 @@ func (q *AccountQueue) Estimate(jobID string) (Estimate, bool) {
 	return Estimate{Position: position, Seconds: q.readyIn(position)}, true
 }
 
+// EstimateNew is Estimate for a job just handed to this queue, which may not
+// have joined the line yet: until it has, it counts as last in line.
+func (q *AccountQueue) EstimateNew(jobID string) (Estimate, bool) {
+	if !q.estimates {
+		return Estimate{}, false
+	}
+	if _, ok := q.tickets.Load(jobID); ok {
+		return q.Estimate(jobID)
+	}
+	position := max(q.issued.Load()-q.started.Load()+1, 1)
+	return Estimate{Position: position, Seconds: q.readyIn(position)}, true
+}
+
 // pollEvent is the event that ends a stream whose job is expected to take
 // longer than StreamMaxWait, telling the caller when to come back; nil
 // when the stream should stay open.
@@ -212,28 +225,42 @@ func (q *AccountQueue) pollEvent(jobID string, position int64) *SSEEvent {
 	}}
 }
 
-// Estimate finds job's account queue on this worker and asks it.
-func (w *URLWorker) Estimate(job *jobs.Job) (Estimate, bool) {
+// queueFor finds job's account queue on this worker, or nil.
+func (w *URLWorker) queueFor(job *jobs.Job) *AccountQueue {
 	w.mu.Lock()
+	defer w.mu.Unlock()
 	key := SharedQueueKey
 	if w.accountQueueMode {
 		key = JobQueueKey(job)
 	}
-	q := w.queues[key]
-	w.mu.Unlock()
+	return w.queues[key]
+}
+
+// queueFor finds job's account queue without creating a worker for it.
+func (r *Registry) queueFor(job *jobs.Job) *AccountQueue {
+	r.mu.Lock()
+	w := r.workers[workerKey(job)]
+	r.mu.Unlock()
+	if w == nil {
+		return nil
+	}
+	return w.queueFor(job)
+}
+
+// Estimate is where job stands in its account queue.
+func (r *Registry) Estimate(job *jobs.Job) (Estimate, bool) {
+	q := r.queueFor(job)
 	if q == nil {
 		return Estimate{}, false
 	}
 	return q.Estimate(job.ID)
 }
 
-// Estimate looks up job's queue without creating a worker for it.
-func (r *Registry) Estimate(job *jobs.Job) (Estimate, bool) {
-	r.mu.Lock()
-	w := r.workers[workerKey(job)]
-	r.mu.Unlock()
-	if w == nil {
+// EstimateNew is Estimate for a job just enqueued (AccountQueue.EstimateNew).
+func (r *Registry) EstimateNew(job *jobs.Job) (Estimate, bool) {
+	q := r.queueFor(job)
+	if q == nil {
 		return Estimate{}, false
 	}
-	return w.Estimate(job)
+	return q.EstimateNew(job.ID)
 }
