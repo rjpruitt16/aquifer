@@ -834,6 +834,11 @@ func lowerRPS(a, b string) string {
 func setInboundRPS(w http.ResponseWriter, a *Aquifer, userID string) {
 	if rps := a.InboundRPS(userID); rps > 0 {
 		value := strconv.FormatFloat(rps, 'f', 2, 64)
+		if rps < 0.01 {
+			// Many callers at a low rate: two decimals would round a
+			// positive share to 0.00, which reads as no limit at all.
+			value = strconv.FormatFloat(rps, 'f', -1, 64)
+		}
 		w.Header().Set("X-Aqueduct-Rps", value)
 		w.Header().Set("X-Aquifer-Rps", value)
 	}
