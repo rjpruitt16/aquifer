@@ -78,6 +78,9 @@ func NewAquifer(store JobStore, registry *Registry, broker *Broker, l8 *L8Regist
 	}
 	if registry != nil {
 		a.inbound.SetBacklogSource(func() int64 { return registry.QueueSnapshot().UpstreamBacklog })
+		if s, ok := store.(walSyncReporter); ok {
+			a.inbound.SetSyncLagSource(s.SyncLag)
+		}
 		registry.SetFullnessSource(a.Fullness)
 		registry.SetLoadSource(a.Load)
 	}

@@ -823,6 +823,17 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	prom.Write(w, NodeID(), s.aquifer.registry.TargetStats())
+	if wal, ok := s.aquifer.store.(walSyncReporter); ok {
+		fmt.Fprintf(w, "# HELP aquifer_wal_sync_lag_seconds How long acknowledged jobs may have gone without reaching disk; a crash loses them.\n# TYPE aquifer_wal_sync_lag_seconds gauge\naquifer_wal_sync_lag_seconds %g\n", wal.SyncLag().Seconds())
+		fmt.Fprintf(w, "# HELP aquifer_wal_last_sync_seconds How long the newest completed WAL sync took.\n# TYPE aquifer_wal_last_sync_seconds gauge\naquifer_wal_last_sync_seconds %g\n", wal.LastSyncDuration().Seconds())
+	}
+}
+
+// walSyncReporter is a store that acknowledges writes before they reach
+// disk and syncs them in the background (Pebble's default flush mode).
+type walSyncReporter interface {
+	SyncLag() time.Duration
+	LastSyncDuration() time.Duration
 }
 
 func (s *Server) observeRejected(reason string) {

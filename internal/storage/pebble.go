@@ -71,6 +71,8 @@ type Pebble struct {
 	// lastSyncStart is when the newest completed WAL sync began (unix ns).
 	// Every write acknowledged before then is on disk; see SyncLag.
 	lastSyncStart atomic.Int64
+	// lastSyncTook is how long the newest completed WAL sync took (ns).
+	lastSyncTook atomic.Int64
 
 	// skipDrainEvents: see SQLite.skipDrainEvents. Recording an event costs
 	// two reads and a write under drainMu, a global lock, so with drain
@@ -201,6 +203,14 @@ func (s *Pebble) syncWAL() {
 		return
 	}
 	s.lastSyncStart.Store(start.UnixNano())
+	s.lastSyncTook.Store(int64(time.Since(start)))
+}
+
+// LastSyncDuration is how long the newest completed WAL sync took. A slow
+// one is what lets SyncLag grow: writes acknowledged while it runs wait
+// for the next. Zero when every write waits for its own sync.
+func (s *Pebble) LastSyncDuration() time.Duration {
+	return time.Duration(s.lastSyncTook.Load())
 }
 
 // SyncLag is how long writes may have been acknowledged without reaching

@@ -23,8 +23,9 @@ import (
 //   - it starts at AQUIFER_INBOUND_START_PERCENT (default 40) of
 //     AQUIFER_INBOUND_BENCHMARK_RPS (default 400 inserts/s);
 //   - it cuts 30% when p95 insert latency rises well above its healthy
-//     baseline, at most once per 3s so callers (a round trip behind) can
-//     react before it cuts again;
+//     baseline, or when the disk falls behind (see syncLag), at most once
+//     per 3s so callers (a round trip behind) can react before it cuts
+//     again;
 //   - each cut remembers a threshold just under the failing rate (TCP's
 //     ssthresh); the benchmark is the initial threshold;
 //   - it raises only while latency is healthy and callers are using at
@@ -54,7 +55,13 @@ type InboundRateController struct {
 	// backlog reads Aquifer's own queued-and-dispatching work. Insert latency
 	// only sees the cost of accepting jobs; when dispatch falls behind,
 	// the backlog grows while inserts stay fast, so it is a second signal.
-	backlog      func() int64
+	backlog func() int64
+	// syncLag reads how long acknowledged inserts may have gone without
+	// reaching disk (the Pebble store's SyncLag). Inserts don't wait for the
+	// disk, so insert latency stays low however far behind it falls; a
+	// kill then loses everything since the last sync. This is the signal
+	// for that.
+	syncLag      func() time.Duration
 	prevBacklog  int64
 	backlogGrows int
 	inserts      int
@@ -76,6 +83,7 @@ type InboundRateSnapshot struct {
 	BaselineMs     float64 `json:"baseline_insert_ms"`
 	BenchmarkRPS   float64 `json:"benchmark_rps"`
 	ServerBacklog  int64   `json:"server_backlog"`
+	SyncLagMs      float64 `json:"sync_lag_ms,omitempty"`
 	ThresholdRPS   float64 `json:"threshold_rps"`
 	Cuts           int64   `json:"cuts"`
 	Raises         int64   `json:"raises"`
@@ -101,6 +109,11 @@ const (
 	inboundBacklogGrowthTicks = 3
 	inboundOvershootFactor    = 1.5
 	inboundUsedFraction       = 0.8
+	// The disk is behind once acknowledged inserts have gone this long
+	// unsynced: several of the default 100ms flushes missed. Admission
+	// refuses new jobs at AQUIFER_MAX_SYNC_LAG_MS (1s); slowing callers
+	// first keeps the lag from getting there.
+	inboundSyncLagLimit = 500 * time.Millisecond
 )
 
 // NewInboundRateController returns nil unless AQUIFER_INBOUND_RPS_ENABLED is
@@ -142,6 +155,16 @@ func (c *InboundRateController) SetBacklogSource(backlog func() int64) {
 	}
 	c.mu.Lock()
 	c.backlog = backlog
+	c.mu.Unlock()
+}
+
+// SetSyncLagSource wires in the store's sync lag (see syncLag).
+func (c *InboundRateController) SetSyncLagSource(syncLag func() time.Duration) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.syncLag = syncLag
 	c.mu.Unlock()
 }
 
@@ -247,9 +270,19 @@ func (c *InboundRateController) tick(now time.Time) {
 	c.prevBacklog = backlog
 	backlogOverloaded := c.backlogGrows >= inboundBacklogGrowthTicks
 
-	healthy := latencyHealthy && !backlogOverloaded
+	var syncLag time.Duration
+	if c.syncLag != nil {
+		syncLag = c.syncLag()
+	}
+	diskBehind := syncLag > inboundSyncLagLimit
+
+	healthy := latencyHealthy && !backlogOverloaded && !diskBehind
 	cutReason := "cut: insert latency"
-	if latencyHealthy {
+	switch {
+	case !latencyHealthy:
+	case diskBehind:
+		cutReason = "cut: disk behind"
+	default:
 		cutReason = "cut: backlog growing"
 	}
 	overshoot := float64(inserts) > c.rate*inboundOvershootFactor
@@ -295,6 +328,7 @@ func (c *InboundRateController) tick(now time.Time) {
 
 	c.last = c.snapshotLocked(now, inserts, p95, adjustment)
 	c.last.ServerBacklog = max(backlog, 0)
+	c.last.SyncLagMs = round2(float64(syncLag) / float64(time.Millisecond))
 }
 
 func (c *InboundRateController) snapshotLocked(now time.Time, inserts int, p95 time.Duration, adjustment string) InboundRateSnapshot {
