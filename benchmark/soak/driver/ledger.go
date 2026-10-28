@@ -302,9 +302,15 @@ func (l *ledger) recordInstanceRestart(at time.Time) {
 	l.mu.Unlock()
 }
 
+// instanceRestartedSince reports whether an instance restarted after it
+// could have acknowledged the job. acceptedAt is when the driver's request
+// finished, which for a job relayed from the line can be just after the
+// instance's ack and its kill (Canalis rerun 2026-10-28: jobs accepted up
+// to 0.7s after a kill were gone), so it allows the request's length:
+// at most the gateway's 5s line wait.
 func (l *ledger) instanceRestartedSince(acceptedAt int64) bool {
 	for _, r := range l.s.InstanceRestarts {
-		if r >= acceptedAt {
+		if r >= acceptedAt-instanceAckSlack.Milliseconds() {
 			return true
 		}
 	}
@@ -331,6 +337,8 @@ func (l *ledger) stragglers(minAge time.Duration, max int) map[uint64]pending {
 }
 
 const flushWindow = 300 * time.Millisecond
+
+const instanceAckSlack = 5 * time.Second
 
 // resolve applies the outcome of a GET /jobs/{id} check. status is the job's
 // status there, "" for 404, or "error" if the check itself failed.
