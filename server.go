@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptrace"
@@ -817,7 +818,8 @@ func applyMaxRetriesHeader(header http.Header, req *JobRequest) error {
 func lowerRPS(a, b string) string {
 	av, aErr := strconv.ParseFloat(a, 64)
 	bv, bErr := strconv.ParseFloat(b, 64)
-	aOK, bOK := aErr == nil && av > 0, bErr == nil && bv > 0
+	aOK := aErr == nil && av > 0 && !math.IsInf(av, 0)
+	bOK := bErr == nil && bv > 0 && !math.IsInf(bv, 0)
 	switch {
 	case aOK && bOK && bv < av:
 		return b
@@ -854,7 +856,9 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	prom.Write(w, NodeID(), s.aquifer.registry.TargetStats())
-	if wal, ok := s.aquifer.store.(walSyncReporter); ok {
+	// Only in the default background-flush mode; with every write synced
+	// there's no lag to show.
+	if wal, ok := s.aquifer.store.(walSyncReporter); ok && wal.FlushInterval() > 0 {
 		fmt.Fprintf(w, "# HELP aquifer_wal_sync_lag_seconds How long acknowledged jobs may have gone without reaching disk; a crash loses them.\n# TYPE aquifer_wal_sync_lag_seconds gauge\naquifer_wal_sync_lag_seconds %g\n", wal.SyncLag().Seconds())
 		fmt.Fprintf(w, "# HELP aquifer_wal_last_sync_seconds How long the newest completed WAL sync took.\n# TYPE aquifer_wal_last_sync_seconds gauge\naquifer_wal_last_sync_seconds %g\n", wal.LastSyncDuration().Seconds())
 	}
@@ -869,6 +873,7 @@ type syncLagReporter interface {
 // walSyncReporter is a store that acknowledges writes before they reach
 // disk and syncs them in the background (Pebble's default flush mode).
 type walSyncReporter interface {
+	FlushInterval() time.Duration
 	SyncLag() time.Duration
 	LastSyncDuration() time.Duration
 }

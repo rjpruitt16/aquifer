@@ -16,6 +16,8 @@ func TestLowerRPS(t *testing.T) {
 		{"", "7", "7"},
 		{"160.00", "garbage", "160.00"},
 		{"", "", ""},
+		{"160.00", "+Inf", "160.00"},
+		{"", "Inf", ""},
 	} {
 		if got := lowerRPS(tc.ours, tc.target); got != tc.want {
 			t.Errorf("lowerRPS(%q, %q) = %q, want %q", tc.ours, tc.target, got, tc.want)
