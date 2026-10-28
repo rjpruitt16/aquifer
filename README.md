@@ -348,6 +348,12 @@ data: {"job_id":"abc123","response_status":200,"body":"..."}
 
 The webhook is only a fallback. If you stayed on the line and received the final event (or a `/proxy` direct response), Aquifer doesn't send it, so you never pay for the same result twice. If you hung up first, or never streamed, the webhook goes out as usual. A client that disappears without closing its connection (a dropped network, a sleeping laptop) can't be told apart from one that's still listening, so it may miss both; that's what the stored result on `GET /jobs/:id` is for.
 
+### Don't back off: come back when Aquifer says
+
+Most HTTP clients retry with exponential backoff, which suits a server that refuses work: the caller holds the job and has to guess when there's room. Aquifer holds the job for you, so guessing only costs you time. A result that's ready while your client sleeps waits unread until it wakes, and a client whose next sleep would pass its patience gives up on work that's already done.
+
+So submit once with an `idempotent_key`, then hold the stream or poll `GET /jobs/:id` when Aquifer's `Retry-After` (or `X-Aqueduct-Retry-After-Ms`, with `AQUIFER_READY_ESTIMATES=true`) says to, as many times as it takes. A retry with the same key reattaches to the job instead of adding work. Back off on your own only when Aquifer refuses you (`429`) or doesn't answer at all. See [Polling instead of backing off](API.md#polling-instead-of-backing-off).
+
 ---
 
 ## Agent-native load balancing
