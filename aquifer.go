@@ -5,6 +5,7 @@ package aquifer
 
 import (
 	"errors"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -24,6 +25,10 @@ type EnqueueResult struct {
 	Duplicate bool          `json:"duplicate,omitempty"`
 	ResultKey string        `json:"result_key,omitempty"`
 	Queue     QueueSnapshot `json:"-"`
+	// With AQUIFER_READY_ESTIMATES, where a new job joined its queue and
+	// about how long until its result is ready (absent without a rate yet).
+	QueuePosition         int64    `json:"queue_position,omitempty"`
+	EstimatedReadySeconds *float64 `json:"estimated_ready_seconds,omitempty"`
 }
 
 type Aquifer struct {
@@ -179,7 +184,13 @@ func (a *Aquifer) Enqueue(req JobRequest) (EnqueueResult, error) {
 	if err != nil {
 		return EnqueueResult{}, err
 	}
-	return EnqueueResult{JobID: job.ID, Status: StatusQueued, Queue: queue}, nil
+	result := EnqueueResult{JobID: job.ID, Status: StatusQueued, Queue: queue}
+	if est, ok := a.registry.EstimateNew(job); ok && est.Seconds >= 0 {
+		seconds := math.Round(est.Seconds*10) / 10
+		result.QueuePosition = est.Position
+		result.EstimatedReadySeconds = &seconds
+	}
+	return result, nil
 }
 
 // PrepareJob validates, persists (idempotency-checked), and admission-checks

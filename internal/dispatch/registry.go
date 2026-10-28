@@ -447,18 +447,25 @@ func (r *Registry) WorkerFor(job *jobs.Job) *URLWorker {
 // routing key and its (possibly newly created) URLWorker — the exact
 // key/worker resolution Enqueue already did inline, now shared with
 // WorkerFor.
+// workerKey is the key of the URLWorker that sends job: its pool, or its
+// target API's domain.
+func workerKey(job *jobs.Job) string {
+	if job.PoolID != "" {
+		return "pool:" + job.PoolID
+	}
+	return DomainKey(job.URL)
+}
+
 func (r *Registry) resolveWorkerLocked(job *jobs.Job) (string, *URLWorker) {
-	var key string
+	key := workerKey(job)
 	var pool *Pool
 	var rc RateConfig
 	if job.PoolID != "" {
-		key = "pool:" + job.PoolID
 		if r.pools != nil {
 			pool = r.pools.Get(job.PoolID)
 		}
 		rc = r.cfg.Defaults
 	} else {
-		key = DomainKey(job.URL)
 		rc = r.cfg.ForURL(job.URL)
 	}
 

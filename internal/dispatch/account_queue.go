@@ -120,12 +120,24 @@ type AccountQueue struct {
 	// dropExpiredJobs skip its scan of the whole queue, which otherwise ran
 	// on every loop pass and grew quadratically once a backlog built up.
 	nextDeadline int64
-	stop         chan struct{}
-	stopped      chan struct{}
-	stopOnce     sync.Once
-	wg           sync.WaitGroup
-	ctx          context.Context
-	cancel       context.CancelFunc
+	// Ready estimates (AQUIFER_READY_ESTIMATES): each job gets a ticket when
+	// it joins the back of the queue, and started counts jobs that left the
+	// front, so a job's position is its ticket minus started; starts gives
+	// the queue's recent drain rate. See estimate.go.
+	estimates bool
+	tickets   sync.Map // job ID -> int64 ticket
+	issued    atomic.Int64
+	started   atomic.Int64
+	starts    rateMeter
+	runs      runTimer
+	// streamMaxWait is StreamMaxWait, read once.
+	streamMaxWait float64
+	stop          chan struct{}
+	stopped       chan struct{}
+	stopOnce      sync.Once
+	wg            sync.WaitGroup
+	ctx           context.Context
+	cancel        context.CancelFunc
 }
 
 func (q *AccountQueue) RPS() float64 {
@@ -225,6 +237,8 @@ func NewAccountQueue(key, upstream string, rps float64, maxConc int, pool *Pool,
 		workerBacklog:      workerBacklog,
 		onJobDone:          onJobDone,
 		turn:               NewGateTurn(),
+		estimates:          ReadyEstimates(),
+		streamMaxWait:      StreamMaxWait(),
 		stop:               make(chan struct{}),
 		stopped:            make(chan struct{}),
 	}
@@ -429,6 +443,7 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 
 			job := queue[0]
 			queue = queue[1:]
+			q.markStarted(job)
 			q.metrics.QueueDepth(q.upstream, len(queue))
 			inFlight++
 			lastRequestAt = time.Now()
@@ -468,7 +483,9 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 						}
 					}
 				}()
+				began := time.Now()
 				msg := execute(q.ctx, j, url, q.upstream, q.store, q.broker, q.l8, q.metrics, q.pool, m, flowRate, active, backlog, q.enqueueWebhook, q.resultRecorder)
+				q.observeRun(time.Since(began))
 				msg.userID = j.UserID
 				msg.job = j
 				msg.completed = true
@@ -490,6 +507,7 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 
 		case job := <-q.cmds:
 			queue = append(queue, job)
+			q.issueTicket(job)
 			if job.ExecuteBefore > 0 && (q.nextDeadline == 0 || job.ExecuteBefore < q.nextDeadline) {
 				q.nextDeadline = job.ExecuteBefore
 			}
@@ -566,10 +584,18 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 				if !q.broker.HasSubscribers(j.ID) {
 					continue
 				}
-				q.broker.Publish(j.ID, SSEEvent{
-					Event: "position",
-					Data:  map[string]any{"job_id": j.ID, "position": i + 1},
-				})
+				if poll := q.pollEvent(j.ID, int64(i+1)); poll != nil {
+					// Too far back to hold a connection for: release it.
+					q.broker.Publish(j.ID, *poll)
+					continue
+				}
+				data := map[string]any{"job_id": j.ID, "position": i + 1}
+				if q.estimates {
+					if ready := q.readyIn(int64(i + 1)); ready >= 0 {
+						data["estimated_ready_seconds"] = math.Round(ready*10) / 10
+					}
+				}
+				q.broker.Publish(j.ID, SSEEvent{Event: "position", Data: data})
 			}
 
 		case <-retryTimer.C:
@@ -581,6 +607,7 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 					continue
 				}
 				queue = append(queue, w.job)
+				q.issueTicket(w.job)
 				// Retried jobs re-enter here, not through q.cmds, so their
 				// deadlines must be tracked here too.
 				if w.job.ExecuteBefore > 0 && (q.nextDeadline == 0 || w.job.ExecuteBefore < q.nextDeadline) {
@@ -668,6 +695,7 @@ func (q *AccountQueue) dropExpiredJobs(queue []*jobs.Job) []*jobs.Job {
 			continue
 		}
 		q.releaseBacklog()
+		q.markStarted(job)
 		failExpiredJob(job, q.upstream, q.store, q.broker, q.metrics, q.enqueueWebhook, q.resultRecorder)
 		if q.onJobDone != nil {
 			q.onJobDone(job)

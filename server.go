@@ -10,6 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptrace"
@@ -27,6 +29,8 @@ import (
 
 type Server struct {
 	aquifer *Aquifer
+	// streams caps the SSE streams held open for queued jobs (see limits.go).
+	streams *streamLimiter
 }
 
 // clusterForwardResponseTimeout is how long a forwarding node waits for the
@@ -43,7 +47,7 @@ var clusterForwardClient = func() *http.Client {
 }()
 
 func NewServer(aquifer *Aquifer) *Server {
-	return &Server{aquifer: aquifer}
+	return &Server{aquifer: aquifer, streams: newStreamLimiter(heldStreamLimit())}
 }
 
 type HTTPAdapter struct {
@@ -64,12 +68,23 @@ func (a *HTTPAdapter) Start(ctx context.Context, aquifer *Aquifer) error {
 		Handler: NewServer(aquifer).Routes(),
 	}
 
+	addr := a.addr
+	if addr == "" {
+		addr = ":http"
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	maxConns, maxStreams := connectionLimit(), heldStreamLimit()
+	log.Printf("[HTTP] open file limit %d: up to %d connections, %d held streams (0: no limit)", openFileLimit(), max(maxConns, 0), max(maxStreams, 0))
+
 	go func() {
 		<-ctx.Done()
 		ShutdownHTTPServer(server)
 	}()
 
-	err := server.ListenAndServe()
+	err = server.Serve(limitListen(ln, maxConns))
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
@@ -197,6 +212,9 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 	if !result.Duplicate {
 		setQueueHeaders(w.Header(), result.Queue)
 	}
+	if result.EstimatedReadySeconds != nil {
+		setPollAfter(w, dispatch.PollAfter(*result.EstimatedReadySeconds))
+	}
 	w.Header().Set("Content-Type", "application/json")
 	if result.Duplicate {
 		w.WriteHeader(http.StatusOK)
@@ -222,6 +240,9 @@ func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
 		"method":         job.Method,
 		"created_at":     job.CreatedAt,
 		"execute_before": job.ExecuteBefore,
+	}
+	if dispatch.ReadyEstimates() && job.Status != StatusCompleted && job.Status != StatusFailed {
+		setPollAfter(w, s.estimateFields(job, body))
 	}
 	if result, ok := s.aquifer.JobResult(job.ID); ok {
 		body["result"] = map[string]any{
@@ -324,11 +345,21 @@ func (s *Server) streamJob(w http.ResponseWriter, r *http.Request) {
 func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request, job *Job, events <-chan SSEEvent, unsubscribe func(), proxyFallback *ProxyFallbackInfo) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
+		unsubscribe()
 		httpx.JSONError(w, "streaming not supported", http.StatusInternalServerError)
 		return
 	}
 
 	defer unsubscribe()
+	if s.longWait(job) {
+		s.writePollResponse(w, job, proxyFallback, "long_wait")
+		return
+	}
+	if !s.streams.acquire() {
+		s.writePollResponse(w, job, proxyFallback, "streams_full")
+		return
+	}
+	defer s.streams.release()
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -364,6 +395,12 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request, job *Job, 
 				return
 			}
 			writeErr := dispatch.WriteSSE(w, event.Event, event.Data)
+			if event.Event == "poll" {
+				// Too far back to hold the connection: the caller comes back
+				// at retry_after_ms.
+				flusher.Flush()
+				return
+			}
 			if event.Event == "completed" || event.Event == "failed" {
 				// Confirm only a final event written and flushed while the
 				// client was still connected; anything else gets a webhook.
@@ -827,4 +864,72 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) observeRejected(reason string) {
 	dispatch.ObserveRejected(s.aquifer.registry.Metrics(), reason)
+}
+
+// writePollResponse answers a caller that would have been streamed a queued
+// job's events with 202: where to poll and, in Retry-After, when. reason is
+// "long_wait" (the job is too far back to hold a connection for) or
+// "streams_full".
+func (s *Server) writePollResponse(w http.ResponseWriter, job *Job, proxyFallback *ProxyFallbackInfo, reason string) {
+	body := map[string]any{
+		"job_id": job.ID,
+		"status": job.Status,
+		"poll":   "/jobs/" + job.ID,
+		"reason": reason,
+	}
+	if proxyFallback != nil {
+		body["proxy_fallback"] = proxyFallback.Reason
+	}
+	wait := time.Duration(s.aquifer.RetryAfterSeconds()) * time.Second
+	if dispatch.ReadyEstimates() {
+		wait = s.estimateFields(job, body)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	setPollAfter(w, wait)
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(body)
+}
+
+// longWait reports whether job is expected to take longer than
+// dispatch.StreamMaxWait, so it should be polled rather than streamed.
+func (s *Server) longWait(job *Job) bool {
+	maxWait := dispatch.StreamMaxWait()
+	if !dispatch.ReadyEstimates() || maxWait <= 0 {
+		return false
+	}
+	est, ok := s.aquifer.registry.Estimate(job)
+	return ok && est.Seconds > maxWait
+}
+
+// setPollAfter tells a polling caller when to come back: Retry-After in
+// whole seconds, rounded down so it errs early (at least 1, as HTTP can't
+// say less), and X-Aqueduct-Retry-After-Ms for callers that can wait less.
+func setPollAfter(w http.ResponseWriter, d time.Duration) {
+	w.Header().Set("Retry-After", strconv.Itoa(max(int(d/time.Second), 1)))
+	w.Header().Set("X-Aqueduct-Retry-After-Ms", strconv.FormatInt(d.Milliseconds(), 10))
+}
+
+// estimateFields adds where job stands to body (queue_position while it
+// waits in line; estimated_ready_seconds, null when its queue has no recent
+// rate to go on) and returns when a polling caller should come back: a
+// little before the estimate (dispatch.PollAfter), or the configured
+// Retry-After without one.
+func (s *Server) estimateFields(job *Job, body map[string]any) time.Duration {
+	fallback := time.Duration(s.aquifer.RetryAfterSeconds()) * time.Second
+	est, ok := s.aquifer.registry.Estimate(job)
+	if !ok {
+		return fallback
+	}
+	if est.Position > 0 {
+		body["queue_position"] = est.Position
+	}
+	if est.Seconds < 0 {
+		body["estimated_ready_seconds"] = nil
+		if job.Status == StatusInFlight {
+			return time.Second
+		}
+		return fallback
+	}
+	body["estimated_ready_seconds"] = math.Round(est.Seconds*10) / 10
+	return dispatch.PollAfter(est.Seconds)
 }

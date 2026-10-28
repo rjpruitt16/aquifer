@@ -492,6 +492,27 @@ If literally no known-live region can help either — none live at all, or every
 
 `result` appears once the job has finished and stays for the job's retention window (30 minutes after completion, 2 hours after failure). The body is capped at `AQUIFER_RESULT_MAX_BYTES` (default 65536).
 
+With `AQUIFER_READY_ESTIMATES=true` (default `false`), a job that hasn't finished also tells a polling caller when to come back:
+
+```json
+{"job_id": "a3f9...", "status": "queued", "queue_position": 412, "estimated_ready_seconds": 37.5, "...": "..."}
+```
+
+`queue_position` is the job's place in its tenant's queue. `estimated_ready_seconds` is when its result should be ready: that position divided by how many jobs the queue started per second over the last 10 seconds (or since it started, if sooner), plus the queue's average request time (`null` while it has started none). The rate is per tenant queue, so it already reflects the tenant's share of the target API. A job in flight has no position and the average request time as its estimate; so does one waiting out a retry backoff.
+
+`X-Aqueduct-Retry-After-Ms` says when to come back: at 80–100% of the estimate, up to 60 seconds. It errs early because an early poll costs one more cheap request and a late one costs the caller time, and the spread keeps callers told the same time from all returning at once. `Retry-After` carries the same in whole seconds, rounded down, at least 1. Without an estimate both carry the configured `Retry-After` (1 second for a job in flight). Each poll re-estimates from the job's current place in line, so the estimates close in as the job nears the front. It runs high just after the target API gains capacity, until the rate catches up. Estimates are per node; in a cluster, ask the job's owner.
+
+The `201` from `POST /jobs` carries the same for the new job (`queue_position`, `estimated_ready_seconds` and both headers), counting it last in line, so a caller can wait out its first poll instead of asking at once. They're absent while the queue has no rate yet, and on a duplicate.
+
+### Polling instead of backing off
+
+A retry with the same `idempotent_key` doesn't add work: it reattaches to the job Aquifer already holds. So a caller waiting on a job doesn't need exponential backoff, which only leaves it asleep when the result is ready. Instead:
+
+1. Submit once with an `idempotent_key` (and a `webhook_url` if the work can finish after you stop waiting).
+2. Hold the stream, or poll `GET /jobs/:id` when `X-Aqueduct-Retry-After-Ms` (or `Retry-After`) says to, starting from the one on the submit response, with no retry limit. Aquifer may answer a stream request with when to poll instead (below).
+3. Stop when the result arrives or your own deadline passes; the webhook still delivers a later result.
+4. Back off exponentially on your own only when Aquifer doesn't answer at all, or answers `429` because it's full.
+
 ## GET /jobs/:id/stream
 
 Server-Sent Events stream for live job updates: `queued` → `dispatching` → `completed` (`{"job_id","response_status","body"}`) or `failed` (`{"job_id","reason"}`), plus a `position` event every 2s while queued. Connecting late is safe — you'll receive synthetic catchup events for states you missed. SSE is a convenience, not the source of truth: the webhook fires regardless of whether the stream was ever open.
@@ -499,6 +520,21 @@ Server-Sent Events stream for live job updates: `queued` → `dispatching` → `
 ```bash
 curl -N http://localhost:8080/jobs/<id>/stream
 ```
+
+With `AQUIFER_READY_ESTIMATES=true`, `position` events also carry `estimated_ready_seconds`, and a connection is held only for a job expected within `AQUIFER_STREAM_MAX_WAIT_SECONDS` (default `30`; `0` holds every stream). A job further back is answered `202` with `"reason": "long_wait"` (below). A stream whose job falls further back than that while it waits ends with a `poll` event, and the caller comes back at `retry_after_ms`:
+
+```
+event: poll
+data: {"job_id":"a3f9...","position":840,"estimated_ready_seconds":95.2,"retry_after_ms":83110}
+```
+
+**Held streams are capped.** Every open stream uses a file descriptor, and so does every request Aquifer sends; a node that runs out can't accept connections or dispatch. When `AQUIFER_MAX_HELD_STREAMS` streams are open, a caller that would have been streamed (here, or on `/proxy` after it falls back to the queue) gets `202` instead:
+
+```json
+{"job_id": "a3f9...", "status": "queued", "poll": "/jobs/a3f9...", "reason": "streams_full"}
+```
+
+with a `Retry-After` and `X-Aqueduct-Retry-After-Ms`, plus `queue_position` and `estimated_ready_seconds` when estimates are on. The job is queued either way; poll `GET /jobs/:id` or reconnect later. The HTTP adapter also holds at most `AQUIFER_MAX_CONNECTIONS` connections; past it, new connections wait in the kernel's accept queue.
 
 ## GET /health
 

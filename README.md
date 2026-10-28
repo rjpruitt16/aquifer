@@ -205,6 +205,10 @@ upstreams:
 | `AQUIFER_MAX_PENDING_PER_UPSTREAM` | `10000` | Shared per-target-API backlog budget used by fair admission; `0` disables it |
 | `AQUIFER_ACCOUNT_QUEUE` | `on` | `on`: each tenant gets its own queue at every target API; `off`: tenants share one queue per target API. A target API's own `X-Aqueduct-Account-Queue` response header overrides this; a sender can only ask for `on` |
 | `AQUIFER_SHARED_DESTINATION_LIMITS` | `false` | `true`: a target API's advertised `X-Aqueduct-Max-Concurrent` and `X-Aqueduct-Rps` are totals the node shares round-robin across its tenant queues. `/proxy` direct attempts count toward the in-flight total but aren't rate-paced; `false`: they apply to each queue, and a background check throttles the sum to the budget |
+| `AQUIFER_READY_ESTIMATES` | `false` | `true`: `GET /jobs/:id`, poll responses and `position` events tell a waiting caller its queue position and when its job is likely to be dispatched, with a matching `Retry-After` |
+| `AQUIFER_STREAM_MAX_WAIT_SECONDS` | `30` | With estimates on, the longest expected wait Aquifer holds a stream for; a caller further back is told when to poll instead. `0` or less: hold every stream |
+| `AQUIFER_MAX_HELD_STREAMS` | half the open file limit | SSE streams held open for queued jobs at once; past it, callers get `202` with where and when to poll. `0` or less: no limit |
+| `AQUIFER_MAX_CONNECTIONS` | three quarters of the open file limit | Client connections held at once; past it, new ones wait in the kernel's accept queue. `0` or less: no limit |
 | `AQUIFER_METRICS_TENANT_LABELS` | `false` | `true` adds per-tenant (`user_id`) series to `GET /metrics`, for the first 1,000 tenants seen (the rest share `other`). Off by default because tenant IDs are unbounded and often customer data. See [API.md](API.md#get-metrics) |
 | `AQUIFER_NODE_ID` | `AQUIFER_CLUSTER_SELF_ID`, else `FLY_MACHINE_ID`, else the host name | This node's id, sent to target APIs as `X-Aqueduct-Node-Id` so a backend can count how many Aquifer nodes are sending to it |
 | `AQUIFER_RETRY_AFTER_SECONDS` | `5` | Base `Retry-After` value sent on `429` admission rejections |
@@ -343,6 +347,12 @@ data: {"job_id":"abc123","response_status":200,"body":"..."}
 ```
 
 The webhook is only a fallback. If you stayed on the line and received the final event (or a `/proxy` direct response), Aquifer doesn't send it, so you never pay for the same result twice. If you hung up first, or never streamed, the webhook goes out as usual. A client that disappears without closing its connection (a dropped network, a sleeping laptop) can't be told apart from one that's still listening, so it may miss both; that's what the stored result on `GET /jobs/:id` is for.
+
+### Don't back off: come back when Aquifer says
+
+Most HTTP clients retry with exponential backoff, which suits a server that refuses work: the caller holds the job and has to guess when there's room. Aquifer holds the job for you, so guessing only costs you time. A result that's ready while your client sleeps waits unread until it wakes, and a client whose next sleep would pass its patience gives up on work that's already done.
+
+So submit once with an `idempotent_key`, then hold the stream or poll `GET /jobs/:id` when Aquifer's `Retry-After` (or `X-Aqueduct-Retry-After-Ms`, with `AQUIFER_READY_ESTIMATES=true`) says to, as many times as it takes. A retry with the same key reattaches to the job instead of adding work. Back off on your own only when Aquifer refuses you (`429`) or doesn't answer at all. See [Polling instead of backing off](API.md#polling-instead-of-backing-off).
 
 ---
 
