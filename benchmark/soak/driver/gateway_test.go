@@ -207,3 +207,26 @@ func TestNodeSnapshotsDontWaitOnAStalledNode(t *testing.T) {
 		t.Fatalf("b should be down: %+v", got["b"])
 	}
 }
+
+// A job the gateway handed over (it named the instance's id) that the
+// instance no longer has after a restart was lost in the instance's flush
+// window, however long it first waited in the line. Canalis repro
+// 2026-10-27: soak-55368 entered the line at 20:30:48, was handed over at
+// 20:31:21 and was gone after the 20:31:37 kill.
+func TestAHandedOverJobGoneAfterTheInstanceRestartsIsTheInstancesLoss(t *testing.T) {
+	l := openLedger(t.TempDir())
+	now := time.Now()
+	l.acceptedOn(1, "j1", lineNode, now.Add(-10*time.Minute))
+	l.acceptedOn(2, "j2", lineNode, now.Add(-10*time.Minute))
+	l.recordInstanceRestart(now.Add(-9 * time.Minute))
+	l.acceptedOn(3, "j3", lineNode, now.Add(-8*time.Minute))
+	l.resolve(1, "", now)
+	l.resolve(3, "", now)
+	c := l.view().Counters
+	if c.LostAfterInstanceRestart != 1 || c.Lost != 1 {
+		t.Fatalf("j1 (instance restarted after it) is the instance's; j3 (no restart since) is plain lost: %+v", c)
+	}
+	if !l.s.Closed.has(1) {
+		t.Fatal("j1 should be closed")
+	}
+}

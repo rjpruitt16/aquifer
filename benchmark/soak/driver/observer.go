@@ -471,6 +471,9 @@ func (o *observer) alerts(v ledgerView, last *minute) []string {
 	if c.Lost > 0 {
 		out = append(out, fmt.Sprintf("%d accepted jobs lost (not explained by the 100ms flush window); see recent_lost", c.Lost))
 	}
+	if c.LostAfterInstanceRestart > 0 {
+		out = append(out, fmt.Sprintf("%d jobs the instance acknowledged were gone after it restarted (its flush window: see its aquifer_wal_sync_lag_seconds)", c.LostAfterInstanceRestart))
+	}
 	if c.Stuck > 0 {
 		out = append(out, fmt.Sprintf("%d jobs still unfinished after 24h", c.Stuck))
 	}

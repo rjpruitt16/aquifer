@@ -148,6 +148,15 @@ type cluster struct {
 	results []*scenarioResult
 }
 
+func (c *cluster) isBackend(id string) bool {
+	for _, b := range c.backends {
+		if b.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
 func newCluster(nodes []*clusterNode, plan []scenario, valkey bool) *cluster {
 	c := &cluster{nodes: nodes, byID: map[string]*clusterNode{}, plan: plan}
 	for _, n := range nodes {
@@ -288,6 +297,9 @@ func (d *driver) act(sc scenario) error {
 		// one keeps its memory.
 		if sc.Action != "freeze" {
 			d.ledger.recordRestart(at)
+			if d.cluster.isBackend(id) {
+				d.ledger.recordInstanceRestart(at)
+			}
 		}
 	}
 	if len(errs) > 0 {

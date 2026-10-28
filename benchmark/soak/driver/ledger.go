@@ -89,6 +89,13 @@ type Counters struct {
 	// result already reached the caller), so the stream is the record.
 	CompletedOnStream uint64 `json:"completed_on_stream"`
 	FailedOnStream    uint64 `json:"failed_on_stream"`
+	// LostAfterInstanceRestart is gateway mode's flush-window loss: the
+	// gateway handed the job over (the instance answered with its id), the
+	// instance restarted, and it no longer has the job. The gateway's line
+	// held it until then; the instance acknowledged it before it reached
+	// disk. The hand-off can be minutes after the job entered the line, so
+	// the 100ms rule can't be measured from acceptance.
+	LostAfterInstanceRestart uint64 `json:"lost_after_instance_restart"`
 }
 
 type ledgerState struct {
@@ -99,9 +106,12 @@ type ledgerState struct {
 	Outstanding    map[uint64]*pending
 	Gaps           [][2]uint64
 	Restarts       []int64 // unix ms of each kill -9 / machine restart
-	Counters       Counters
-	Lost           []lostJob
-	RunStarted     time.Time
+	// InstanceRestarts: gateway mode, unix ms of each kill or hold of a
+	// backend instance (an Aquifer behind the gateway).
+	InstanceRestarts []int64
+	Counters         Counters
+	Lost             []lostJob
+	RunStarted       time.Time
 }
 
 type ledger struct {
@@ -286,6 +296,21 @@ func (l *ledger) recordRestart(at time.Time) {
 	l.mu.Unlock()
 }
 
+func (l *ledger) recordInstanceRestart(at time.Time) {
+	l.mu.Lock()
+	l.s.InstanceRestarts = append(l.s.InstanceRestarts, at.UnixMilli())
+	l.mu.Unlock()
+}
+
+func (l *ledger) instanceRestartedSince(acceptedAt int64) bool {
+	for _, r := range l.s.InstanceRestarts {
+		if r >= acceptedAt {
+			return true
+		}
+	}
+	return false
+}
+
 // stragglers returns up to max jobs accepted more than minAge ago with no
 // webhook yet, oldest first, and marks them as being checked.
 func (l *ledger) stragglers(minAge time.Duration, max int) map[uint64]pending {
@@ -365,6 +390,11 @@ func (l *ledger) resolve(seq uint64, status string, now time.Time) (closed strin
 		if p.SeenTerminal != 0 {
 			c.TerminalNoWebhook++ // finished, then expired from the store
 			closeAs("")
+			return
+		}
+		if p.Node == lineNode && l.instanceRestartedSince(p.AcceptedAt) {
+			c.LostAfterInstanceRestart++
+			closeAs("lost_after_instance_restart")
 			return
 		}
 		if l.acceptedJustBeforeRestart(p.AcceptedAt) {
