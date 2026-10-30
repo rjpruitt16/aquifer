@@ -76,6 +76,32 @@ func TestFairAdmissionCeilingRefusesEveryQueue(t *testing.T) {
 	}
 }
 
+func TestFairAdmissionShrunkBudgetStillAdmitsUnderShareQueue(t *testing.T) {
+	// The target API cut its X-Aqueduct-Max-Backlog to 1,200 while the node
+	// held 3,000 jobs (seen in the Hatchet outage benchmark). A small queue
+	// under its share of 1,200 still enters, up to 1.25x what was held.
+	small := DecideFairWithFloor(5, 3_000, 7, 1_200, 3_000, 0.99)
+	if !small.Allowed {
+		t.Fatalf("small queue should enter while the node is under its own ceiling: %+v", small)
+	}
+	without := DecideFair(5, 3_000, 7, 1_200, 0.99)
+	if without.Allowed {
+		t.Fatalf("without the floor the shrunken ceiling refuses everyone: %+v", without)
+	}
+
+	// Queues over their share of the advertised budget are still refused.
+	large := DecideFairWithFloor(2_800, 3_000, 7, 1_200, 3_000, 0)
+	if large.Allowed || large.Reason != "upstream_queue" {
+		t.Fatalf("queue above its share should still be refused: %+v", large)
+	}
+
+	// The backlog grows at most 25% past what was held.
+	full := DecideFairWithFloor(5, 3_750, 7, 1_200, 3_000, 0.99)
+	if full.Allowed {
+		t.Fatalf("request past 1.25x the held backlog should be refused: %+v", full)
+	}
+}
+
 func TestFairAdmissionFullyRefusesQueueAtTwiceItsShare(t *testing.T) {
 	// Seven queues share 10,000: F is about 1,429. At full pressure, a queue
 	// at 2F or more is refused with certainty before the budget fills.
