@@ -113,10 +113,17 @@ func (w *URLWorker) HandleMaxBacklogHeader(value string) {
 // shrinks the budget below the backlog already held, that backlog becomes
 // the floor of the ceiling for under-share queues until it drains, so a
 // shrinking budget stops the large queues from growing without locking the
-// small ones out (see admission.DecideFairWithFloor).
+// small ones out (see admission.DecideFairWithFloor). Raising the budget
+// drops the floor, so a later shrink starts from what's held then. It holds
+// w.mu so reserve never clears a floor against a budget that's mid-change.
 func (w *URLWorker) setMaxBacklog(v int64) {
-	if held := w.backlog.Load(); v < w.maxBacklog.Load() && held > v {
-		w.shrinkFloor.Store(max(w.shrinkFloor.Load(), held))
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	switch old, held := w.maxBacklog.Load(), w.backlog.Load(); {
+	case v < old && held > v:
+		w.shrinkFloor.Store(held)
+	case v > old:
+		w.shrinkFloor.Store(0)
 	}
 	w.maxBacklog.Store(v)
 }
