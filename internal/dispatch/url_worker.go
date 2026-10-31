@@ -45,6 +45,7 @@ type URLWorker struct {
 	onDestinationMode func(bool)
 	slowStart         bool // set by a target API's X-Aqueduct-Slow-Start response header; applies to the *next* new queue created for this domain, not retroactively
 	maxBacklog        atomic.Int64
+	shrinkFloor       atomic.Int64 // backlog held when the target API last shrank maxBacklog below it; 0 once drained
 	activeQueues      atomic.Int64
 	backlog           atomic.Int64
 	queues            map[string]*AccountQueue
@@ -105,7 +106,32 @@ func (w *URLWorker) HandleMaxBacklogHeader(value string) {
 	if err != nil || maxBacklog < 0 {
 		return
 	}
-	w.maxBacklog.Store(maxBacklog)
+	w.setMaxBacklog(maxBacklog)
+}
+
+// setMaxBacklog applies a target API's X-Aqueduct-Max-Backlog. When it
+// shrinks the budget below the backlog already held, that backlog becomes
+// the floor of the ceiling for under-share queues until it drains, so a
+// shrinking budget stops the large queues from growing without locking the
+// small ones out (see admission.DecideFairWithFloor). Raising the budget
+// drops the floor once it covers the backlog, so a later shrink starts from
+// what's held then. It holds
+// w.mu so reserve never clears a floor against a budget that's mid-change.
+func (w *URLWorker) setMaxBacklog(v int64) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	switch old, held := w.maxBacklog.Load(), w.backlog.Load(); {
+	case v < old && held > v:
+		w.shrinkFloor.Store(held)
+	case v > old:
+		// Still under water: keep the floor, capped at what's held now.
+		if floor := w.shrinkFloor.Load(); floor > 0 && held > v {
+			w.shrinkFloor.Store(min(floor, held))
+		} else {
+			w.shrinkFloor.Store(0)
+		}
+	}
+	w.maxBacklog.Store(v)
 }
 
 // QueueActive reports whether any of this domain's account queues currently
@@ -324,7 +350,12 @@ func (w *URLWorker) reserve(job *jobs.Job, enforceAdmission bool) (*AccountQueue
 		}
 
 		maxBacklog := w.maxBacklog.Load()
-		decision := admission.DecideFair(queuePending, totalPending, activeQueues, maxBacklog, admission.RandomDraw())
+		floor := w.shrinkFloor.Load()
+		if floor > 0 && totalPending <= maxBacklog {
+			w.shrinkFloor.Store(0)
+			floor = 0
+		}
+		decision := admission.DecideFairWithFloor(queuePending, totalPending, activeQueues, maxBacklog, floor, admission.RandomDraw())
 		if !decision.Allowed {
 			snapshot := decision.Snapshot
 			return nil, snapshot, &admission.RejectedError{Decision: admission.Decision{
@@ -364,7 +395,7 @@ func (w *URLWorker) reserve(job *jobs.Job, enforceAdmission bool) (*AccountQueue
 			w.slowStart = v
 			w.mu.Unlock()
 		}, func(v int64) {
-			w.maxBacklog.Store(v)
+			w.setMaxBacklog(v)
 		})
 		destinationSignal := w.HandleDestinationAccountQueue
 		q.accountQueueSignal.Store(&destinationSignal)

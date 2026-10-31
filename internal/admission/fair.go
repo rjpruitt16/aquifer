@@ -20,7 +20,8 @@ const FairStart = 0.70
 
 // FairCeiling is how far past its budget a target API's backlog may grow
 // while queues at or below their fair share keep entering. Past it, every
-// request is refused.
+// request is refused. After a target API shrinks the budget, it applies to
+// the backlog held at that moment instead (see DecideFairWithFloor).
 const FairCeiling = 1.25
 
 // QueueSnapshot is the per-target-API state used for fair admission and
@@ -54,6 +55,18 @@ func MaxPendingPerUpstream() int64 {
 }
 
 func DecideFair(queuePending, totalPending int64, activeQueues int, maxBacklog int64, draw float64) FairDecision {
+	return DecideFairWithFloor(queuePending, totalPending, activeQueues, maxBacklog, 0, draw)
+}
+
+// DecideFairWithFloor is DecideFair where the ceiling for under-share queues
+// is FairCeiling times the larger of maxBacklog and ceilingFloor. A target
+// API's X-Aqueduct-Max-Backlog can shrink the budget below what the node
+// already holds; without a floor, the backlog then sits above the shrunken
+// ceiling and every queue is refused, the small ones too. The caller passes
+// the backlog held when the budget shrank, until it drains: queues over their
+// share of the new budget stay refused, and the backlog grows at most 25%
+// past what was already held.
+func DecideFairWithFloor(queuePending, totalPending int64, activeQueues int, maxBacklog, ceilingFloor int64, draw float64) FairDecision {
 	if activeQueues < 1 {
 		activeQueues = 1
 	}
@@ -76,7 +89,7 @@ func DecideFair(queuePending, totalPending int64, activeQueues int, maxBacklog i
 		// one large queue filling the budget doesn't lock out small ones.
 		underShare := activeQueues > 1 && float64(projectedQueue) <= fairShare
 		snapshot.AdmissionPressure = 1
-		if underShare && float64(projectedTotal) <= FairCeiling*float64(maxBacklog) {
+		if underShare && float64(projectedTotal) <= FairCeiling*float64(max(maxBacklog, ceilingFloor)) {
 			return FairDecision{Allowed: true, Snapshot: snapshot}
 		}
 		snapshot.RejectionProbability = 1
