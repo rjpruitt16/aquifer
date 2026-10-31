@@ -142,7 +142,19 @@ The right saturation signal depends on what the backend is:
 | GPU / inference | KV-cache or GPU memory nears full, or time-to-first-token rises. vLLM and Triton already report KV-cache use over ORCA, and Aquifer reads that with no backend change. |
 | App server or third-party API | the error rate or timeouts rise, or the API's own rate-limit headers drop |
 
+**Size the backlog budget in seconds.** `X-Aqueduct-Max-Backlog` is a job count, but choose it as time: `rate × seconds` Aquifer should be able to hold, where `rate` is the peak rate jobs for that backend arrive at the node across all tenants (intake fills it during an outage, not dispatch; the budget is per node), at least the longest outage the pilot should ride out. Teams get this wrong more than anything else, and it looks like Aquifer failing. A 60-second budget at 20 rps (1,200 jobs) turned a 5-minute database outage in the Hatchet benchmark into about 25,000 `429`s, and small tenants' recovery p99 was 107 s (3.8 s behind Envoy); a 600-second budget gave them no refusals and a 5.5 s p99. If the backend lowers its rate when it's in trouble, don't let the budget fall with it below the backlog Aquifer already holds.
+
 **Priority tenants.** With account queues on (the default), every tenant (`user_id` and API key) has its own queue, and each queue follows the headers on its own responses, up to the configured ceiling. So the backend can favour priority customers today: cut them more gently (×0.8 instead of ×0.5), or advertise them a higher rate. It recognizes them by their API key or a header on the job. Slow priority tenants with a lower `X-Aqueduct-Rps` on successful responses, not with `429`s: every `429` halves that queue's rate, whatever the backend intended.
+
+### Retries: let Aquifer keep trying
+
+Aquifer is built for unbounded retries. It holds the job and paces each attempt, so retrying costs the backend nothing extra, and a job that stops retrying is work lost during the very outage Aquifer is there to absorb.
+
+- **Dispatch:** for idempotent work, submit with `max_retries: -1` (or `X-Aqueduct-Max-Retries: -1`). Aquifer then retries until the job succeeds, up to `execute_before` or 24 hours; set `execute_before` on work that has a deadline. The default of 4 retries runs out within about half a minute, so a longer outage fails jobs.
+- **Callers:** submit once with an `idempotent_key` and don't cap attempts; use `execute_before` for a deadline instead. When Aquifer refuses with `429`, wait its `Retry-After` and submit again. Don't stack exponential backoff on top: a client whose own backoff doubles to 32 s waited about 100 s per document in the Hatchet benchmark, against Aquifer's `Retry-After`, which for backlog refusals (`upstream_queue`, `queue_fair_share`) stays at its base, `AQUIFER_RETRY_AFTER_SECONDS` (5 s by default). Memory, disk-size and sync-lag refusals in a row double it, up to 60 s.
+- **Record the reason for every `429`:** log `limit_reason`, `limit` and `current` from the body. They say which limit refused the job and how full it was, and that's how a budget that's too small shows up.
+
+Say in the report which retry settings each pass used.
 
 ## 4. Shadow run
 
@@ -158,6 +170,9 @@ Then:
   - a **baseline**, sent straight to the backend the way it's called today, retries included;
   - **through Aquifer**, with the backend's pacing headers on.
 - **Run each pass for a few hours to a day,** long enough to include several bursts.
+- **Run the load generator and orchestration on an always-on machine,** such as a Fly Machine or a VM, with the run started there and left to finish. A laptop or a dev sandbox that sleeps when nobody is connected pauses the load mid-run, and the results look like a stall.
+- **Rerun a pass that dies on the cloud provider's API** (a failed machine create or volume, a timed-out deploy). Count it as a failed launch, not as a result for either side.
+- **Change one thing between runs.** If a fix needs two changes, say the result can't tell them apart, or add a run with only one.
 
 ## 5. Measure
 
