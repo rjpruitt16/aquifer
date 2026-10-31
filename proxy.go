@@ -125,6 +125,15 @@ func (a *Aquifer) AttemptDirect(ctx context.Context, req JobRequest, timeout tim
 	if worker.QueueActive() {
 		return a.fallbackOutcome(ctx, req, job, "domain_degraded", 0, timeout, false)
 	}
+	// A direct attempt counts toward the destination's advertised in-flight
+	// total like a queued dispatch; at the total, the job is queued instead.
+	release, ok := worker.TryDirect()
+	if !ok {
+		return a.fallbackOutcome(ctx, req, job, "destination_busy", 0, timeout, false)
+	}
+	// The turn ends once the response has been read or closed, and before
+	// any fallback, which doesn't need it.
+	defer release()
 
 	attemptCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -132,7 +141,9 @@ func (a *Aquifer) AttemptDirect(ctx context.Context, req JobRequest, timeout tim
 	counts := a.store.Counts()
 	queues := worker.Snapshot()
 	resp, attemptErr := dispatch.MakeRequest(attemptCtx, job, job.URL, counts.TotalJobs, counts.QueueDepth, 0, queues.ActiveQueues, queues.UpstreamBacklog, a.l8)
+	worker.DirectAdvertised(resp)
 	if attemptErr != nil {
+		release()
 		return a.fallbackOutcome(ctx, req, job, "upstream_unreachable", 0, timeout, true)
 	}
 	defer resp.Body.Close()
@@ -145,6 +156,8 @@ func (a *Aquifer) AttemptDirect(ctx context.Context, req JobRequest, timeout tim
 
 	if overloadCooldown, kind, overloaded := isOverloadSignal(resp); overloaded {
 		worker.TripBreaker(overloadCooldown, kind)
+		resp.Body.Close()
+		release()
 		return a.fallbackOutcome(ctx, req, job, "upstream_overloaded", resp.StatusCode, timeout, kind == "reroute")
 	}
 
@@ -160,6 +173,8 @@ func (a *Aquifer) AttemptDirect(ctx context.Context, req JobRequest, timeout tim
 	}
 
 	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	release()
 	a.store.UpdateStatus(job.ID, StatusCompleted)
 	dispatch.SaveLocalResult(a.store, job, StatusCompleted, resp.StatusCode, resp.Header.Get("Content-Type"), string(body))
 	a.broker.Publish(job.ID, SSEEvent{Event: "completed", Data: map[string]any{

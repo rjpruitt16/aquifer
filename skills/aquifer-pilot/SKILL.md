@@ -122,6 +122,8 @@ Account for that in the AIMD:
 
 A feedback loop on the backend's own saturation signal corrects itself either way, because it measures the real total. But dividing first means fewer overshoots.
 
+With `AQUIFER_SHARED_DESTINATION_LIMITS=1` (v0.16.0, off by default), the advertised values are totals per node instead: the node shares them round-robin across its tenant queues, and the backend sees up to advertised totals × nodes in flight. The rate total paces queued dispatches only: `/proxy` direct attempts count toward the in-flight total but not the rate, so a burst of them can briefly exceed the advertised rate. Divide by nodes only, not by `X-Aqueduct-Active-Queues`.
+
 ### The control loop
 
 Aquifer follows the backend. The backend should run the control loop on the headers it returns. **Additive increase, multiplicative decrease** (AIMD) is a good default: TCP congestion control uses it, and so does Aquifer for its own intake (`internal/admission/inbound_rate.go`).

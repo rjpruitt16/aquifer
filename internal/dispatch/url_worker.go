@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"net/http"
 	"net/url"
 	"os"
 	"strconv"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/rjpruitt16/aquifer/internal/admission"
+	"github.com/rjpruitt16/aquifer/internal/env"
 	"github.com/rjpruitt16/aquifer/internal/jobs"
 	"github.com/rjpruitt16/aquifer/internal/metrics"
 	"github.com/rjpruitt16/aquifer/internal/storage"
@@ -59,10 +61,23 @@ type URLWorker struct {
 	onIdle            func(string, *URLWorker)
 	breakerUntil      time.Time // zero value means the breaker is closed
 	breakerKind       string    // "queue" or "reroute" — which kind of signal tripped it, see classifyOverload
-	closeOnce         sync.Once
-	stopOnce          sync.Once
-	stop              chan struct{}
-	done              chan struct{}
+	// gate holds the destination's advertised totals, shared by every
+	// account queue here and by proxy mode's direct attempts. nil unless
+	// AQUIFER_SHARED_DESTINATION_LIMITS is on; then done is used instead,
+	// by the proportional budget loop.
+	gate      *Gate
+	closeOnce sync.Once
+	stopOnce  sync.Once
+	stop      chan struct{}
+	done      chan struct{}
+}
+
+// SharedDestinationLimits reports whether a destination's advertised
+// X-Aqueduct-Max-Concurrent and X-Aqueduct-Rps are totals shared by all its
+// account queues (one Gate per destination) rather than each queue's own,
+// with the proportional budget loop bounding the sum.
+func SharedDestinationLimits() bool {
+	return env.Bool("AQUIFER_SHARED_DESTINATION_LIMITS", false)
 }
 
 // BreakerOpen reports whether proxy mode should skip a direct dispatch
@@ -169,10 +184,14 @@ func NewURLWorker(domain string, rps float64, maxConc int, pool *Pool, store sto
 		onJobDone:      onJobDone,
 		onIdle:         onIdle,
 		stop:           make(chan struct{}),
-		done:           make(chan struct{}),
 	}
 	w.maxBacklog.Store(admission.MaxPendingPerUpstream())
-	go w.enforceAggregateBudget()
+	if SharedDestinationLimits() {
+		w.gate = NewGate(w.budgetCeiling)
+	} else {
+		w.done = make(chan struct{})
+		go w.enforceAggregateBudget()
+	}
 	return w
 }
 
@@ -190,7 +209,9 @@ func (w *URLWorker) Stop() {
 		for _, q := range queues {
 			q.Stop()
 		}
-		<-w.done
+		if w.done != nil {
+			<-w.done
+		}
 	})
 }
 
@@ -207,6 +228,8 @@ func (w *URLWorker) signalStop() {
 // tenants from each other but doesn't bound them collectively — N
 // simultaneously active tenant queues could each independently believe
 // they own the full ceiling, multiplying real load on the target API by N.
+// It runs only while shared destination limits are off; the Gate bounds
+// the sum when they are on.
 func (w *URLWorker) enforceAggregateBudget() {
 	defer close(w.done)
 
@@ -258,6 +281,42 @@ func (w *URLWorker) checkAndThrottle() {
 	for _, q := range queues {
 		q.Throttle(math.Max(q.RPS()*scale, MinRPS))
 	}
+}
+
+// TryDirect takes a turn at this destination's in-flight total for a proxy
+// mode direct attempt. It returns false when the destination is at its
+// total or queues are waiting for a turn; the job should then be queued.
+// release ends the turn and may be called more than once; call it once the
+// response body has been read or closed. Without shared destination limits
+// every direct attempt may go, as before.
+func (w *URLWorker) TryDirect() (release func(), ok bool) {
+	if w.gate == nil {
+		return func() {}, true
+	}
+	if !w.gate.TryDirect() {
+		return nil, false
+	}
+	var once sync.Once
+	return func() { once.Do(w.gate.Release) }, true
+}
+
+// DirectAdvertised applies the totals the destination advertised on a
+// direct attempt's response.
+func (w *URLWorker) DirectAdvertised(resp *http.Response) {
+	if w.gate == nil || resp == nil {
+		return
+	}
+	header := resp.Header
+	var maxConc *int
+	if v, err := strconv.Atoi(PacingHeader(header, "Max-Concurrent")); err == nil {
+		maxConc = &v
+	}
+	var rps *float64
+	if v, err := strconv.ParseFloat(PacingHeader(header, "Rps"), 64); err == nil {
+		rps = &v
+	}
+	failed := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
+	w.gate.Advertised(maxConc, rps, failed)
 }
 
 // aggregateRPS is the live sum of every active child queue's current
@@ -399,6 +458,7 @@ func (w *URLWorker) reserve(job *jobs.Job, enforceAdmission bool) (*AccountQueue
 		})
 		destinationSignal := w.HandleDestinationAccountQueue
 		q.accountQueueSignal.Store(&destinationSignal)
+		q.gate.Store(w.gate)
 		w.queues[key] = q
 	}
 

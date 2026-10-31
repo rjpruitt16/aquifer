@@ -92,6 +92,10 @@ type AccountQueue struct {
 	// one shared queue). Set by the URLWorker right after creating the
 	// queue, so read atomically from the run loop.
 	accountQueueSignal atomic.Pointer[func(bool)]
+	// gate, when set, is the destination's shared in-flight total and
+	// rate (see Gate). Set by the URLWorker before the queue's first job.
+	gate               atomic.Pointer[Gate]
+	turn               *GateTurn
 	key                string
 	upstream           string
 	pool               *Pool // nil unless this queue dispatches into a registered pool instead of a fixed URL
@@ -220,6 +224,7 @@ func NewAccountQueue(key, upstream string, rps float64, maxConc int, pool *Pool,
 		workerActiveQueues: workerActiveQueues,
 		workerBacklog:      workerBacklog,
 		onJobDone:          onJobDone,
+		turn:               NewGateTurn(),
 		stop:               make(chan struct{}),
 		stopped:            make(chan struct{}),
 	}
@@ -354,8 +359,19 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 	dispatchTimer.Stop()
 	defer dispatchTimer.Stop()
 	q.currentRPS.Store(int64(rps * 100))
+	var gate *Gate
+	defer func() {
+		if gate != nil {
+			gate.Leave(q.turn)
+		}
+	}()
 
 	for {
+		// The URLWorker sets the gate after this loop has started, but
+		// before the first job arrives.
+		if gate == nil {
+			gate = q.gate.Load()
+		}
 		queue = q.dropExpiredJobs(queue)
 		waiting = q.dropExpiredWaiting(waiting)
 
@@ -388,10 +404,19 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 				break
 			}
 
+			// Wait for a turn at the destination's shared limits; the
+			// select below hears when one is handed over.
+			if gate != nil && !gate.Acquire(q.turn) {
+				break
+			}
+
 			var member *PoolMember
 			if q.pool != nil {
 				member = q.pool.Pick()
 				if member == nil {
+					if gate != nil {
+						gate.Release()
+					}
 					// A pool may be temporarily empty during process
 					// restart before members have had a chance to
 					// heartbeat back in. Keep queued work durable here
@@ -421,6 +446,9 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 			q.wg.Add(1)
 			go func(j *jobs.Job, url string, m *PoolMember, flowRate float64, active int, backlog int64) {
 				defer q.wg.Done()
+				if gate != nil {
+					defer gate.Release()
+				}
 				defer func() {
 					if r := recover(); r != nil {
 						log.Printf("[AccountQueue] panic executing job %s: %v", j.ID, r)
@@ -451,7 +479,15 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 			}(job, dispatchURL, member, currentRPS, activeQueues, upstreamBacklog)
 		}
 
+		if gate != nil && len(queue) == 0 {
+			// Nothing to send: give back any turn handed over meanwhile.
+			gate.Leave(q.turn)
+		}
+
 		select {
+		case <-q.turn.Wake:
+			// A turn was handed over; the loop above sends with it.
+
 		case job := <-q.cmds:
 			queue = append(queue, job)
 			if job.ExecuteBefore > 0 && (q.nextDeadline == 0 || job.ExecuteBefore < q.nextDeadline) {
@@ -498,6 +534,9 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 			}
 			if msg.maxConcurrent != nil && *msg.maxConcurrent > 0 {
 				maxConc = int(math.Min(float64(*msg.maxConcurrent), float64(configuredMaxConc)))
+			}
+			if gate != nil {
+				gate.Advertised(msg.maxConcurrent, msg.rps, msg.failed)
 			}
 			q.currentRPS.Store(int64(rps * 100))
 			if rps != prevRPS {
