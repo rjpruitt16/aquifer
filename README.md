@@ -12,6 +12,12 @@ The backend is also closer to the truth about its own capacity than a static pro
 
 Circuit breaking protects the service by saying "stop." Aquifer coordinates demand by saying "wait here, and I'll tell you when to go."
 
+Callers get the result back whichever way suits them:
+
+- **Synchronously**, on the same connection: [`POST /proxy`](API.md#post-proxy) relays the target API's response directly when it has room, and when it doesn't, holds the connection open as a stream until the queued job finishes. No webhook receiver needed.
+- **Over a WebSocket**: [`GET /websocket`](API.md#get-websocket) records every message in a Valkey transcript before delivering it, so a client that reconnects picks up from its last cursor without missing an event.
+- **By webhook**: a durable, paced POST to your receiver, retried through a receiver outage, and skipped when the caller already received the result on a stream.
+
 **Not going to read all this?** Point your coding agent at the [Aquifer pilot skill](skills/aquifer-pilot/SKILL.md). It evaluates Aquifer against your own workload in a shadow run on a branch, then shows you the numbers.
 
 **Increase your rate limit without DDoSing your backend.**
