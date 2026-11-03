@@ -2,7 +2,7 @@
 
 ![How engineers respond to congestion: pacing and backpressure everywhere else in infrastructure, versus retrying everything immediately at the API layer](docs/images/how-engineers-respond-to-congestion.jpg)
 
-**TL;DR — why not Envoy?**
+**TL;DR — why not Hookdeck or Envoy?**
 
 Envoy circuit breaking protects an overloaded service by rejecting excess work outright. That keeps the backend alive, but a rejected request is just gone. Nothing durable survives it, and the client is left to retry independently, creating uncoordinated competition for whatever capacity opens up next and wasting cycles on repeated attempts.
 
@@ -11,6 +11,16 @@ Aquifer takes a different approach: persist the excess work, then pace its relea
 The backend is also closer to the truth about its own capacity than a static proxy limit ever is. If the fleet loses half its usable capacity, the admission rate should fall; if capacity expands, the release rate should rise. Instead of leaning on static limits like max connections or concurrent requests, Aquifer can ask the backend directly, continuously: *how fast should we send work right now?* (See [Dynamic Pacing](#dynamic-pacing) for how that ceiling, backoff, and recovery actually work.)
 
 Circuit breaking protects the service by saying "stop." Aquifer coordinates demand by saying "wait here, and I'll tell you when to go."
+
+Hookdeck queues and paces inbound webhooks as a hosted service, billed by usage. Aquifer runs on your own machines, open source like Envoy, so scaling it costs only the machines you add. It also paces outbound calls, agent tool calls and WebSocket sessions, at whatever rate the backend asks for.
+
+You don't have to pick one. Keep Envoy as the front door that authenticates callers and routes them, with Aquifer behind it holding the work. Hookdeck can deliver the webhooks it receives to Aquifer, which releases them into your backend as fast as the backend says it can take them.
+
+Callers get the result back whichever way suits them:
+
+- **Synchronously**, on the same connection: [`POST /proxy`](API.md#post-proxy) relays the target API's response directly when it has room, and when it doesn't, holds the connection open as a stream until the queued job finishes. No webhook receiver needed.
+- **Over a WebSocket**: [`GET /websocket`](API.md#get-websocket) records every message in a Valkey transcript before delivering it, so a client that reconnects picks up from its last cursor without missing an event.
+- **By webhook**: a durable, paced POST to your receiver, retried through a receiver outage, and skipped when the caller already received the result on a stream.
 
 **Not going to read all this?** Point your coding agent at the [Aquifer pilot skill](skills/aquifer-pilot/SKILL.md). It evaluates Aquifer against your own workload in a shadow run on a branch, then shows you the numbers.
 
