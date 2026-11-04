@@ -10,15 +10,19 @@ A durable queue that paces traffic into a service at the rate it can take. Put i
 
 ![Traditional load balancing collapsing under a spike, round-robin flickering faster as instances die, versus Aquifer pacing that keeps the fleet stable while an autoscaler brings real capacity online](docs/images/fleet-degradation.gif)
 
-## Why not Envoy or Hookdeck?
+## Why not Envoy, Redis, SQS or Hookdeck?
 
-Envoy's circuit breaking protects an overloaded service by rejecting the excess. A rejected request is gone, so every client retries on its own and they all compete for whatever capacity frees up next. Circuit breaking says "stop." Aquifer says "wait here, and I'll tell you when to go."
+**Envoy** protects an overloaded service by rejecting the excess. A rejected request is gone, so every client retries on its own and they all compete for whatever capacity frees up next. Circuit breaking says "stop." Aquifer says "wait here, and I'll tell you when to go."
 
 ![Circuit breaking rejecting requests and clients retrying into a thundering herd when it reopens, versus Aquifer's per-client queues releasing work at the pace the backend asks for](docs/images/circuit-breaking-vs-queue.gif)
 
-Hookdeck queues inbound webhooks as a hosted service, billed by usage. Aquifer is open source and runs on your own machines, so scaling it costs only the machines you add, and it paces outbound API calls, agent tool calls and WebSocket sessions too.
+**Redis or SQS plus a rate-limited worker** can do the core of this: in the multi-agent benchmark, a carefully built Redis queue and dispatcher matched Aquifer's latency. Aquifer gives you the rest without writing it: a queue per tenant with fair admission, a pace the target sets live (`X-Aquifer-*` headers or vLLM's load report) instead of a fixed worker rate, `POST /proxy` falling back to the queue on the same connection, idempotency keys, and results by stream or webhook. It also drew about 5× fewer refusals from the benchmark's CI service, because it paced to the limits CI advertised.
 
-You can run it with both: Envoy in front as the gateway, Aquifer behind it holding the work, and Hookdeck delivering its webhooks into Aquifer.
+**Hookdeck** queues inbound webhooks as a hosted service, billed by usage. Aquifer runs on your own machines, so scaling it costs only the machines you add, and it also paces outbound API calls, agent tool calls and WebSocket sessions.
+
+**Temporal** makes workflows durable and can cap how fast a task queue runs, but that cap is a number you set, not what the downstream reports it can take right now.
+
+They combine: Envoy in front as the gateway, Hookdeck delivering webhooks into Aquifer, and Temporal activities calling Aquifer's `POST /proxy`.
 
 ## Results
 
@@ -85,20 +89,6 @@ Each accepted job is written to the local disk of the node that accepted it (Peb
 - **A restarted node picks its queue back up** from its volume and dispatches it again. Delivery is at least once, so make the target and your webhook handler idempotent on the job's key.
 - **Queued jobs are not replicated.** If a node's disk is lost, the jobs queued on it are lost with it. Where that matters, keep the original request until its result arrives, and resubmit with the same `idempotent_key` if it doesn't.
 - **More than one node:** nodes are independent, each with its own queue and pacing. With [cluster routing](https://rjpruitt16.github.io/aquifer/api/#regional-cluster-routing) on, any node accepts a request and forwards it to that user's owner; when an owner is unreachable, its users' new requests go to the next node. Pacing is per node, so several nodes in front of one target multiply the rate it sees: either give each protected target its own node, or have the target divide its rate among them: Aquifer sends `X-Aquifer-Node-Id`, so it can count the nodes ([Partitioning](https://rjpruitt16.github.io/aquifer/partitioning/)).
-
-## Why not SQS, Redis or Temporal?
-
-You can build this yourself, and in the multi-agent benchmark a carefully built Redis queue and dispatcher matched Aquifer's latency. What Aquifer gives you without writing that code:
-
-- a queue per tenant, with fair admission when the backlog fills;
-- a pace the target sets live, through `X-Aquifer-*` response headers or vLLM's own load report, instead of a fixed worker rate;
-- `POST /proxy`, which calls the target directly when it has room and falls back to the queue on the same connection;
-- idempotency keys, and results by polling, SSE stream or webhook;
-- WebSocket proxying with a durable transcript that replays what a client missed.
-
-In that benchmark's bursts, Aquifer also drew about 5× fewer refusals from the downstream CI service than the hand-built dispatcher, because it paced to the limits CI advertised.
-
-Temporal makes a workflow durable and retries its steps, and it can cap how fast a task queue runs, but that cap is a number you set; it doesn't follow what the downstream service reports it can take right now. Aquifer handles that part, so the two fit together: have a Temporal activity call Aquifer's `POST /proxy`, with an idempotency key built from the workflow and activity IDs so Temporal's retries don't queue the job twice, and a start-to-close timeout long enough to cover the wait in Aquifer's queue.
 
 ## Documentation
 
