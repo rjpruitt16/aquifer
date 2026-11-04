@@ -2,13 +2,13 @@
 
 ![How engineers respond to congestion: pacing and backpressure everywhere else in infrastructure, versus retrying everything immediately at the API layer](docs/images/how-engineers-respond-to-congestion.jpg)
 
-A self-hosted load balancer for agent and API traffic. When a burst arrives faster than your backend, a GPU or a third-party API can take it, Aquifer holds the excess on disk and lets it through at the rate the target says it can handle.
+A durable queue that paces traffic into a service at the rate it can take. Put it in front of a GPU, a rate-limited third-party API or your own backend: when a burst arrives faster than the target can handle, Aquifer holds the excess on disk instead of letting callers retry into it, and releases it as fast as the target says it can go.
 
 - **Retry storm mitigation.** Callers wait in a durable queue instead of hammering a struggling service with retries, and the queue drains as capacity comes back.
 - **Fairness.** Every tenant gets its own queue, so one noisy customer or runaway agent can't starve the rest.
 - **Results however the caller wants them:** on the same connection (synchronous), over a WebSocket that replays anything missed after a reconnect, or by durable webhook.
 
-![Traditional load balancing collapsing under a spike, round-robin flickering faster as instances die, versus Aqueduct pacing that keeps the fleet stable while an autoscaler brings real capacity online](docs/images/fleet-degradation.gif)
+![Traditional load balancing collapsing under a spike, round-robin flickering faster as instances die, versus Aquifer pacing that keeps the fleet stable while an autoscaler brings real capacity online](docs/images/fleet-degradation.gif)
 
 ## Why not Envoy or Hookdeck?
 
@@ -22,10 +22,10 @@ You can run it with both: Envoy in front as the gateway, Aquifer behind it holdi
 
 ## Results
 
-- **10× traffic spikes absorbed with zero failures**, with clean `429`s once a sustained overload fills the queue.
-- **A real GPU under load:** reading vLLM's own load signal, Aquifer cut the peak backend queue from 449 waiting requests to 8.
-- **AI agents sharing a GPU, CI runners and a sandbox:** during bursts, compared with calling directly and retrying, the smallest tenants' p99 fell from 245 s to 149 s and each workflow needed 10 requests instead of 17. Aquifer matched a hand-built Redis queue and dispatcher, and drew about 5× fewer refusals from CI.
-- **30 of 30 jobs survive a `kill -9`** mid-drain, with per-write sync on.
+- **GPU work wasted on retries: 96.5% direct, 22% through Aquifer.** With load ramped far past a vLLM server's capacity, callers that timed out and retried left the GPU generating answers nobody was waiting for. Through Aquifer, capped at vLLM's real concurrency, vLLM's own queue stayed at 0 instead of peaking at 18,079 ([details](https://rjpruitt16.github.io/aquifer/benchmarks/#10-gpu-retry-tax-measured-in-tokens-runpodvllm)).
+- **Pacing from the GPU's own signal:** reading the load report vLLM already sends, Aquifer cut the peak backend queue from 449 waiting requests to 8.
+- **AI agents sharing a GPU, CI runners and a sandbox:** during bursts, compared with calling directly and retrying, the smallest tenants' p99 fell from 245 s to 149 s and each workflow needed 10 requests instead of 17.
+- **A 10× spike accepted without an error:** 3,000 jobs in 30 seconds, every one accepted, p99 166 ms to accept. That measures intake; the jobs then complete at the target's pace.
 
 Methods and caveats: [benchmarks](https://rjpruitt16.github.io/aquifer/benchmarks/), and the end-to-end tests in front of Hatchet, vLLM and multi-agent workflows in [aqueduct-benchmarks](https://github.com/rjpruitt16/aqueduct-benchmarks).
 
@@ -58,9 +58,29 @@ docker compose up --detach
 curl http://127.0.0.1:8080/ready
 ```
 
-Fly.io, AWS and Canalis fleet setups are in the [quick start guide](https://rjpruitt16.github.io/aquifer/quick-start/). Release binaries for Linux and macOS are on every [GitHub release](https://github.com/rjpruitt16/aquifer/releases).
+Fly.io, AWS and multi-node setups are in the [quick start guide](https://rjpruitt16.github.io/aquifer/quick-start/). Release binaries for Linux and macOS are on every [GitHub release](https://github.com/rjpruitt16/aquifer/releases).
 
 Keep Aquifer on a private network behind a gateway you trust: it sends real HTTP requests to the URLs it's given, so it must never take them from untrusted callers. See [Why Aquifer](https://rjpruitt16.github.io/aquifer/) for where it sits.
+
+## Durability and running more than one node
+
+Each accepted job is written to the local disk of the node that accepted it (Pebble by default).
+
+- **By default, writes are synced every 100 ms.** Aquifer answers before a write reaches disk, so a crash loses the jobs accepted since the last completed sync: about 100 ms of intake normally, more when the disk is slow. New jobs get `429` once that gap passes 1 second. For no loss of acknowledged jobs, set `AQUIFER_PEBBLE_FLUSH_INTERVAL_MS=0`: every write waits for its own fsync, and 30 of 30 jobs survived a `kill -9` mid-drain. It costs throughput: on a Fly machine, about 150 jobs/s end to end instead of 700.
+- **A restarted node picks its queue back up** from its volume and dispatches it again. Delivery is at least once, so make the target and your webhook handler idempotent on the job's key.
+- **Queued jobs are not replicated.** If a node's disk is lost, the jobs queued on it are lost with it. Where that matters, keep the original request until its result arrives, and resubmit with the same `idempotent_key` if it doesn't.
+- **More than one node:** nodes are independent, each with its own queue and pacing. With [cluster routing](https://rjpruitt16.github.io/aquifer/api/#regional-cluster-routing) on, any node accepts a request and forwards it to that user's owner; when an owner is unreachable, its users' new requests go to the next node. Pacing is per node, so several nodes in front of one target multiply the rate it sees: either give each protected target its own node, or have the target divide its rate among them: Aquifer sends `X-Aqueduct-Node-Id`, so it can count the nodes ([Partitioning](https://rjpruitt16.github.io/aquifer/partitioning/)).
+
+## Why not SQS or Redis plus a rate-limited worker?
+
+You can build this yourself, and in the multi-agent benchmark a carefully built Redis queue and dispatcher matched Aquifer's latency. What Aquifer gives you without writing that code:
+
+- a queue per tenant, with fair admission when the backlog fills;
+- a pace the target sets live, through `X-Aqueduct-*` response headers or vLLM's own load report, instead of a fixed worker rate;
+- `POST /proxy`, which calls the target directly when it has room and falls back to the queue on the same connection;
+- idempotency keys, and results by stream, WebSocket or webhook.
+
+In that benchmark's bursts, Aquifer also drew about 5× fewer refusals from the downstream CI service than the hand-built dispatcher, because it paced to the limits CI advertised.
 
 ## Documentation
 
