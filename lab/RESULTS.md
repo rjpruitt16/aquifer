@@ -9,6 +9,8 @@ Tool calls and minutes per run, as reported by the agent harness. Checks are fro
 | ref2 | i1 skill, new prompt (reference) | 37, 39, 36 | 37 | — | 9/9 ×3 (ref2-r2 hand-graded: mentions flush=0 only to flag a docs inconsistency) | — |
 | i2 | version check on source builds, laptop notes (bind, `.l8-key`), API.md section map, limit details | 38, 33, 43 | 38 (+3%) | — | 9/9 ×3 | no (failed try 1/5); reverted |
 | i3 | step 3 opens with "do you need headers at all"; fix Queue-Depth; even-split caveat | 30, 37, 36 | 36 (−3%) | — | 9/9 ×3 (i3-r2 hand-graded) | no (failed try 2/5); advice reverted, factual fixes kept |
+| ref4 | i1 + factual fixes (0dbeff3) | 35, 26, 34 | 34 | — | 9/9 ×3 (ref4-r2 hand-graded) | — |
+| i4 | tested one-command pass recipe (`pass.sh`), job body, completion check, key metrics | 33, 21, 28 | 28 (−18%) | — | 9/9 ×3 | **yes** |
 
 ## i0 notes
 
@@ -46,3 +48,9 @@ Factual corrections stay in the skill regardless of speed (a wrong statement sho
 ## i3 notes
 
 All three runs skipped backend headers because the static ceiling measured well enough, which is the right call for a fixed pool, but tool calls barely moved (30, 37, 36). Where i3's calls went: about 8–9 writing load/run scripts, 3–7 starting and stopping processes, about 10 running passes. Grader updated: `pacing_choice_measured` accepts a measured static ceiling, and the pool-signal check only applies when headers are sent.
+
+## i4 notes
+
+Kept: −18% against a same-prompt reference. Two runs used `pass.sh` as written; one adapted it (added an env passthrough).
+
+i4-r3 found that the YAML `rps` isn't held as a total across tenant queues. Reproduced by hand: 3 tenants, `rps: 10` → about 13/s delivered; `rps: 30` → about 70/s (the backend's limit). Cause appears to be per-success recovery (5%) outrunning the 3 s aggregate throttle. Filed as rjpruitt16/aquifer#146; the skill's claim (added in i1) was corrected as a factual fix, so the reference for i5 is i4 + that fix (99517c1).
