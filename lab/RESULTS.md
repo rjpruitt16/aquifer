@@ -8,6 +8,7 @@ Tool calls and minutes per run, as reported by the agent harness. Checks are fro
 | i1 | skill: "Running Aquifer locally" (build/run, where every setting is, how `rps` and `max_concurrent` combine) | 38, 41, 41 | 41 (−18%) | 29 (29, 29, 18) | 9/9 ×3 (hand-graded; see notes) | yes |
 | ref2 | i1 skill, new prompt (reference) | 37, 39, 36 | 37 | — | 9/9 ×3 (ref2-r2 hand-graded: mentions flush=0 only to flag a docs inconsistency) | — |
 | i2 | version check on source builds, laptop notes (bind, `.l8-key`), API.md section map, limit details | 38, 33, 43 | 38 (+3%) | — | 9/9 ×3 | no (failed try 1/5); reverted |
+| i3 | step 3 opens with "do you need headers at all"; fix Queue-Depth; even-split caveat | 30, 37, 36 | 36 (−3%) | — | 9/9 ×3 (i3-r2 hand-graded) | no (failed try 2/5); advice reverted, factual fixes kept |
 
 ## i0 notes
 
@@ -37,3 +38,11 @@ No gain. Its accuracy fixes are worth keeping outside the speed measurement (rec
 - it writes `.l8-key`/`l8-trust` into the working directory (`L8_KEY_PATH`); `L8_KEY_PATH` isn't in docs/pages/configuration.md.
 
 Every i2 and ref2 run built backend pacing headers and spent 2–4 extra passes on them, and in almost every run they did worse than the static ceiling. Two skill errors fed that: the table calls `X-Aqueduct-Queue-Depth` "this queue's jobs" (it's node-wide: `store.Counts().QueueDepth`), and the "divide by active queues" advice starves a big tenant when tenants are uneven. ref2-r2 also noticed the README and configuration.md still recommend `AQUIFER_PEBBLE_FLUSH_INTERVAL_MS=0` for zero loss while the skill says not to.
+
+## Rule added after i3
+
+Factual corrections stay in the skill regardless of speed (a wrong statement shouldn't have to earn its way out); advice has to earn the 10%. Kept as fixes: `Queue-Depth` is node-wide, the even-split caveat, the `aquifer dev` version note, no bind setting, `.l8-key`/`l8-trust` and `L8_KEY_PATH`. The reference for i4 onward is i1 plus those fixes (commit 0dbeff3).
+
+## i3 notes
+
+All three runs skipped backend headers because the static ceiling measured well enough, which is the right call for a fixed pool, but tool calls barely moved (30, 37, 36). Where i3's calls went: about 8–9 writing load/run scripts, 3–7 starting and stopping processes, about 10 running passes. Grader updated: `pacing_choice_measured` accepts a measured static ceiling, and the pool-signal check only applies when headers are sent.

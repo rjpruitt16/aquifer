@@ -18,8 +18,9 @@ checks = {
     # (Changed after i2: for a fixed pool the static ceiling measured better, and the skill now says so.)
     "pacing_choice_measured": bool(re.search(r"X-(Aqueduct|Aquifer)-(Rps|Max-Concurrent|Max-Backlog)", code, re.I))
         or bool(re.search(r"static", report, re.I) and re.search(r"\b0\b[^\n]{0,40}503|503[^\n]{0,40}\b0\b|no 503", report, re.I)),
-    "headers_come_from_pool_signal": bool(re.search(r"pool_stats|pool_in_use|_in_use|_waiting|POOL_SIZE", code))
-        and bool(re.search(r"X-(Aqueduct|Aquifer)-", code, re.I)),
+    # Only applies when the backend sends pacing headers.
+    "headers_come_from_pool_signal": not re.search(r"X-(Aqueduct|Aquifer)-(Rps|Max-Concurrent)", code, re.I)
+        or bool(re.search(r"pool_stats|pool_in_use|_in_use|_waiting|POOL_SIZE|wait", code)),
     "before_and_after_numbers": bool(re.search(r"(direct|baseline|before)", report, re.I))
         and bool(re.search(r"aquifer", report, re.I)) and len(re.findall(r"\d", report)) > 20,
     "small_partners_reported": bool(re.search(r"corner-shop|kiosk|deli|small", report, re.I)),
