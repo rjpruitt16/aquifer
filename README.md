@@ -2,7 +2,7 @@
 
 ![How engineers respond to congestion: pacing and backpressure everywhere else in infrastructure, versus retrying everything immediately at the API layer](docs/images/how-engineers-respond-to-congestion.jpg)
 
-A durable queue that paces traffic into a service at the rate it can take. Put it in front of a GPU, a rate-limited third-party API or your own backend: when a burst arrives faster than the target can handle, Aquifer holds the excess on disk instead of letting callers retry into it, and releases it as fast as the target says it can go.
+A durable queue that paces traffic into a service at the rate it can take. Put it in front of a GPU, a rate-limited third-party API or your own backend: when a burst arrives faster than the target can handle, Aquifer holds the excess on disk instead of letting callers retry into it, and releases it at the rate you set for that target, slowing down whenever the target, or its load report, asks for less.
 
 - **Retry storm mitigation.** Callers wait in a durable queue instead of hammering a struggling service with retries, and the queue drains as capacity comes back.
 - **Fairness.** Every tenant gets its own queue, so one noisy customer or runaway agent can't starve the rest.
