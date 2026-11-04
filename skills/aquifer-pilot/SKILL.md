@@ -65,6 +65,11 @@ Ask what sits behind their bottleneck, and say plainly if Aquifer isn't a fit.
 - **Good fit:** capacity that is elastic but slow to come online or expensive to keep idle. Examples are GPUs and inference servers, rate-limited third-party APIs, CI runners, databases with bursty writers, and webhook or WebSocket floods.
 - **Overkill:** a ceiling that is fixed for good, or traffic that never bursts past capacity.
 
+While you're here, decide which pieces the design needs, and write the choice into the report:
+- **Inlet** if the traffic is webhooks from providers. It verifies their signatures, which Aquifer doesn't, and pushes the events in with the provider's event ID as `idempotent_key`.
+- **Canalis** if the pilot will run more than one Aquifer node behind one address. Use the [Canalis + Aquifer quick start](https://github.com/rjpruitt16/aquifer/blob/main/examples/canalis/README.md).
+- **Neither** for a single node behind their own trusted service, which is the usual pilot. Don't add a piece the workload doesn't need.
+
 ## 2. Benchmark the backend first
 
 Before Aquifer goes in front, find the backend's real limits. Ramp load against the replica until it degrades, and record:
