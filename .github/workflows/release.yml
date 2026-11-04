@@ -30,3 +30,45 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  skills:
+    # Attach a copy of the agent skills pinned to this tag, and open a PR that
+    # moves the "Pinned to" line on main to it. Nothing is committed to main directly.
+    needs: goreleaser
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Attach pinned skills to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          python3 scripts/pin-skills.py "$TAG" --out "dist/aquifer-skills-$TAG"
+          tar -czf "aquifer-skills-$TAG.tar.gz" -C dist "aquifer-skills-$TAG"
+          gh release upload "$TAG" "aquifer-skills-$TAG.tar.gz" --clobber
+
+      - name: Open a PR pinning main's skills to this release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if git diff --quiet; then
+            echo "skills already pinned to $TAG"
+            exit 0
+          fi
+          branch="skills/pin-$TAG"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git add skills
+          git commit -m "Pin agent skills to $TAG"
+          git push origin "$branch"
+          gh pr create --base main --head "$branch" \
+            --title "Pin agent skills to $TAG" \
+            --body "Moves the \"Pinned to\" line in skills/*/SKILL.md to $TAG. The pinned copy is attached to the $TAG release."
