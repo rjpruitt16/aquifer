@@ -74,6 +74,44 @@ Everything a pilot needs is in the docs below; you shouldn't need Aquifer's Go s
   - Pacing headers from the target (`X-Aqueduct-Rps`, `X-Aqueduct-Max-Concurrent`) set the pace of the queue whose request they answer, and only ever within the YAML ceiling. A target that wants a total has to divide it by the number of active queues; each request carries `X-Aqueduct-Active-Queues`.
   - Start with the YAML ceiling set from the step 2 benchmark. Add headers only if a measured run shows the static ceiling isn't enough, and compare runs with and without them.
 
+### One pass in one command
+
+Each pass needs the same plumbing: a fresh Aquifer with its own data directory, a wait until it's ready, metrics saved while the load runs, and everything stopped afterwards, even if the load fails. This script does that (tested against Aquifer v0.15.1). Save it as `pilot/pass.sh` and pass it the load command:
+
+```bash
+#!/usr/bin/env bash
+# pass.sh NAME CONFIG.yml LOAD_CMD...
+# One local pass: fresh Aquifer and data dir, wait until ready, scrape
+# /metrics every 5 s while LOAD_CMD runs, save final metrics, stop everything.
+set -euo pipefail
+name=$1; cfg=$(cd "$(dirname "$2")" && pwd)/$(basename "$2"); shift 2
+port=${AQ_PORT:-8080}; bin=$(cd "$(dirname "${AQ_BIN:-pilot/aquifer}")" && pwd)/$(basename "${AQ_BIN:-pilot/aquifer}")
+dir=pilot/runs/$name; rm -rf "$dir"; mkdir -p "$dir"
+aq=""; scr=""
+trap '[ -n "$scr" ] && kill $scr 2>/dev/null; [ -n "$aq" ] && kill $aq 2>/dev/null; wait 2>/dev/null || true' EXIT
+(cd "$dir" && PORT=$port DB_PATH=./aquifer-data CONFIG_PATH=$cfg exec "$bin") > "$dir/aquifer.log" 2>&1 &
+aq=$!
+for _ in $(seq 50); do curl -sf "localhost:$port/ready" >/dev/null && break; sleep 0.2; done
+curl -sf "localhost:$port/ready" >/dev/null || { echo "aquifer didn't start; see $dir/aquifer.log"; exit 1; }
+(while sleep 5; do curl -s "localhost:$port/metrics" > "$dir/metrics-$(date +%s).prom"; done) & scr=$!
+"$@"
+curl -s "localhost:$port/metrics" > "$dir/metrics-final.prom"
+curl -s "localhost:$port/health" > "$dir/health.json"
+```
+
+```bash
+AQ_PORT=8080 AQ_BIN=./bin/aquifer pilot/pass.sh aq-static pilot/aquifer.yml python3 pilot/load.py --target http://127.0.0.1:8080
+```
+
+The load command should return only when its jobs have finished. A job body for the target, and how to tell when it's done:
+
+```json
+{"user_id": "<tenant>", "idempotent_key": "<stable per request>", "url": "http://127.0.0.1:<backend port>/<path>",
+ "method": "POST", "headers": {"Content-Type": "application/json"}, "body": "<the request body, as a string>", "max_retries": -1}
+```
+
+`POST /jobs` answers `201` with a `job_id` (`200` with `"duplicate": true` for a key it already has). `GET /jobs/<job_id>` shows `status` going `queued` → `completed` (or `failed`). On a `429`, wait the `Retry-After` and resubmit the same key. The metrics a pilot reads most: `aquifer_jobs_total`, `aquifer_tenant_jobs_total` (with `AQUIFER_METRICS_TENANT_LABELS=true`), `aquifer_admission_rejected_total`, `aquifer_queue_wait_seconds`, `aquifer_backlog_jobs` and `aquifer_active_queues`.
+
 ## 1. Fit check
 
 Ask what sits behind their bottleneck, and say plainly if Aquifer isn't a fit.
