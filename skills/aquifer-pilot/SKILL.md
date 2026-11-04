@@ -5,7 +5,7 @@ description: Evaluate Aquifer against your own workload. A shadow pilot on a bra
 
 # Aquifer pilot
 
-Pinned to Aquifer v0.15.1. Check the version they run (`aquifer --version`, or the image tag). If it's different, read this skill at that release instead: https://github.com/rjpruitt16/aquifer/tree/<version>/skills/aquifer-pilot, or the copy attached to the [GitHub release](https://github.com/rjpruitt16/aquifer/releases) (releases before v0.16.1 don't have one). Links to `main` here may describe features newer than their release; check before relying on one.
+Pinned to Aquifer v0.15.1. Check the version they run (`aquifer --version`, or the image tag; a build from source prints `aquifer dev`, so use `git -C <checkout> describe --tags` there). If it's different, read this skill at that release instead: https://github.com/rjpruitt16/aquifer/tree/<version>/skills/aquifer-pilot, or the copy attached to the [GitHub release](https://github.com/rjpruitt16/aquifer/releases) (releases before v0.16.1 don't have one). Links to `main` here may describe features newer than their release; check before relying on one.
 
 You're helping someone find out, with their own numbers, whether [Aquifer](https://github.com/rjpruitt16/aquifer) helps their workload. Keep it simple:
 - a branch, not a migration;
@@ -65,12 +65,14 @@ Those are CockroachDB's own results, not Aquifer's. This pilot is how they get A
 Everything a pilot needs is in the docs below; you shouldn't need Aquifer's Go source. If one of them doesn't answer a question, note it in the report: that's a docs bug.
 
 - **Build and run.** From a checkout: `go build -o ./bin/aquifer ./cmd/aquifer`, or `go install github.com/rjpruitt16/aquifer/cmd/aquifer@<version>`. Then `PORT=8080 DB_PATH=./aquifer-data CONFIG_PATH=aquifer.yml ./bin/aquifer`. `GET /ready` answers once it's up.
+- **On a laptop:** Aquifer listens on every interface (`:PORT`), and there's no setting to bind it to loopback only, so don't run it on an untrusted network. On first start it writes its L8 identity, `.l8-key` and `l8-trust`, into the working directory (`L8_KEY_PATH` moves the key). A pilot can ignore them; start Aquifer from a scratch directory so they don't land in the user's repo.
 - **Every setting** (env vars and the YAML rate file) is in [docs/pages/configuration.md](../../docs/pages/configuration.md). The root `CONFIGURATION.md` only explains why some defaults are what they are.
-- **Endpoints:** `POST /jobs`, `GET /jobs/{id}`, `GET /jobs/{id}/stream`, `POST /proxy`, `GET /metrics`, `GET /health`, all in [API.md](../../API.md). Account queues (one queue per `user_id`) are on by default.
+- **Endpoints:** `POST /jobs`, `GET /jobs/{id}`, `GET /jobs/{id}/stream`, `POST /proxy`, `GET /metrics`, `GET /health`, all in [API.md](../../API.md). Account queues (one queue per `user_id`) are on by default. API.md is long; a pilot needs only these sections: `## POST /jobs` (with `### Retries` and `### Fair queue admission`), `## POST /proxy`, `## GET /jobs/:id`, `## GET /jobs/:id/stream` and `## GET /metrics`. Find them with `grep -n '^## ' API.md`.
 - **How the limits combine** (the question pilots most often go to the source for):
-  - The YAML `rps` for a host is the total for that target. When several tenants' queues are active, Aquifer scales their rates down proportionally so the sum stays within it.
+  - The YAML `rps` for a host is the total for that target. When several tenants' queues are active, Aquifer scales their rates down proportionally so the sum stays within it. That only happens when the sum is over the ceiling: a queue using less than its share leaves the rest to busier queues.
   - `max_concurrent` applies to each tenant's queue separately and isn't summed. With N active tenants, up to N × `max_concurrent` requests can be in flight at the target.
   - Pacing headers from the target (`X-Aqueduct-Rps`, `X-Aqueduct-Max-Concurrent`) set the pace of the queue whose request they answer, and only ever within the YAML ceiling. A target that wants a total has to divide it by the number of active queues; each request carries `X-Aqueduct-Active-Queues`.
+  - `aquifer_flow_rate_rps` in `GET /metrics` adds up the queues' allowed rates, so it can read well above what actually reaches the target. Measure the delivered rate at the backend.
   - Start with the YAML ceiling set from the step 2 benchmark. Add headers only if a measured run shows the static ceiling isn't enough, and compare runs with and without them.
 
 ## 1. Fit check
