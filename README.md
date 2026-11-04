@@ -1,5 +1,7 @@
 # Aquifer
 
+![How engineers respond to congestion: pacing and backpressure everywhere else in infrastructure, versus retrying everything immediately at the API layer](docs/images/how-engineers-respond-to-congestion.jpg)
+
 A self-hosted load balancer for agent and API traffic. When a burst arrives faster than your backend, a GPU or a third-party API can take it, Aquifer holds the excess on disk and lets it through at the rate the target says it can handle.
 
 - **Retry storm mitigation.** Callers wait in a durable queue instead of hammering a struggling service with retries, and the queue drains as capacity comes back.
