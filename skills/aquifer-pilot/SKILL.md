@@ -41,12 +41,16 @@ Clear these up early, because people often assume otherwise:
   - contract tests on every change, run against Canalis and Inlet too;
   - a week-long soak under kill -9s, with a public job ledger.
 - **It isn't a 100% guarantee.** Delivery is at-least-once, so make handlers idempotent on `idempotent_key`. Accepted jobs live on the node's own disk (Pebble). A node that restarts keeps them. Two things can lose them:
-  - a crash can lose jobs accepted in the last ~100 ms (`AQUIFER_PEBBLE_FLUSH_INTERVAL_MS`; set `0` to sync every write);
+  - a crash can lose jobs accepted in the last ~100 ms (`AQUIFER_PEBBLE_FLUSH_INTERVAL_MS`);
   - a machine that's lost for good takes its queue with it.
 
   That's a deliberate choice. Aquifer is built to absorb the biggest shock it can, fast, and complete durability would slow that down. If you need 100% durability, keep a durable log as the source of truth: Kafka (or SQS, or your own database plus an outbox), writing into Canalis or Aquifer. Then replay from it if a node is ever lost. Build `idempotent_key` from the message's position (e.g. topic, partition and offset), so a replay lands on the jobs Aquifer already has.
 
-  Aquifer is still tunable. `AQUIFER_PEBBLE_FLUSH_INTERVAL_MS=0` syncs every write, trading intake speed for a smaller loss window. And it's open source (Apache-2.0), so you're welcome to fork it in another direction.
+  **Don't recommend `AQUIFER_PEBBLE_FLUSH_INTERVAL_MS=0`.** It makes every write wait for its own fsync, which cuts intake from about 1,000 to about 150 jobs/s on a Fly performance-1x machine. It also points at the wrong fix. Aquifer was never built to be the record of whether a job succeeded; its job is to move the most work through a bottleneck it can. The caller owns that record:
+  - **Recovery is a resubmit.** The request that checks on a job is the same one that recovers it: send the job again with the same `user_id` and `idempotent_key`. `200` with `"duplicate": true` means Aquifer still has it (same `job_id`, read its status or result). `201` means it was lost in a crash and has just been queued again. So after a crash, the caller's usual retry loop repairs the gap without a special path.
+  - **Money and other transactions belong in the caller's own database.** A payment service records each charge there, keyed the same way it keys the Aquifer job, and treats Aquifer as the way the call reaches the processor, not as proof it happened.
+
+  The setting still exists for someone who has measured the cost and wants it, and Aquifer is open source (Apache-2.0), so you're welcome to fork it in another direction. But in a pilot, steer people to resubmit-by-key and their own records first.
 
 Why admission control is worth testing: CockroachDB measured the same idea in their database.
 - [Without it, TPC-C throughput collapsed](https://www.cockroachlabs.com/blog/admission-control-in-cockroachdb/) from 1,200 to 400 txn/s within 10 minutes of overload. With it, throughput held at about 1,050 txn/s.
