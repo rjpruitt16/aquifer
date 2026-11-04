@@ -53,8 +53,8 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 10
           resources:
-            # Starting point only -- see the root README's "Choosing a
-            # machine size" section and benchmark.md for real numbers before
+            # Starting point only -- see "Choosing a machine size" in
+            # docs/pages/deployment.md and benchmark.md for real numbers before
             # sizing this for your own traffic shape.
             requests:
               cpu: 250m

@@ -1,7 +1,7 @@
 # External registration
 
 **Off by default.** A normal deployment (a single long-lived instance, or static domain/tenant
-partitioning as described in [README.md](README.md#deployment-model)) is completely unaffected unless
+partitioning as described in [Deployment](docs/pages/deployment.md)) is completely unaffected unless
 you explicitly turn this on — no background goroutine runs, no added overhead, nothing about default
 behavior changes.
 

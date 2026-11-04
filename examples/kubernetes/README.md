@@ -1,7 +1,7 @@
 # Aquifer behind a Gateway API proxy (Envoy Gateway)
 
 A fourth deployment shape alongside sidecar, standalone, and embedded library (see the root
-[README's "Deployment model"](../../README.md#deployment-model)): Aquifer as a normal Deployment,
+[Deployment](../../docs/pages/deployment.md)): Aquifer as a normal Deployment,
 reached through a [Gateway API](https://gateway.k8s.io/) proxy instead of a sidecar. The Gateway
 owns routing, TLS termination, and the cluster's single ingress point; Aquifer owns the queue behind
 it — not a way to horizontally scale Aquifer itself.
@@ -73,8 +73,8 @@ just the manifests applying cleanly.
 - **Image**: `deployment.yaml` hardcodes `ghcr.io/rjpruitt16/aquifer:latest` — pin a specific tag for
   anything beyond local testing, or repoint at your own fork's registry.
 - **Sizing**: the CPU/memory requests in `deployment.yaml` are a starting point, not a benchmarked
-  recommendation — see the root [benchmark.md](../../benchmark.md) and the README's "Choosing a
-  machine size" section before sizing for real traffic.
+  recommendation — see the root [benchmark.md](../../benchmark.md) and "Choosing a machine size" in
+  [Deployment](../../docs/pages/deployment.md) before sizing for real traffic.
 - **TLS**: this example is HTTP-only on the Gateway listener, to keep the example focused on the
   Gateway API wiring itself. A production deployment would add an HTTPS listener with a cert (e.g.
   via [cert-manager](https://cert-manager.io/)) — not included here.
