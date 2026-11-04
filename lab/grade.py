@@ -14,7 +14,10 @@ code = "\n".join(changed.values())
 checks = {
     "report_written": bool(report),
     "bottleneck_is_db_pool": bool(re.search(r"(connection )?pool|POOL_SIZE|connections?", report, re.I)),
-    "backend_sends_pacing_headers": bool(re.search(r"X-(Aqueduct|Aquifer)-(Rps|Max-Concurrent|Max-Backlog)", code, re.I)),
+    # Either the backend paces from the pool, or the report shows the static ceiling alone was enough.
+    # (Changed after i2: for a fixed pool the static ceiling measured better, and the skill now says so.)
+    "pacing_choice_measured": bool(re.search(r"X-(Aqueduct|Aquifer)-(Rps|Max-Concurrent|Max-Backlog)", code, re.I))
+        or bool(re.search(r"static", report, re.I) and re.search(r"\b0\b[^\n]{0,40}503|503[^\n]{0,40}\b0\b|no 503", report, re.I)),
     "headers_come_from_pool_signal": bool(re.search(r"pool_stats|pool_in_use|_in_use|_waiting|POOL_SIZE", code))
         and bool(re.search(r"X-(Aqueduct|Aquifer)-", code, re.I)),
     "before_and_after_numbers": bool(re.search(r"(direct|baseline|before)", report, re.I))
