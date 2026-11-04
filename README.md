@@ -1,117 +1,41 @@
-# Aquifer — Load balancer for agentic workloads
+# Aquifer
 
-![How engineers respond to congestion: pacing and backpressure everywhere else in infrastructure, versus retrying everything immediately at the API layer](docs/images/how-engineers-respond-to-congestion.jpg)
+A self-hosted load balancer for agent and API traffic. When a burst arrives faster than your backend, a GPU or a third-party API can take it, Aquifer holds the excess on disk and lets it through at the rate the target says it can handle.
 
-**TL;DR — why not Hookdeck or Envoy?**
-
-Envoy's circuit breaking protects an overloaded service by rejecting excess work, and a rejected request is gone: every client retries on its own and they compete for whatever capacity frees up. Aquifer stores the excess durably and releases it at the rate the backend says it can take right now (see [Dynamic Pacing](#dynamic-pacing)). Circuit breaking says "stop." Aquifer says "wait here, and I'll tell you when to go."
-
-Hookdeck does something similar for inbound webhooks, as a hosted service billed by usage. Aquifer is open source and runs on your own machines like Envoy, so scaling it costs only the machines you add, and it paces outbound API calls, agent tool calls and WebSocket sessions too.
-
-Results come back however suits the caller: synchronously on the same connection ([`POST /proxy`](API.md#post-proxy)), over a WebSocket that replays anything missed after a reconnect ([`GET /websocket`](API.md#get-websocket)), or by durable webhook.
-
-You can run it with both: Envoy in front as the gateway, Aquifer behind it holding the work, and Hookdeck delivering its webhooks into Aquifer.
-
-**Not going to read all this?** Point your coding agent at the [Aquifer pilot skill](skills/aquifer-pilot/SKILL.md). It evaluates Aquifer against your own workload in a shadow run on a branch, then shows you the numbers.
-
-**Increase your rate limit without DDoSing your backend.**
-
-Distributed agents call tools and APIs in bursts. Your backend gets overwhelmed on inbound. Your app gets 429s on outbound. One slow dependency takes everything else down with it, and the retries agents fire off while they wait only make it worse: [wasted utilization and higher cost](https://rahmipruitt.me/content/gpu-retry-tax/) on one end, [outages reactive autoscaling alone can't prevent](https://rahmipruitt.me/content/github-outage-reactive-scaling/) on the other.
-
-The usual answer to that is more hardware: double the fleet, triple the GPU budget, eat the bill. It works, but it's expensive, it leaves capacity idle most of the time, and it doesn't actually fix the burst, just buys enough headroom to survive the next one:
-
-![How teams handle traffic spikes: overprovisioning the fleet versus queueing the burst and pacing the flow while capacity catches up](docs/images/how-teams-handle-traffic-spikes.png)
-
-Aquifer gives those agents a coordination layer: a self-hosted load balancer that absorbs the burst, queues requests durably (Pebble by default, or SQLite, see below), and releases them at a rate you configure, or a slower one, if the destination service asks for it.
-
-What's usually behind that backend can't scale instantly either: a GPU, a database, a CI runner. Aquifer buys time for more of it to come online; it's overkill if that ceiling is fixed for good.
-
-Exposed through pluggable adapters (an MCP server for agent tool-calling, a plain HTTP API, or an A2A/Agent2Agent-protocol agent), with cryptographic agent identity via the L8 protocol for trustless webhook delivery.
-
-**Benchmarked:** 10x traffic spikes absorbed with zero failures, 30/30 jobs surviving a `kill -9` mid-drain (with per-write sync, `AQUIFER_PEBBLE_FLUSH_INTERVAL_MS=0`), and clean `429` admission shedding under sustained overload, including a real GPU under load, where the ORCA fallback signal cut peak backend queue depth from 449 to 8 waiting requests. See [benchmark.md](benchmark.md) for throughput ceilings, crash recovery, memory behavior, capacity by machine size, and the [GPU/vLLM run](benchmark.md#9-gpu-inference-and-the-retry-tax-runpodvllm). Longer, end-to-end tests of Aquifer in front of real open-source systems, starting with Hatchet, are in [aqueduct-benchmarks](https://github.com/rjpruitt16/aqueduct-benchmarks).
+- **Retry storm mitigation.** Callers wait in a durable queue instead of hammering a struggling service with retries, and the queue drains as capacity comes back.
+- **Fairness.** Every tenant gets its own queue, so one noisy customer or runaway agent can't starve the rest.
+- **Results however the caller wants them:** on the same connection (synchronous), over a WebSocket that replays anything missed after a reconnect, or by durable webhook.
 
 ![Traditional load balancing collapsing under a spike, round-robin flickering faster as instances die, versus Aqueduct pacing that keeps the fleet stable while an autoscaler brings real capacity online](docs/images/fleet-degradation.gif)
 
-**Terms used in these docs:** the **origin** is whoever sends a job to Aquifer: your app, an agent, a gateway, or Inlet. The **target API** is the service Aquifer sends it on to, whose capacity it protects. Some names in the code, config and headers still say "upstream" for the target API, such as `AQUIFER_MAX_PENDING_PER_UPSTREAM` and `X-Aqueduct-Upstream-URL`. They mean the same thing and keep working.
+## Why not Envoy or Hookdeck?
 
-**Aquifer is not an API gateway.** It does not provide general end-user authentication, authorization policy, WAF rules, CORS policy, or arbitrary public routing. Keep it on a private network behind a trusted front door that decides who the caller is and which target is allowed. Aquifer durably queues the accepted work and controls how quickly it reaches that target.
+Envoy's circuit breaking protects an overloaded service by rejecting the excess. A rejected request is gone, so every client retries on its own and they all compete for whatever capacity frees up next. Circuit breaking says "stop." Aquifer says "wait here, and I'll tell you when to go."
 
-```
-API / agent callers  →  API gateway or Canalis  →  Aquifer  →  target API
-webhook providers    →  Inlet                   →  Aquifer  →  webhook handlers
-```
+![Circuit breaking rejecting requests and clients retrying into a thundering herd when it reopens, versus Aquifer's per-client queues releasing work at the pace the backend asks for](docs/images/circuit-breaking-vs-queue.gif)
 
-Use **[Canalis](https://github.com/rjpruitt16/canalis-rs)** as the trusted front door for API or agent traffic when you need JWT verification, sticky tenant placement, and fleet-wide capacity coordination; it can also sit behind an existing gateway. Use **[Inlet](https://github.com/rjpruitt16/inlet)** for provider webhooks: it verifies provider signatures and queues accepted deliveries into Aquifer. Aquifer is the capacity-aware load balancer behind either one: it persists jobs, enforces fairness, and paces dispatch to the target API.
+Hookdeck queues inbound webhooks as a hosted service, billed by usage. Aquifer is open source and runs on your own machines, so scaling it costs only the machines you add, and it paces outbound API calls, agent tool calls and WebSocket sessions too.
 
----
+You can run it with both: Envoy in front as the gateway, Aquifer behind it holding the work, and Hookdeck delivering its webhooks into Aquifer.
 
-## Use cases
+## Results
 
-**MCP tools — coordinate distributed agents**
-```
-agents / MCP clients  →  aquifer_enqueue_job  →  Aquifer queue  →  target API
-```
-Agents call Aquifer as an MCP server instead of racing each other directly against the same backend or external API. Aquifer returns a job id immediately, dispatches the request at a controlled rate, and delivers the result to your webhook.
+- **10× traffic spikes absorbed with zero failures**, with clean `429`s once a sustained overload fills the queue.
+- **A real GPU under load:** reading vLLM's own load signal, Aquifer cut the peak backend queue from 449 waiting requests to 8.
+- **AI agents sharing a GPU, CI runners and a sandbox:** during bursts, compared with calling directly and retrying, the smallest tenants' p99 fell from 245 s to 149 s and each workflow needed 10 requests instead of 17. Aquifer matched a hand-built Redis queue and dispatcher, and drew about 5× fewer refusals from CI.
+- **30 of 30 jobs survive a `kill -9`** mid-drain, with per-write sync on.
 
-**HTTP API — protect your API**
-```
-agents / clients  →  POST /jobs to Aquifer  →  your backend (at controlled RPS)
-```
-Agents hammering your API over HTTP? Aquifer queues their requests and drains them to your backend at a pace it can handle. Your backend returns `X-Aqueduct-Rps` headers to signal how fast it wants traffic in real time.
-
-**Webhook ingestion — keep noisy senders from monopolizing processing**
-```
-webhook providers  →  your verification endpoint  →  POST /jobs to Aquifer  →  webhook handlers
-```
-Verify each provider's signature at your edge, map the sender or customer to `user_id`, and use the provider's event ID as the `idempotent_key`. Aquifer absorbs bursts into its persisted queue and paces work into your handlers. With AccountQueue mode enabled, one noisy sender gets its own queue; under shared backlog pressure, fair admission increasingly rejects that oversized queue while leaving room for quieter senders. Aquifer does not replace provider authentication or translate arbitrary webhook formats. For supported providers, **[Inlet](https://github.com/rjpruitt16/inlet)** is the ready-made public front door; otherwise, use your own verification endpoint or custom adapter. For high-throughput intake, keep the default batched Pebble flush and resubmit the same event after a short jittered delay before acknowledging the provider; see the [confirmation best practice](API.md#best-practice-confirm-batched-webhook-intake). Use `AQUIFER_PEBBLE_FLUSH_INTERVAL_MS=0` when every accepted event requires a strict disk-sync guarantee.
-
-**Outbound — a durable checkpoint in front of a rate-limited resource**
-```
-your app  →  POST /jobs to Aquifer  →  database / CI runner / OpenAI / Stripe / any rate-limited API
-```
-Calling something with its own capacity limit (a database read replica, a CI runner, a third-party API)? Aquifer queues the calls durably and dispatches them at your configured rate, so a burst from your own side never becomes the thing that takes the target API down. Works especially well closed-loop: if the target API already speaks `X-Aqueduct-*` headers, it can tell Aquifer to back off in real time instead of you guessing a static rate.
-
-**Capacity-aware reverse proxy — pace and route behind your gateway**
-```
-your users  →  trusted gateway  →  POST /proxy to Aquifer  →  your resources
-```
-Point your trusted gateway at Aquifer, then point Aquifer at your resources. Aquifer tries the request directly first (a healthy resource sees no queue at all) and only falls back to durable queuing when something's actually overloaded, on the same connection, staying in queue mode until that domain's backlog is genuinely drained (not just until a cooldown timer expires). See [`POST /proxy`](API.md#post-proxy) for the details, including the header a target API can use to request queuing proactively.
-
-**WebSocket proxy — durable replay and paced reconnects**
-```
-clients  →  trusted gateway  →  GET /websocket on Aquifer  →  WebSocket backend
-```
-Aquifer can persist an ordered WebSocket transcript in Valkey, replay missed backend events after a client reconnects, and pace new or replacement target API connections. Authentication remains the gateway's job. See [`GET /websocket`](API.md#get-websocket) for the protocol and limits.
-
-**Sleep through partial outages.** On Fly.io, set `AQUIFER_FLY_REGIONS` and that same overload signal drives real cross-region redirect: other regions Aquifer is deployed to get tried live, over Fly's private network, before this instance ever falls back to its own local queue, nearest-first by measured latency, deterministic enough that two callers racing the same job converge on the same region instead of each chasing their own nearest option. One region degrading routes around itself instead of paging you at 3am. If every known region is down too, that's a real fleet-wide problem, and Aquifer says so with a `429` and a long `Retry-After` rather than quietly queueing it somewhere and hoping. See [`POST /proxy`](API.md#post-proxy)'s "Cross-region redirect" section for the full mechanics, including the one honestly-documented tradeoff it doesn't try to hide.
-
-In all six, the target API can lower the dispatch pace via response headers. See [Dynamic Pacing](#dynamic-pacing) for how the ceiling, backoff, and recovery actually work.
-
-Long-term protocol goal: if more services emit `X-Aqueduct-*`, agents can respond to capacity signals instead of independently guessing retry and concurrency behavior. Aquifer works today without ecosystem adoption; broader protocol adoption is the longer-term goal.
-
----
-
-## How it works
-
-1. Client submits a job through an adapter (MCP tool or HTTP endpoint) and moves on
-2. Aquifer persists it to disk (Pebble by default), surviving crashes and re-dispatching on restart
-3. A per-target-API worker dispatches at your configured RPS with jitter
-4. On completion Aquifer POSTs your webhook with the response body and status, or skips it if you [stayed on the line](#streaming--stay-on-the-line-or-hang-up) and got the result there
-5. The target API can adjust the rate live via `X-Aqueduct-*` response headers
-
-**Delivery semantics:** Aquifer provides at-least-once dispatch and webhook delivery, not exactly-once execution. If Aquifer crashes after a dispatch succeeds but before it records that completion, the recovered job dispatches to the target API again on restart, so it's not just the webhook that can repeat, the target API call itself can. Make both your target API endpoint and your webhook handler idempotent on `job_id` (or `idempotent_key`) anywhere duplicate execution isn't safe, the same contract Stripe and GitHub webhooks already ask of you.
-
----
+Methods and caveats: [benchmarks](https://rjpruitt16.github.io/aquifer/benchmarks/), and the end-to-end tests in front of Hatchet, vLLM and multi-agent workflows in [aqueduct-benchmarks](https://github.com/rjpruitt16/aqueduct-benchmarks).
 
 ## Quick start
 
-**Binary**
 ```bash
 go install github.com/rjpruitt16/aquifer/cmd/aquifer@latest
 aquifer
 ```
 
-Then send it a job and watch it go through the line:
+Send it a job and watch it go through the line:
+
 ```bash
 curl -s localhost:8080/jobs -H 'Content-Type: application/json' -d '{
   "user_id": "me", "idempotent_key": "first-job",
@@ -124,369 +48,30 @@ curl -N localhost:8080/jobs/<job_id>/stream
 # event: completed   (data carries the target API's response_status and body)
 ```
 
-**Docker Compose**
+Or with Docker Compose:
+
 ```bash
 docker compose build --pull --no-cache
 docker compose up --detach
 curl http://127.0.0.1:8080/ready
 ```
 
-Compose installs the latest checksum-verified release, persists `/data`, and listens only on loopback by default. See the [Docker Compose guide](examples/docker-compose/README.md) for version pinning and destination allowlisting.
+Fly.io, AWS and Canalis fleet setups are in the [quick start guide](https://rjpruitt16.github.io/aquifer/quick-start/). Release binaries for Linux and macOS are on every [GitHub release](https://github.com/rjpruitt16/aquifer/releases).
 
-**Fly.io**
-```bash
-./examples/fly/deploy-quickstart.sh
-```
+Keep Aquifer on a private network behind a gateway you trust: it sends real HTTP requests to the URLs it's given, so it must never take them from untrusted callers. See [Why Aquifer](https://rjpruitt16.github.io/aquifer/) for where it sits.
 
-The [Fly.io quick start](examples/fly/README.md) deploys the latest checksum-verified release to a private one-CPU Machine with an encrypted persistent volume. Use `fly proxy` for local evaluation; Aquifer is not exposed publicly by default.
+## Documentation
 
-**AWS test node**
-```bash
-export AWS_REGION=us-east-2
-./examples/aws/deploy-quickstart.sh
-```
+**[rjpruitt16.github.io/aquifer](https://rjpruitt16.github.io/aquifer/)** covers pacing, streaming, pools, deployment, the full API and every setting.
 
-The [AWS quick start](examples/aws/README.md) deploys the latest release to a CIDR-restricted one-vCPU EC2 instance with encrypted local storage. It is intended for evaluation, not production.
+For coding agents: [`llms.txt`](https://rjpruitt16.github.io/aquifer/llms.txt) lists every page as plain Markdown, so an agent can fetch only what it needs. To try Aquifer on your own workload, point your agent at the [Aquifer pilot skill](skills/aquifer-pilot/SKILL.md): it runs Aquifer in a shadow run on a branch and shows you the numbers.
 
-**Canalis fleet**
-```bash
-docker compose -f examples/canalis/compose.yaml up --detach --build
-```
-
-The [Canalis + Aquifer quick start](examples/canalis/README.md) runs two independently persisted Aquifer nodes behind Canalis. The same guide includes tested two-host AWS and private Fly.io deployment paths.
-
-Cross-platform release binaries (linux/darwin, amd64/arm64) are attached to every [GitHub Release](https://github.com/rjpruitt16/aquifer/releases); no Go toolchain required if you'd rather grab one directly.
-
----
-
-## Configuration
-
-Rate limits are set per target API hostname via a YAML file (`CONFIG_PATH`) and admission/runtime behavior via env vars.
-
-<details>
-<summary>Full config reference — YAML shape, env var table, admission defaults</summary>
-
-Set `CONFIG_PATH` to a YAML file to configure rate limits per target API hostname:
-
-```yaml
-# aquifer.yml — copy from aquifer.example.yml
-defaults:
-  rps: 2
-  max_concurrent: 1
-
-upstreams:
-  api.openai.com:
-    rps: 10
-    max_concurrent: 3
-  api.stripe.com:
-    rps: 20
-    max_concurrent: 5
-  your-backend.internal:
-    rps: 50
-    max_concurrent: 10
-```
-
-| Env var       | Default      | Description                    |
-|---------------|--------------|--------------------------------|
-| `AQUIFER_ADAPTER` | `http` for binary, `mcp-stdio` in Docker image | Runtime adapter: `http`, `mcp-stdio`, or `a2a` |
-| `AQUIFER_A2A_PUBLIC_URL` | `http://localhost:$PORT` | A2A adapter only: externally-reachable base URL advertised in the Agent Card |
-| `PORT`        | `8080`       | HTTP listen port               |
-| `DB_PATH`     | `aquifer.db` | Storage path: a directory for Pebble (the default), or a file for SQLite |
-| `CONFIG_PATH` | _(none)_     | Path to rate limit config YAML |
-| `AQUIFER_STORE_BACKEND` | `pebble` | Storage engine: `pebble` (pure-Go LSM store, the faster backend; see [benchmark.md](benchmark.md)) or `sqlite`. If `DB_PATH` is an existing SQLite file, Aquifer stays on SQLite so an upgrade doesn't orphan queued jobs |
-| `AQUIFER_PEBBLE_WAL_SYNC_INTERVAL_MS` | `5` | Pebble only: batches concurrent durable writes into fewer real fsyncs under load (Pebble's own group-commit); each caller still blocks until its own write is actually durable |
-| `AQUIFER_PEBBLE_FLUSH_INTERVAL_MS` | `100` | Pebble only: answer before a write reaches disk and sync the log on this timer. A crash loses the jobs accepted since the start of the last completed sync: normally about this many milliseconds, but a sync slowed by heavy writes stretches it (seconds in the Canalis soak). `AQUIFER_MAX_SYNC_LAG_MS` and inbound pacing (`X-Aqueduct-Rps`, see [API.md](API.md#inbound-pacing-x-aqueduct-rps)) keep it short; `aquifer_wal_sync_lag_seconds` shows it. On Fly it took one machine from about 150 to about 700 jobs/s end to end (see [benchmark.md](benchmark.md#11-per-job-overhead-make-perf)). Set `0` to make every write wait for its own fsync: zero acknowledged-job loss, much lower throughput |
-| `AQUIFER_PEBBLE_CACHE_MB` | `64` | Pebble only: block cache size. Pebble's own default (8MB) is too small to keep recently written jobs in memory, so status updates read them back from disk |
-| `AQUIFER_DEBUG_ADDR` | unset | Serves Go's `net/http/pprof` (goroutine counts, heap, CPU profiles) on its own listener, e.g. `127.0.0.1:6060`. Off when unset. Bind it to loopback or a private network; it is not meant to be public |
-| `AQUIFER_MEMORY_LIMIT_MB` | 70% of the container's memory limit, or of the machine's memory | Reject new jobs with `429` once the memory the Go runtime is holding (mapped from the OS, minus what it has returned) exceeds this many MB. It falls back below the limit once a spike's memory is returned, so intake reopens. `GET /health` shows it as `admission.memory_mb`, beside `memory_reserved_mb` (everything ever mapped). The default is logged at startup and is only a guess: if anything else runs on the machine (Valkey, a sidecar) or the machine is resized, set it yourself. `0` disables it, and then nothing is refused before the kernel's OOM killer acts. Off by default where memory can't be read (macOS). |
-| `AQUIFER_MAX_SYNC_LAG_MS` | `1000` | Reject new jobs with `429` (`sync_lag`) while accepted jobs may have gone this long without reaching disk. With the default Pebble flush (`AQUIFER_PEBBLE_FLUSH_INTERVAL_MS=100`), an accepted job is written to disk within about 100ms; a crash loses what was accepted since the last sync, so this stops adding to that window when the machine is too busy to keep syncing. Jobs accepted just before still wait for the sync in progress, so the window can outlast this limit while one sync is slow. `0` disables it. `GET /health` shows `admission.sync_lag_ms`. |
-| `AQUIFER_MAX_BODY_BYTES` | `1048576` (1MB) | Reject oversized request bodies with `413` |
-| `AQUIFER_DB_MAX_BYTES` | 80% of the disk | Reject new jobs with `429` once the database exceeds this size. Unset, Aquifer sizes it at startup to 80% of the space the database can use (free space on its filesystem plus its current size), so it fits the volume without configuration. The startup log shows the value. Set a number to override, or `0` to disable. Falls back to 800MB where disk space can't be read |
-| `AQUIFER_MAX_PENDING_PER_UPSTREAM` | `10000` | Shared per-target-API backlog budget used by fair admission; `0` disables it |
-| `AQUIFER_ACCOUNT_QUEUE` | `on` | `on`: each tenant gets its own queue at every target API; `off`: tenants share one queue per target API. A target API's own `X-Aqueduct-Account-Queue` response header overrides this; a sender can only ask for `on` |
-| `AQUIFER_METRICS_TENANT_LABELS` | `false` | `true` adds per-tenant (`user_id`) series to `GET /metrics`, for the first 1,000 tenants seen (the rest share `other`). Off by default because tenant IDs are unbounded and often customer data. See [API.md](API.md#get-metrics) |
-| `AQUIFER_NODE_ID` | `AQUIFER_CLUSTER_SELF_ID`, else `FLY_MACHINE_ID`, else the host name | This node's id, sent to target APIs as `X-Aqueduct-Node-Id` so a backend can count how many Aquifer nodes are sending to it |
-| `AQUIFER_RETRY_AFTER_SECONDS` | `5` | Base `Retry-After` value sent on `429` admission rejections |
-| `AQUIFER_IDLE_TIMEOUT_SECONDS` | `300` (5min) | How long a per-tenant/per-domain queue can sit idle before self-tearing-down; see [drain mode](#partitioning-strategies) for why this gates a real drain flush |
-| `AQUIFER_ALLOWED_URL_DOMAINS` | _(none, unrestricted)_ | Comma-separated hostnames `url`-routed jobs are permitted to target; see [`POST /jobs`](API.md#post-jobs) |
-| `AQUIFER_FLY_REGIONS` | _(none, feature off)_ | Comma-separated Fly region codes this app is deployed to; enables `/proxy`'s cross-region redirect on Fly. See [`POST /proxy`](API.md#post-proxy) |
-| `AQUIFER_FLY_POLL_INTERVAL_SECONDS` | `30` | How often to poll sibling regions over Fly's private network for liveness |
-| `AQUIFER_REDIRECT_GATE_COOLDOWN_SECONDS` | `500` | How long to stop attempting cross-region redirect after a tour finds no reachable region at all, before trying again: internal probe throttling, not what's told to the caller |
-| `AQUIFER_REDIRECT_EXHAUSTED_RETRY_AFTER_SECONDS` | `900` (15min) | `Retry-After` sent to the caller when cross-region redirect is configured but exhausted: no known-live region could serve or queue the request. Request is rejected (429), not queued locally. See [`POST /proxy`](API.md#post-proxy) |
-
-Body-size, DB-size and memory admission are all on by default. Memory defaults to 70% of the container's limit (or the machine's memory); `AQUIFER_MEMORY_LIMIT_MB=0` turns it off. Retry-After backs off exponentially under sustained rejection (5s → 10s → 20s → 40s → capped at 60s, resets on the next allowed request). See [CONFIGURATION.md](CONFIGURATION.md) for the full rationale and [benchmark.md](benchmark.md) for the numbers behind these defaults.
-
-</details>
-
----
-
-## Framework adapters
-
-Aquifer has a framework-neutral core (idempotency, persistence, rate control, dispatch, SSE events, L8 signing, webhook delivery) with pluggable front doors:
-
-| Adapter | Env | Purpose |
-|---------|-----|---------|
-| HTTP | `AQUIFER_ADAPTER=http` | REST/SSE API on `PORT` (the default) |
-| MCP stdio | `AQUIFER_ADAPTER=mcp-stdio` | MCP server exposing Aquifer tools over stdio (the published Docker image's default) |
-| A2A | `AQUIFER_ADAPTER=a2a` | Agent2Agent protocol (v1.0) agent over JSON-RPC/HTTPS |
-
-**[ADAPTERS.md](ADAPTERS.md)** has the full reference for each built-in adapter (MCP tool list, A2A Agent Card details), plus how to write your own `FrameworkAdapter`, storage backend, or metrics adapter.
-
----
-
-## Integrations
-
-### Inlet: webhook storms
-
-**[Inlet](https://github.com/rjpruitt16/inlet)** is the easy way to put provider webhooks in front of Aquifer without exposing Aquifer to the internet. It runs as an AWS Lambda (or a Cloudflare Worker). For each webhook it:
-
-1. Verifies the provider's signature.
-2. Durably queues the event before acknowledging the provider.
-3. Pours the event into Aquifer's `POST /jobs`.
-
-Each event uses the sender as `user_id` and the provider's event ID as the idempotency key. Aquifer's fairness and pacing then keep one noisy shop or installation from swamping your handlers.
-
-| Provider | Default fairness identity |
-|---|---|
-| GitHub | installation, organization, repository owner, or sender |
-| Shopify | shop domain |
-| Stripe | event account |
-| Anthropic | workspace or organization |
-
-Deploy one Inlet stack per provider. See the [Inlet README](https://github.com/rjpruitt16/inlet#readme) for setup.
-
----
-
-## Dynamic Pacing
-
-**Terminology**: Aquifer is this implementation; Aqueduct is the implementation-agnostic header protocol (`X-Aqueduct-*`) it speaks, so other services could speak it too.
-
-The target API controls pace at runtime via response headers (`X-Aqueduct-Rps`, `X-Aqueduct-Max-Concurrent`, and per-tenant queue isolation), and Aquifer honors a lower pace immediately, recovering gradually once pressure clears. For backends that can't speak Aqueduct directly, Aquifer also reads the real open [ORCA](https://github.com/cncf/xds/blob/main/xds/data/orca/v3/orca_load_report.proto) standard as a fallback signal: vLLM and Triton/TensorRT-LLM both work today, verified against their actual source.
-
-![Traditional circuit breaking rejecting requests outright, forcing clients to retry independently into a thundering herd on reopen, versus Aqueduct's per-client queues pacing release via X-Aqueduct-Rps until the backend catches up](docs/images/circuit-breaking-vs-queue.gif)
-
-<details>
-<summary>Full pacing reference — header table, account-queue isolation, ORCA details</summary>
-
-| Header (preferred)          | Alias                        | Effect                                  |
-|------------------------------|-------------------------------|------------------------------------------|
-| `X-Aqueduct-Rps`            | `X-Aquifer-Rps`               | Reduce dispatch rate to this value      |
-| `X-Aqueduct-Max-Concurrent` | `X-Aquifer-Max-Concurrent`    | Reduce max in-flight requests           |
-| `X-Aqueduct-Account-Queue`  | `X-Aquifer-Account-Queue`     | `enabled` / `disabled`: one queue per tenant, or one shared queue (has the last say) |
-| `X-Aqueduct-Slow-Start`     | `X-Aquifer-Slow-Start`        | `true`: new queues ramp up instead of firing at full rate immediately |
-| `X-Aqueduct-Max-Backlog`    | `X-Aquifer-Max-Backlog`       | Set the shared backlog budget used by fair admission |
-
-Aquifer reads both namespaces, preferring `X-Aqueduct-*` when both are present.
-
-By default each `(user_id, api_key)` pair gets its own independently paced queue at every target API, so one tenant's burst, or one tenant's broken endpoint retrying, can't slow down another: a failed attempt gives its concurrency slot back and waits out its backoff in that tenant's own queue.
-
-Who decides, in order:
-
-1. **The target API.** Answering with `X-Aqueduct-Account-Queue: disabled` (or `false`) puts everyone sending to it in one shared queue, for example an API that needs one global order. `enabled` (or `true`) gives everyone their own. Aquifer remembers the choice per target API.
-2. **The node owner.** `AQUIFER_ACCOUNT_QUEUE=on` (the default) or `off`.
-3. **The origin** (whoever sends the job), with the same header on its request, can ask for `enabled` when the node owner chose `off`, but can never turn isolation off. The mode is per target API, so one origin switching it off would take isolation away from every other tenant. Each queue's pace still stays inside the target API's actual budget: a background check throttles the *sum* of every active tenant queue proportionally if too many are active at once, so isolation never means an unbounded copy of the full rate per tenant.
-
-When that shared backlog crosses 70% of `X-Aqueduct-Max-Backlog`, queues holding more than their current fair share receive progressively more `429` responses while smaller queues continue entering, even once the budget is full (up to 125% of it). One active queue can still use the whole budget. See [API.md](API.md#fair-queue-admission) for the formula, response headers, and scope.
-
-**Size `X-Aqueduct-Max-Backlog` in seconds of work, not as a job count.** Pick how long Aquifer should be able to hold work for the target API, at least the longest outage you want callers to ride out, and send `rate × seconds`, where `rate` is the peak rate jobs for that target API arrive at this node, across all tenants: during an outage, intake fills the budget, not dispatch. The budget is per node. A budget that's too small turns an outage into a wall of `429`s: in the [Hatchet outage benchmark](https://github.com/rjpruitt16/aqueduct-benchmarks), a 60-second budget at 20 rps (1,200 jobs) meant a 5-minute database outage refused about 25,000 submissions, and small tenants' recovery p99 was 107 s, against 3.8 s behind Envoy. A 600-second budget let the same small tenants through with no refusals at all, at a 5.5 s p99. If the advertised rate falls during an outage, keep the budget from falling with it below what Aquifer already holds; otherwise every queue is over budget at once.
-
-A backend can lower RPS at any time via these headers when it's under pressure; Aquifer honors the lower pace immediately and recovers gradually toward the configured ceiling once pressure clears.
-
-With `X-Aqueduct-Slow-Start: true`, a new queue starts at a low floor rate instead of its full configured rate and climbs toward that ceiling using the same gradual-recovery mechanism above, rather than firing at full speed from its very first dispatch. This applies per domain: since a queue's first-ever dispatch has no prior response to read the signal from, the setting takes effect on the *next* new queue created for that domain once any response has carried it, not the request that carried the header itself, and not retroactively for queues already running.
-
-Use the pacing headers for intentional backpressure. A `5xx` response is treated as a failed dispatch attempt and, for pool members, lowers that member's reputation. If a service is alive but overloaded, prefer `429` and/or `X-Aqueduct-Rps` / `X-Aqueduct-Max-Concurrent` so Aquifer slows down without interpreting the member as broken.
-
-**ORCA fallback for backends that can't speak Aqueduct directly.** Some backends already report load in a different, real open standard: ORCA (Open Request Cost Aggregation), the gRPC/Envoy ecosystem's convention for backends to report utilization. Aquifer sends `endpoint-load-metrics-format: text` on every dispatch (the request-side opt-in both verified backends require; there's no server startup flag for this), and a backend that understands it replies with an `endpoint-load-metrics` header carrying a KV-cache utilization fraction. If a response carries no `X-Aqueduct-Rps`/`X-Aquifer-Rps`, Aquifer reads this header as a fallback and paces down as utilization rises: full configured rate below 70%, 2 RPS at 70-90%, 0.5 RPS at 90-97%, 0.25 RPS above that, never dropping to zero, same pacing-down-gracefully philosophy as everywhere else. An explicit `X-Aqueduct-Rps` always wins if present; this only fires when the backend hasn't opted into speaking Aqueduct's own headers.
-
-Two backends verified directly against their own source, not assumed: **vLLM** (`vllm/entrypoints/serve/utils/orca_metrics.py`, metric name `kv_cache_usage_perc`, case-insensitive opt-in) and **Triton/TensorRT-LLM** (`src/orca_http.cc`, metric name `kv_cache_utilization`, case-sensitive lowercase-only opt-in; Aquifer sends lowercase specifically so both work). Aquifer tries both known metric names, so whichever backend you're running, this works without any configuration.
-
-</details>
-
----
-
-## API
-
-```json
-POST /jobs
-{
-  "user_id":        "user-123",
-  "idempotent_key": "invoice-42-notify",
-  "url":            "https://api.openai.com/v1/chat/completions",
-  "method":         "POST",
-  "headers":        { "Authorization": "Bearer sk-..." },
-  "body":           "{\"model\":\"gpt-4o\",\"messages\":[...]}",
-  "webhook_url":    "https://yourapp.com/webhooks/aquifer"
-}
-```
-
-**Do not expose Aquifer directly to untrusted callers.** `url` is dispatched as a real HTTP request. If an arbitrary or untrusted party can set it, Aquifer becomes an open relay/SSRF vector, using Aquifer's own network position and identity to reach anything the machine can reach. The intended caller is **your own trusted backend or gateway code** dispatching to a destination it already knows about, not an agent, end user, or any other party choosing the destination itself.
-
-**[API.md](API.md)** has the full reference: `GET /jobs/:id`, the SSE stream, `POST /proxy` (capacity-aware reverse-proxy mode, see [Use cases](#use-cases)), health/readiness and graceful shutdown, webhook payload shapes, and the autoscaling headers.
-
----
-
-## Streaming — stay on the line or hang up
-
-After submitting a job you choose how to get the result. Stay on the line with `GET /jobs/:id/stream` (or call `POST /proxy`, which streams automatically when it has to queue), and watch your job move through the line in real time. Or hang up whenever you like: the result still arrives at your `webhook_url`, and it's stored for `GET /jobs/:id` too.
-
-```
-event: queued
-data: {"job_id":"abc123","status":"queued"}
-
-event: position
-data: {"job_id":"abc123","position":3}
-
-event: dispatching
-data: {"job_id":"abc123","attempt":1}
-
-event: completed
-data: {"job_id":"abc123","response_status":200,"body":"..."}
-```
-
-The webhook is only a fallback. If you stayed on the line and received the final event (or a `/proxy` direct response), Aquifer doesn't send it, so you never pay for the same result twice. If you hung up first, or never streamed, the webhook goes out as usual. A client that disappears without closing its connection (a dropped network, a sleeping laptop) can't be told apart from one that's still listening, so it may miss both; that's what the stored result on `GET /jobs/:id` is for.
-
----
-
-## Agent-native load balancing
-
-Instead of dispatching to a fixed `url`, a job can target a named **pool**: a group of registered service instances Aquifer picks from at dispatch time, weighted by declared capacity and live reputation. Useful when you have several interchangeable backends instead of one fixed endpoint, and it grows or shrinks automatically as members register, degrade, or drop out, with no need to reconfigure Aquifer as your fleet autoscales.
-
-<details>
-<summary>Full pool reference — registration, dispatch, reputation model, scenario harness</summary>
-
-**Registering a member:**
-
-```bash
-curl -X POST https://your-aquifer/pools/writers/members \
-  -d '{"member_id": "writer-1", "address": "http://10.0.1.5:8080", "capacity_rps": 20, "heartbeat_interval_seconds": 30}'
-```
-
-The same call is both initial registration and heartbeat: call it again periodically (at roughly your declared `heartbeat_interval_seconds`) to stay in the pool. Missing several consecutive expected heartbeats evicts a member. A member can register under more than one pool id.
-
-**Dispatching to a pool:**
-
-```json
-{
-  "user_id": "user-123",
-  "idempotent_key": "job-1",
-  "pool_id": "writers",
-  "method": "POST",
-  "webhook_url": "https://yourapp.com/webhooks/aquifer"
-}
-```
-
-`pool_id` and `url` are mutually exclusive: a job sets exactly one.
-
-**How a member gets picked:** proportional to `capacity_rps × reputation`, not equal-split round robin: a member declaring 100 RPS gets roughly 4x the dispatches of one declaring 25. The pool's aggregate ceiling is the live sum of every member's current effective rate, so it grows and shrinks automatically as members register, degrade, or drop out, with no need to reconfigure Aquifer as your fleet autoscales.
-
-**Reputation**: a dispatch failure halves a member's effective share; a successful dispatch nudges it back up, and heartbeats recover it more slowly after a restart. A member isn't evicted on one bad response, only once its reputation has stayed at the floor continuously, with no interrupting success, for a sustained window. This avoids flapping a member in and out of the pool over a single transient error.
-
-**Treat `5xx` carefully.** Aquifer interprets connection errors and `5xx` responses as reliability signals for the selected member. One `5xx` does not fail the job by itself: Aquifer records failure for that member and retries another member when possible. If every retry across the pool still ends in connection errors or `5xx`, the job is marked failed. That behavior is intentional for reliability, but it means application bugs that accidentally return `5xx` on a new code path can reduce that member's traffic share or eventually remove it from the pool.
-
-For overload, prefer explicit backpressure over generic server errors:
-
-| Situation | Recommended signal |
-|-----------|--------------------|
-| Instance is healthy but needs less traffic | `X-Aqueduct-Rps` or `X-Aqueduct-Max-Concurrent` |
-| Request should be retried later due to pressure | `429` with `Retry-After` |
-| Instance/code path is actually failing | `5xx` |
-
-Roll new members into a pool gradually. Start new versions with a conservative `capacity_rps`, send a small share of traffic first, watch `/health` reputation and your own error metrics, then raise capacity as confidence grows. Blue/green or canary rollout matters more here than with a blind round-robin balancer because Aquifer uses runtime failures as routing input.
-
-**Set `capacity_rps` conservatively, not at your true theoretical max.** Aquifer only learns a member died via a failed dispatch or a missed heartbeat, both of which lag the actual failure, so leaving headroom in what you declare gives real slack for that detection delay. Reputation decay is a second line of defense on top of this: a member that's silently struggling gets throttled down by observed failures even if its last-declared capacity was optimistic.
-
-**Watch the model locally:** Aquifer includes a local scenario harness that starts one fake backend server with multiple logical workers, registers them as pool members, and prints per-second traffic, failures, dynamic header values, and reputation.
-
-```bash
-go run ./cmd/aquifer-scenario --scenario mixed --workers 10 --jobs 500 --duration 30s --rps 50
-```
-
-Scenarios: `steady`, `weighted`, `flapping`, `backpressure`, `recovering`, `mixed`, and `harsh`. The `harsh` scenario penalizes sustained overload by adding latency, then `5xx`, then simulated crash windows. Add `--mode regular` to compare against a simple round-robin load balancer model that retries on `5xx` but ignores Aquifer reputation and dynamic pacing headers.
-
-Pool state isn't shared across Aquifer instances; see [Deployment model](#deployment-model) for how that constrains a given `pool_id` to one instance.
-
-`GET /health` reports every pool's current members, their declared capacity, and current reputation.
-
-</details>
-
----
-
-## L8 Protocol — trustless webhook delivery
-
-Traditional webhook security shares an HMAC secret between sender and receiver, stored in a database on both sides: something that can be stolen, logged accidentally, or forgotten during rotation, letting anyone forge deliveries forever once it leaks. Aquifer implements **L8 v0.2**, a lightweight challenge-response protocol that replaces the shared secret with public key cryptography: the receiver publishes a public key, a one-time handshake proves both sides own their private keys, and every delivery afterward carries a signature verified locally in microseconds, with no database lookup and no round-trip to any authority.
-
-Two additions in 0.2. A receiver that publishes an X25519 `encryption_public_key` gets its webhook bodies encrypted to that key, then signed, so a proxy or log in the middle sees only ciphertext. A target API that publishes `request_schemas` (JSON Schema per route) gets job bodies checked before dispatch: a mismatch is rejected with `422` instead of burning a target API call. Schema checks are off unless `AQUIFER_L8_SCHEMA_VALIDATION=true`.
-
-The full protocol rationale, wire format, and a reference receiver implementation live at the **[L8 spec](https://rjpruitt16.github.io/l8-protocol/)**, also served locally at `GET /l8-spec` for an agent/script with only network access to this instance. Set `L8_PRIVATE_KEY` for a stable identity across restarts, or let Aquifer auto-generate one on first start.
-
----
-
-## Reliability
-
-Durable queue, automatic crash recovery, panic isolation per job. See [benchmark.md](benchmark.md) for the numbers behind these claims.
-
-<details>
-<summary>Full reliability reference — mechanisms, job TTLs</summary>
-
-- **Durable queue**: jobs persist to the configured storage backend on every write
-- **Crash recovery**: queued jobs re-dispatched automatically on restart
-- **Panic recovery**: if a queue's loop panics, its unfinished jobs are re-enqueued from storage immediately, without waiting for a restart
-- **Stale job safety net**: in-flight jobs older than 5 min automatically reset to `queued`
-- **Per-job panic isolation**: a panic in one job marks it failed and delivers the webhook; the worker keeps running
-
-**Job TTLs:**
-
-| Status      | TTL    |
-|-------------|--------|
-| `queued`    | 24 h   |
-| `completed` | 30 min |
-| `failed`    | 2 h    |
-
-</details>
-
----
-
-## Partitioning strategies
-
-Running one instance for everything works fine until you have multiple tenants or multiple target APIs sharing it, and then one tenant's burst, or one target API's own rate limit, ends up affecting everyone else on that same instance. Two ways to split traffic apart so that doesn't happen, not mutually exclusive:
-
-**Static partitioning**: decided once, at deploy time. Dedicate one instance to a single protected resource (a CI runner, a database, a GPU, or a rate-limited external API you want to be nice to) so that resource only ever sees traffic paced the way you configured, up to whatever it can actually bear. Multiple tenants can safely share that same instance: turn on [account-queue isolation](#dynamic-pacing) and each tenant gets their own independently-paced queue, so one tenant's burst doesn't starve another's, and the resource itself never sees more aggregate load than it's rated for. The mistake to avoid: pointing multiple *instances* at the *same* resource instead of routing everyone through this one pacing checkpoint, which just multiplies your total request rate against it. Same rule for pools: a given `pool_id` should belong to exactly one instance, since pool state isn't shared across instances.
-
-Optional regional cluster routing supports either a static rendezvous member list or Valkey-coordinated, load-aware rendezvous. The Valkey mode discovers Aquifer instances, keeps active users sticky while capacity is available, and releases idle assignments without requiring another control plane. See [API.md](API.md#regional-cluster-routing) for failure semantics and configuration.
-
-**Dynamic partitioning (drain mode)**: off by default, for a more specific shape. Instead of deciding every assignment up front, an instance gets handed to one tenant at a time, absorbs and drains whatever burst that tenant sends, then frees itself up to be handed to a *different* tenant next, useful when you want dedicated capacity per user without hand-assigning it at deploy time. Aquifer can stream completed/failed job ledger events in acknowledged batches to a webhook or Valkey, and when idle for `AQUIFER_DRAIN_TIMER_SECONDS`, it flushes anything remaining before clearing local state and moving through an `active` → `draining` → `unassigned` state machine visible via `GET /health`. See **[DRAIN_MODE.md](DRAIN_MODE.md)** for the full state machine, env vars, and payload shape.
-
-The two combine: a fleet can partition statically by target API domain, while individual instances within a partition cycle through tenants dynamically via drain mode.
-
-**External registration**: off by default, and orthogonal to the above. `AQUIFER_REGISTRY_URL` makes an instance periodically report its own listening port to an external control plane (deciding tenant assignment, scaling, etc. is entirely that service's job, not Aquifer's). See **[REGISTRATION.md](REGISTRATION.md)** for the env vars and ping payload shape.
-
-None of this needs instances sharing state centrally, and that's the normal shape for a load balancer, not a gap unique to Aquifer: nginx and HAProxy make local decisions the same way. Pure central rate limiting is a gateway-layer concern that composes in front of Aquifer if you want it, not something Aquifer needs to reinvent. What an instance does need is to be safe to hand off without knowing anything about the rest of the fleet, which is what [slow start](#dynamic-pacing) is for: a freshly-assigned instance starts below its configured ceiling and creeps up, rather than assuming the ramp some other instance already earned.
-
----
-
-## Deployment model
-
-Aquifer runs four ways: as a **sidecar** alongside your app, as a **standalone service** multiple services point to, **embedded directly as a Go library** in your own process (see [Framework adapters](#framework-adapters)), or as an **extension behind a Gateway API proxy** like Envoy Gateway in Kubernetes, where the proxy owns routing and TLS and Aquifer owns the queue behind it (see [examples/kubernetes](examples/kubernetes)). Each instance persists to its own SQLite volume, with no external database or coordination service to run.
-
-People run Aquifer in front of things like: internal coding platforms (GitLab, Forgejo), CI runners, database read replicas, and MCP servers, anywhere a burst of agent or service traffic needs to hit something that has its own capacity limit.
-
-<details>
-<summary>Full deployment reference — partitioning, scaling, security note</summary>
-
-See [Partitioning strategies](#partitioning-strategies) above for how to assign tenants to instances, statically or dynamically.
-
-See the [security warning](API.md#post-jobs) under `POST /jobs`; the same untrusted-caller risk applies regardless of deployment shape.
-
-</details>
-
-**Choosing a machine size:** with Pebble and the default 100ms flush, one Fly machine sustained about 1,000 jobs/s on performance-1x, 1,500 on 2x and 3,000 on 4x, end to end including webhooks. See [benchmark.md](benchmark.md#12-capacity-per-machine-pebble-flyio-2026-10-07) for the method and caveats, and [section 7](benchmark.md#7-capacity-and-drain-time) for earlier capacity work.
-
----
+The same pages are in this repository: [docs/pages](docs/pages), [API.md](API.md), [CONFIGURATION.md](CONFIGURATION.md), [ADAPTERS.md](ADAPTERS.md), [DRAIN_MODE.md](DRAIN_MODE.md), [REGISTRATION.md](REGISTRATION.md) and [benchmark.md](benchmark.md).
 
 ## Writing
 
-- [Eliminate GPU Waste by Cutting the Retry Tax](https://rahmipruitt.me/content/gpu-retry-tax/): the thesis behind [drain mode](#partitioning-strategies) and the ORCA fallback pacing [GPU benchmark](benchmark.md#9-gpu-inference-and-the-retry-tax-runpodvllm) above.
-- [GitHub Outages Show the Limits of Reactive Scaling](https://rahmipruitt.me/content/github-outage-reactive-scaling/): why reactive scaling and retry storms don't mix, the problem Aquifer absorbs instead.
+- [Eliminate GPU Waste by Cutting the Retry Tax](https://rahmipruitt.me/content/gpu-retry-tax/)
+- [GitHub Outages Show the Limits of Reactive Scaling](https://rahmipruitt.me/content/github-outage-reactive-scaling/)
 
 ## License
 

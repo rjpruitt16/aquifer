@@ -35,7 +35,7 @@ Shared contracts that must stay identical across Aquifer and Spillway: `X-Aquedu
 - `mcpadapter/` and `a2aadapter/`: the MCP and A2A adapters, outside the root package.
 - `internal/env`, `internal/httpx`, `internal/retry`, `internal/nodeid`, `internal/urlpolicy`: small helpers shared by the root and the internal packages (env parsing, JSON errors and drain responses, jitter, node ID, the URL allowlist).
 - `internal/` packages can't be imported from outside this module, so they can change freely; the root package and `l8/` are the public API.
-- `API.md` is the endpoint and env-var reference; `README.md` is the overview.
+- `API.md` is the endpoint and env-var reference; `README.md` is a short overview for people. Longer guides live in `docs/pages/`. The docs site (https://rjpruitt16.github.io/aquifer/) is built from those and the other root `*.md` references by `docs/site/`; a new page goes in `docs/site/pages.mjs`. Link between docs with relative paths to the `.md` files: the build rewrites them for the site.
 
 ## Cross-repo changes and CI
 

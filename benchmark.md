@@ -175,7 +175,7 @@ Pebble roughly doubles the point where Aquifer stops reliably completing request
 
 ## 9. GPU inference and the retry tax (RunPod/vLLM)
 
-Everything above dispatches to a dummy HTTP echo target API. This one targets a real GPU: `Qwen/Qwen2.5-1.5B-Instruct` on a single RunPod RTX PRO 4500 Blackwell running vLLM (`--max-num-seqs 48`, KV cache deliberately capped at 512MB so a realistic burst can actually pressure it), pacing driven entirely by the ORCA fallback signal (see [README.md](README.md), "Dynamic pacing") — `kv_cache_usage_perc` on vLLM's own response headers, no `X-Aqueduct-*` config needed. Requests forced to `min_tokens=max_tokens=300` so each one holds GPU/KV-cache resources long enough to matter, not a one-token echo.
+Everything above dispatches to a dummy HTTP echo target API. This one targets a real GPU: `Qwen/Qwen2.5-1.5B-Instruct` on a single RunPod RTX PRO 4500 Blackwell running vLLM (`--max-num-seqs 48`, KV cache deliberately capped at 512MB so a realistic burst can actually pressure it), pacing driven entirely by the ORCA fallback signal (see [Dynamic pacing](docs/pages/pacing.md)) — `kv_cache_usage_perc` on vLLM's own response headers, no `X-Aqueduct-*` config needed. Requests forced to `min_tokens=max_tokens=300` so each one holds GPU/KV-cache resources long enough to matter, not a one-token echo.
 
 **Same offered load (40 req/s for 30s), direct-to-vLLM vs. through Aquifer:**
 

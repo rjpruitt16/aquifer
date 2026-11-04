@@ -212,7 +212,7 @@ Membership changes can also temporarily create duplicate account queues for the 
 
 ## POST /proxy
 
-Capacity-aware reverse-proxy mode. Aquifer still belongs behind a trusted gateway; see [Use cases](README.md#use-cases) for the deployment shape. Same request body as `POST /jobs`, same idempotency/admission rules, but tries the target API directly and synchronously first:
+Capacity-aware reverse-proxy mode. Aquifer still belongs behind a trusted gateway; see [Use cases](docs/pages/use-cases.md) for the deployment shape. Same request body as `POST /jobs`, same idempotency/admission rules, but tries the target API directly and synchronously first:
 
 - **Succeeds directly** (2xx, or any status not classified as overload — see below): the real target API's status, headers, and body are relayed back verbatim, on this same connection. The queue is never touched. A response the target API didn't mark as overload (a plain `500`, a `404`, anything unclassified) is a **success** in this sense too — relayed directly, not queued, since nothing said it shouldn't be.
 - **Fails, or the target API signals overload** (timeout, a classified status code, or an ORCA fallback threshold): falls back to the exact same durable-queue-and-delivery path `POST /jobs` uses — the connection seamlessly becomes the same SSE stream `GET /jobs/:id/stream` provides, rather than requiring a second call. The very first event on that stream is `event: proxy_fallback`, `data: {"job_id", "reason", "upstream_status"}` (status omitted when no real response was received — a skipped attempt or a timeout) — so a client with no server of its own to explain this any other way (a browser, an agent) sees explicitly why it's in the queue before the normal `queued`/`dispatching`/terminal sequence starts. `reason` is one of `upstream_overloaded`, `upstream_unreachable`, `domain_degraded` (breaker open or this domain's queue already has backlog), or `pool_routed`.
@@ -633,15 +633,15 @@ A client that vanishes without closing its connection (a dropped network, a slee
 }
 ```
 
-**Webhook delivery uses the same account-queue pacing as forward dispatch.** A webhook POST isn't fired immediately from the dispatch goroutine — it's enqueued as its own durable job, keyed by the webhook receiver's domain, and dispatched through the identical `AccountQueue`/`URLWorker` machinery described in the [Dynamic Pacing](README.md#dynamic-pacing) section of the README. Practically, this means:
+**Webhook delivery uses the same account-queue pacing as forward dispatch.** A webhook POST isn't fired immediately from the dispatch goroutine — it's enqueued as its own durable job, keyed by the webhook receiver's domain, and dispatched through the identical `AccountQueue`/`URLWorker` machinery described in the [Dynamic Pacing](docs/pages/pacing.md) section of the README. Practically, this means:
 
 - A webhook receiver can slow Aquifer down with the same `X-Aqueduct-Rps` / `X-Aqueduct-Max-Concurrent` response headers a real target API uses, instead of just getting hammered.
 - Delivery is crash-durable — a webhook still pending when the process restarts is recovered and retried, the same way a queued job is, rather than being lost with an in-memory retry loop.
 - Retries trigger on connection errors and `5xx`, `408` and `429` responses, the same retryable failures as forward dispatch. An unset `webhook_max_retries` means 10 retries, with backoff doubling from 1 s up to 300 s, about 13 minutes in total, enough to ride out a receiver deploy.
-- L8 signing (see [README.md](README.md#l8-protocol--trustless-webhook-delivery)) still applies exactly as before — trust is established and delivery is signed the same way, just from inside the paced dispatch path instead of a separate one-shot retry loop.
+- L8 signing (see [L8 protocol](docs/pages/l8.md)) still applies exactly as before — trust is established and delivery is signed the same way, just from inside the paced dispatch path instead of a separate one-shot retry loop.
 - L8 encryption: when the receiver advertises `encrypted_payloads` and an X25519 `encryption_public_key`, the body is encrypted to that key (`x25519-hkdf-sha256-aes256gcm`) and the signature covers the ciphertext. The receiver verifies, then decrypts. See the [L8 spec](https://rjpruitt16.github.io/l8-protocol/) for the exact construction.
 
-Delivery is still at-least-once — see [Delivery semantics](README.md#how-it-works). Drain mode's own ledger webhook is separate: it sends acknowledged batches from the local drain-event journal and deletes only the events confirmed by a `2xx` response. See [DRAIN_MODE.md](DRAIN_MODE.md) for that payload contract.
+Delivery is still at-least-once — see [Delivery semantics](docs/pages/how-it-works.md). Drain mode's own ledger webhook is separate: it sends acknowledged batches from the local drain-event journal and deletes only the events confirmed by a `2xx` response. See [DRAIN_MODE.md](DRAIN_MODE.md) for that payload contract.
 
 ## Remote idempotency
 

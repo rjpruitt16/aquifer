@@ -1,7 +1,7 @@
 # Aquifer behind a Gateway API proxy (Envoy Gateway)
 
 A fourth deployment shape alongside sidecar, standalone, and embedded library (see the root
-[README's "Deployment model"](../../README.md#deployment-model)): Aquifer as a normal Deployment,
+[Deployment](../../docs/pages/deployment.md)): Aquifer as a normal Deployment,
 reached through a [Gateway API](https://gateway.k8s.io/) proxy instead of a sidecar. The Gateway
 owns routing, TLS termination, and the cluster's single ingress point; Aquifer owns the queue behind
 it — not a way to horizontally scale Aquifer itself.
