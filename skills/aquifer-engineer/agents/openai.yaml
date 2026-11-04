@@ -1,0 +1,4 @@
+interface:
+  display_name: "Aquifer Engineer"
+  short_description: "Benchmark and tune reliable Aquifer deployments"
+  default_prompt: "Use $aquifer-engineer to benchmark and tune this Aquifer deployment safely."
