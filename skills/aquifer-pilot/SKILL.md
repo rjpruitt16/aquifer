@@ -72,7 +72,7 @@ Everything after this is compared against these numbers, and the backend's pacin
 
 ## 3. Teach the backend to set the pace
 
-When you add headers to the backend, use the `X-Aqueduct-*` names below. They belong to the protocol, not to Aquifer, so the backend isn't tied to one implementation. Aquifer reads and sends every one of them as `X-Aquifer-*` too, which is the form its README shows.
+When you add headers to the backend, use the `X-Aqueduct-*` names below. They belong to the protocol, not to Aquifer, so the backend isn't tied to one implementation. Aquifer reads and sends every header in this section as `X-Aquifer-*` too, which is the form its README shows.
 
 ### What Aquifer tells the backend
 

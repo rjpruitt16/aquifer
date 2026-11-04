@@ -5,7 +5,7 @@
 A durable queue that paces traffic into a service at the rate it can take. Put it in front of your webhook handlers, a rate-limited third-party API, a GPU or your own backend: when a burst arrives faster than the target can handle, Aquifer holds the excess on disk instead of letting callers retry into it, and releases it at the rate you set for that target, slowing down whenever the target, or its load report, asks for less.
 
 - **Retry storm mitigation.** Callers wait in a durable queue instead of hammering a struggling service with retries, and the queue drains as capacity comes back.
-- **Fairness.** Every tenant gets its own queue and they take turns. When one tenant flooded the GPU, CI runners and sandbox the agents shared, the small tenants' p99 stayed at 106 s, against 308 s when every agent called them directly; the flooding tenant waited longer instead.
+- **Fairness.** Every tenant gets its own queue and they take turns. When one tenant flooded the GPU, database, CI runners and sandbox the agents shared, the small tenants' p99 stayed at 106 s, against 308 s when every agent called them directly, where a third of their workflows failed outright. The flooding tenant waited longer instead.
 - **Delivery however the caller wants it:** results on the same connection (synchronous) or by durable webhook, and WebSocket sessions proxied with a transcript that replays anything missed after a reconnect.
 
 ![Traditional load balancing collapsing under a spike, round-robin flickering faster as instances die, versus Aquifer pacing that keeps the fleet stable while an autoscaler brings real capacity online](docs/images/fleet-degradation.gif)
@@ -98,7 +98,7 @@ You can build this yourself, and in the multi-agent benchmark a carefully built 
 
 In that benchmark's bursts, Aquifer also drew about 5× fewer refusals from the downstream CI service than the hand-built dispatcher, because it paced to the limits CI advertised.
 
-Temporal makes a workflow durable and retries its steps, but it doesn't know how much a shared downstream service can take right now. Aquifer handles that part, so the two fit together: have a Temporal activity call Aquifer's `POST /proxy`.
+Temporal makes a workflow durable and retries its steps, and it can cap how fast a task queue runs, but that cap is a number you set; it doesn't follow what the downstream service reports it can take right now. Aquifer handles that part, so the two fit together: have a Temporal activity call Aquifer's `POST /proxy`, with an idempotency key built from the workflow and activity IDs so Temporal's retries don't queue the job twice, and a start-to-close timeout long enough to cover the wait in Aquifer's queue.
 
 ## Documentation
 
