@@ -96,6 +96,8 @@ Everything after this is compared against these numbers, and the backend's pacin
 
 ## 3. Teach the backend to set the pace
 
+**First decide whether the pilot needs backend headers at all.** If the backend's capacity is fixed, such as a database pool of a set size or a fixed number of workers, the YAML ceiling from step 2 is usually enough. When several tenants' queues are active, Aquifer scales them to fit that ceiling, and queues using less than their share leave the rest to busier ones, so an uneven split takes care of itself. Run the static ceiling first. Add the control loop below only if a measured pass shows saturation the ceiling didn't prevent, or if capacity changes while the system runs (autoscaling, deploys, a degraded replica). If you do add it, compare it with the static pass and keep whichever measured better.
+
 When you add headers to the backend, use the `X-Aqueduct-*` names below. They belong to the protocol, not to Aquifer, so the backend isn't tied to one implementation. Aquifer reads and sends every header in this section as `X-Aquifer-*` too, which is the form its README shows.
 
 ### What Aquifer tells the backend
@@ -105,7 +107,7 @@ Every request Aquifer sends carries these headers, so the backend knows what's c
 | Header | Meaning |
 |---|---|
 | `X-Aqueduct-Flow-Rate` | This queue's current dispatch rate (rps) |
-| `X-Aqueduct-Queue-Depth` | This queue's jobs still waiting |
+| `X-Aqueduct-Queue-Depth` | Jobs waiting on this whole node, across every queue and backend (not this queue's own) |
 | `X-Aqueduct-Active-Queues` | Queues on this node currently sending to this backend |
 | `X-Aqueduct-Upstream-Backlog` | Jobs on this node waiting for this backend, across all its queues |
 | `X-Aqueduct-Total-Jobs` | All jobs on this node right now |
@@ -143,7 +145,7 @@ Partitioning matters for the pacing math. **Pacing is per node and per queue.** 
 
 Account for that in the AIMD:
 - **Count the senders.** Read `X-Aqueduct-Active-Queues` per node. Tell nodes apart by `X-Aqueduct-Node-Id`, which every request carries. Add them up.
-- **Divide.** Advertise each queue `budget ÷ total active queues`, not the whole budget.
+- **Divide.** Advertise each queue `budget ÷ total active queues`, not the whole budget. That's an even split: when tenants are very uneven, it caps the big tenant at an even share even while the small ones leave theirs unused. For uneven tenants, prefer the static ceiling, or size each queue's rate from what that queue actually uses.
 - **Scale the step.** An additive step of +5 rps lands on every queue at once. With 20 queues across 4 nodes, that's +100 rps at the backend. Size the increase for the total, and cut on the total.
 
 A feedback loop on the backend's own saturation signal corrects itself either way, because it measures the real total. But dividing first means fewer overshoots.
