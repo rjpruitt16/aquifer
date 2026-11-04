@@ -1,6 +1,6 @@
 # Deployment
 
-Aquifer runs four ways: as a **sidecar** alongside your app, as a **standalone service** multiple services point to, **embedded directly as a Go library** in your own process (see [Framework adapters](adapters.md)), or as an **extension behind a Gateway API proxy** like Envoy Gateway in Kubernetes, where the proxy owns routing and TLS and Aquifer owns the queue behind it (see [examples/kubernetes](../../examples/kubernetes)). Each instance persists to its own SQLite volume, with no external database or coordination service to run.
+Aquifer runs four ways: as a **sidecar** alongside your app, as a **standalone service** multiple services point to, **embedded directly as a Go library** in your own process (see [Framework adapters](adapters.md)), or as an **extension behind a Gateway API proxy** like Envoy Gateway in Kubernetes, where the proxy owns routing and TLS and Aquifer owns the queue behind it (see [examples/kubernetes](../../examples/kubernetes)). Each instance persists to its own volume (a Pebble directory by default, or a SQLite file when `AQUIFER_STORE_BACKEND=sqlite` or `DB_PATH` already holds a SQLite database), with no external database or coordination service to run.
 
 People run Aquifer in front of things like: internal coding platforms (GitLab, Forgejo), CI runners, database read replicas, and MCP servers, anywhere a burst of agent or service traffic needs to hit something that has its own capacity limit.
 

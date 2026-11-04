@@ -1,7 +1,10 @@
 # API overview
 
-```json
+```http
 POST /jobs
+```
+
+```json
 {
   "user_id":        "user-123",
   "idempotent_key": "invoice-42-notify",
