@@ -11,11 +11,22 @@ Engineer Inlet and Aquifer from measured limits, not guessed rate values. Treat 
 
 1. Inspect current Aquifer source before changing or describing Aquifer behavior: this repository's `README.md`, `API.md`, `CONFIGURATION.md`, `benchmark.md`, and the relevant runtime code. If you are working from another repository, use a checked-out copy of [Aquifer](https://github.com/rjpruitt16/aquifer) or read it on GitHub.
 2. If Inlet is in the path, read [Inlet's](https://github.com/rjpruitt16/inlet) `README.md`, `inlet.example.yml`, and relevant runtime code too.
-3. Identify the path being tuned: provider to Inlet, ordered cloud queue, intake into Aquifer, queued HTTP dispatch, `POST /proxy`, pool dispatch, completion webhooks, or WebSockets.
+3. Identify the path being tuned: provider to Inlet, caller to Canalis, ordered cloud queue, intake into Aquifer, queued HTTP dispatch, `POST /proxy`, pool dispatch, completion webhooks, or WebSockets.
 4. Identify the protected bottleneck: application workers, database, cache, Valkey, external API, GPU, or Aquifer storage.
 5. State the required throughput, p95/p99 latency, burst shape, tenant count, retry policy, durability level, and overload behavior.
 
 Do not expose Aquifer directly to untrusted callers. Keep authentication, authorization, and destination selection in a trusted gateway or service. Inlet verifies supported provider signatures and selects destinations from deployment configuration; do not make destinations caller-controlled.
+
+## Choose The Shape
+
+Decide early which pieces the design needs, and say why. Each one does a job Aquifer doesn't:
+
+- **Aquifer alone:** trusted callers (your own services or gateway) send jobs to one node, or to nodes split by protected resource. Start here unless one of the cases below applies.
+- **Add [Inlet](https://github.com/rjpruitt16/inlet)** when the traffic is inbound webhooks from providers (Stripe, GitHub, Shopify and the others it supports). Inlet runs as a Lambda or Worker, verifies each provider's signature, maps the sender to `user_id`, uses the provider's event ID as `idempotent_key`, and acknowledges the provider only after the event is durably queued. Aquifer doesn't verify provider signatures itself.
+- **Add [Canalis](https://github.com/rjpruitt16/canalis-rs)** when there are several Aquifer nodes and callers shouldn't have to know which one to use. Canalis is the gateway in front of them: it keeps each tenant on one node, sends new tenants only to nodes with room, and holds work in its own durable line when every node is full. Start from the [Canalis + Aquifer quick start](https://github.com/rjpruitt16/aquifer/blob/main/examples/canalis/README.md).
+- **Both** for webhook intake at fleet scale: provider → Inlet → Canalis → Aquifer nodes → backend.
+
+Don't add Canalis or Inlet just because they exist: each is another service to deploy, monitor and benchmark. If neither case applies, say so in the design.
 
 ## Benchmark Before Tuning
 
