@@ -5,7 +5,7 @@ description: Evaluate Aquifer against your own workload. A shadow pilot on a bra
 
 # Aquifer pilot
 
-Pinned to Aquifer v0.15.1. Check the version they run (`aquifer --version`, or the image tag). If it's different, read this skill at that release instead: https://github.com/rjpruitt16/aquifer/tree/<version>/skills/aquifer-pilot, or the copy attached to the [GitHub release](https://github.com/rjpruitt16/aquifer/releases) (releases before v0.16.1 don't have one). Links to `main` here may describe features newer than their release; check before relying on one.
+Pinned to Aquifer v0.15.1. Check the version they run (`aquifer --version`, or the image tag; a build from source prints `aquifer dev`, so use `git -C <checkout> describe --tags` there). If it's different, read this skill at that release instead: https://github.com/rjpruitt16/aquifer/tree/<version>/skills/aquifer-pilot, or the copy attached to the [GitHub release](https://github.com/rjpruitt16/aquifer/releases) (releases before v0.16.1 don't have one). Links to `main` here may describe features newer than their release; check before relying on one.
 
 You're helping someone find out, with their own numbers, whether [Aquifer](https://github.com/rjpruitt16/aquifer) helps their workload. Keep it simple:
 - a branch, not a migration;
@@ -65,6 +65,7 @@ Those are CockroachDB's own results, not Aquifer's. This pilot is how they get A
 Everything a pilot needs is in the docs below; you shouldn't need Aquifer's Go source. If one of them doesn't answer a question, note it in the report: that's a docs bug.
 
 - **Build and run.** From a checkout: `go build -o ./bin/aquifer ./cmd/aquifer`, or `go install github.com/rjpruitt16/aquifer/cmd/aquifer@<version>`. Then `PORT=8080 DB_PATH=./aquifer-data CONFIG_PATH=aquifer.yml ./bin/aquifer`. `GET /ready` answers once it's up.
+- **On a laptop:** Aquifer listens on every interface (`:PORT`); there's no setting to bind it to loopback only. On first start it writes its L8 identity (`.l8-key`, `l8-trust`) into the working directory (`L8_KEY_PATH` moves the key), so start it from a scratch directory.
 - **Every setting** (env vars and the YAML rate file) is in [docs/pages/configuration.md](../../docs/pages/configuration.md). The root `CONFIGURATION.md` only explains why some defaults are what they are.
 - **Endpoints:** `POST /jobs`, `GET /jobs/{id}`, `GET /jobs/{id}/stream`, `POST /proxy`, `GET /metrics`, `GET /health`, all in [API.md](../../API.md). Account queues (one queue per `user_id`) are on by default.
 - **How the limits combine** (the question pilots most often go to the source for):
@@ -95,8 +96,6 @@ Before Aquifer goes in front, find the backend's real limits. Ramp load against 
 Everything after this is compared against these numbers, and the backend's pacing logic (step 3) needs them.
 
 ## 3. Teach the backend to set the pace
-
-**First decide whether the pilot needs backend headers at all.** If the backend's capacity is fixed, such as a database pool of a set size or a fixed number of workers, the YAML ceiling from step 2 is usually enough. When several tenants' queues are active, Aquifer scales them to fit that ceiling, and queues using less than their share leave the rest to busier ones, so an uneven split takes care of itself. Run the static ceiling first. Add the control loop below only if a measured pass shows saturation the ceiling didn't prevent, or if capacity changes while the system runs (autoscaling, deploys, a degraded replica). If you do add it, compare it with the static pass and keep whichever measured better.
 
 When you add headers to the backend, use the `X-Aqueduct-*` names below. They belong to the protocol, not to Aquifer, so the backend isn't tied to one implementation. Aquifer reads and sends every header in this section as `X-Aquifer-*` too, which is the form its README shows.
 
