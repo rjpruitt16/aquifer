@@ -18,7 +18,7 @@ A durable queue that paces traffic into a service at the rate it can take. Put i
 
 **Redis or SQS plus a rate-limited worker** can do the core of this: in the multi-agent benchmark, a carefully built Redis queue and dispatcher matched Aquifer's latency. Aquifer gives you the rest without writing it: a queue per tenant with fair admission, a pace the target sets live (`X-Aquifer-*` headers or vLLM's load report) instead of a fixed worker rate, `POST /proxy` falling back to the queue on the same connection, idempotency keys, and results by stream or webhook. It also drew about 5× fewer refusals from the benchmark's CI service, because it paced to the limits CI advertised.
 
-**Hookdeck** queues inbound webhooks as a hosted service, billed by usage. Aquifer runs on your own machines, so scaling it costs only the machines you add, and it also paces outbound API calls, agent tool calls and WebSocket sessions.
+**Hookdeck** queues inbound webhooks as a hosted service, billed by usage. Aquifer runs on your own machines: there's no per-event fee, but you run and pay for the infrastructure. It also paces outbound API calls, agent tool calls and WebSocket sessions.
 
 **Temporal** makes workflows durable and can cap how fast a task queue runs, but that cap is a number you set, not what the downstream reports it can take right now.
 
@@ -48,12 +48,12 @@ cat > aquifer.yml <<'EOF'
 upstreams:
   httpbin.org:
     rps: 5             # at most 5 requests a second to this host
-    max_concurrent: 2  # and at most 2 in flight
+    max_concurrent: 2  # and at most 2 in flight per tenant
 EOF
 CONFIG_PATH=aquifer.yml aquifer
 ```
 
-Hosts without an entry get 2 requests a second, one at a time. The target can lower its rate live with `X-Aquifer-Rps` and `X-Aquifer-Max-Concurrent` response headers.
+`rps` caps the host's total across all tenants. `max_concurrent` applies to each tenant's queue, so with N busy tenants up to N × 2 requests can be in flight; size it for the backend's own concurrency limit with that in mind. Hosts without an entry get 2 requests a second, one at a time per tenant. The target can lower its rate live with `X-Aquifer-Rps` and `X-Aquifer-Max-Concurrent` response headers.
 
 Send it a job and watch it go through the line:
 
