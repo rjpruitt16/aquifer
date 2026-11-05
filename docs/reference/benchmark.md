@@ -1,12 +1,14 @@
 # Benchmarks
 
+> Sections 1–7 ran before v0.13.0 (2026-10-05), when SQLite was the default store; Pebble is the default now. Sections 8 and 11 compare both, and 12–13 ran on Pebble.
+
 Real runs against a live deployment, not simulated numbers. Target: `aquifer-bench.fly.dev`, a single `shared-cpu-1x`/512MB Fly.io machine in `iad`, `AQUIFER_MEMORY_LIMIT_MB=400`, default pacing (2 RPS/1 concurrent per target API domain, no `CONFIG_PATH`). Load generated with [vegeta](https://github.com/tsenart/vegeta); scripts are in [`benchmark/`](../../benchmark).
 
 Scenarios 1-6 dispatch to a dummy target API (`postman-echo.com`) at the default 2 req/s ceiling — intentional, since Aquifer protects target APIs that haven't told it otherwise. A large batch queues for a while before draining; that's the configured ceiling working as intended, not a bottleneck. Production sets real per-domain rates via `CONFIG_PATH`. Scenario 7 deliberately raises the ceiling so machine size, not the default rate limit, is what's measured.
 
 ---
 
-## 1. Sustained throughput
+## 1. Sustained throughput (SQLite, before v0.13.0)
 
 Measures acceptance (`POST /jobs` → 201), not end-to-end dispatch — ingest and dispatch are decoupled by design.
 
@@ -22,7 +24,7 @@ Success    100.00% | Status 201:1500
 
 ---
 
-## 2. Burst absorption (retry-storm simulation)
+## 2. Burst absorption (retry-storm simulation) (SQLite, before v0.13.0)
 
 Baseline traffic, a 10x spike for 30s, then back to baseline.
 
@@ -36,7 +38,7 @@ Phase: recovery (10/s, 15s)  — 150 req, 100% success, p99 189ms
 
 ---
 
-## 3. Admission control under memory pressure
+## 3. Admission control under memory pressure (SQLite, before v0.13.0)
 
 Aquifer sheds load with clean `429`s (never 5xx, never a crash) once memory exceeds a configured ceiling.
 
@@ -62,7 +64,7 @@ No crash, no hang, no partial writes.
 
 ---
 
-## 4. Crash recovery
+## 4. Crash recovery (SQLite, before v0.13.0)
 
 30 jobs enqueued, machine `SIGKILL`'d ~3s in (mid-dispatch), restarted, polled for up to 60s:
 
@@ -75,7 +77,7 @@ Every job persisted to SQLite before dispatch, so a kill mid-flight just means t
 
 ---
 
-## 5. Multi-tenant fairness (`X-Aqueduct-Account-Queue`)
+## 5. Multi-tenant fairness (`X-Aqueduct-Account-Queue`) (SQLite, before v0.13.0)
 
 Without isolation, every job hitting the same target API domain shares one dispatch queue — a noisy tenant can starve everyone behind it. Isolation per `(user_id, api_key)` is on by default (`AQUIFER_ACCOUNT_QUEUE`); a target API can switch it off for itself with `X-Aqueduct-Account-Queue: disabled`. `TestABrokenTenantDoesNotStallAHealthyOneOnTheSameHost` measures it: with a broken tenant retrying a 40-job burst, a healthy tenant on the same host finishes 20 jobs in ~0.2s with isolation and 0 of 20 in 5s without it.
 
@@ -91,7 +93,7 @@ completing on their own schedule regardless of the flood. Before the fix, the sa
 
 ---
 
-## 6. Retry-After backs off exponentially under sustained pressure
+## 6. Retry-After backs off exponentially under sustained pressure (SQLite, before v0.13.0)
 
 A single `429` returns the base value (default 5s). Consecutive rejections double it, capped at 60s; the next allowed request resets it. Verified against a live instance held over its memory ceiling:
 
@@ -103,7 +105,7 @@ This stops clients from hammering a fixed 5-second ceiling forever once an insta
 
 ---
 
-## 7. Capacity and drain time
+## 7. Capacity and drain time (SQLite, before v0.13.0)
 
 Started as "what machine size fits a given traffic shape." Found something bigger: a real correctness/scaling bug in the SQLite layer, unrelated to machine size.
 

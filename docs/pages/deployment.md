@@ -10,4 +10,4 @@ See [Partitioning strategies](partitioning.md) above for how to assign tenants t
 See the [security warning](../reference/API.md#post-jobs) under `POST /jobs`; the same untrusted-caller risk applies regardless of deployment shape.
 
 
-**Choosing a machine size:** with Pebble and the default 100ms flush, one Fly machine sustained about 1,000 jobs/s on performance-1x, 1,500 on 2x and 3,000 on 4x, end to end including webhooks. See [benchmark.md](../reference/benchmark.md#12-capacity-per-machine-pebble-flyio-2026-10-07) for the method and caveats, and [section 7](../reference/benchmark.md#7-capacity-and-drain-time) for earlier capacity work.
+**Choosing a machine size:** with Pebble and the default 100ms flush, one Fly machine sustained about 1,000 jobs/s on performance-1x, 1,500 on 2x and 3,000 on 4x, end to end including webhooks. See [benchmark.md](../reference/benchmark.md#12-capacity-per-machine-pebble-flyio-2026-10-07) for the method and caveats, and [section 7](../reference/benchmark.md#7-capacity-and-drain-time-sqlite-before-v0130) for earlier capacity work.
