@@ -105,8 +105,11 @@ type AccountQueue struct {
 	resultRecorder     storage.ResultRecorder
 	workerActiveQueues *atomic.Int64
 	workerBacklog      *atomic.Int64
-	onJobDone          func(*jobs.Job)
-	currentRPS         atomic.Int64 // stored as rps * 100
+	// shared is the target-wide pace every queue for the same target takes a
+	// slot from before dispatching. nil for queues built outside a URLWorker.
+	shared     *sharedPace
+	onJobDone  func(*jobs.Job)
+	currentRPS atomic.Int64 // stored as rps * 100
 	// served counts jobs that left this queue for good (finished or failed),
 	// for the fairness gauge on /metrics.
 	served  atomic.Int64
@@ -205,7 +208,14 @@ func (q *AccountQueue) Throttle(rps float64) {
 }
 
 func NewAccountQueue(key, upstream string, rps float64, maxConc int, pool *Pool, store storage.Store, broker *Broker, l8 *l8.Registry, metrics MetricsAdapter, enqueueWebhook WebhookEnqueuer, resultRecorder storage.ResultRecorder, workerActiveQueues, workerBacklog *atomic.Int64, onJobDone func(*jobs.Job), onIdle func(string), slowStart bool, onSlowStartSignal func(bool), onMaxBacklogSignal func(int64)) *AccountQueue {
+	return newAccountQueue(key, upstream, rps, maxConc, pool, store, broker, l8, metrics, enqueueWebhook, resultRecorder, workerActiveQueues, workerBacklog, onJobDone, onIdle, slowStart, onSlowStartSignal, onMaxBacklogSignal, nil)
+}
+
+// newAccountQueue is NewAccountQueue plus the target's shared pace, which a
+// URLWorker passes so all of its queues together stay within its ceiling.
+func newAccountQueue(key, upstream string, rps float64, maxConc int, pool *Pool, store storage.Store, broker *Broker, l8 *l8.Registry, metrics MetricsAdapter, enqueueWebhook WebhookEnqueuer, resultRecorder storage.ResultRecorder, workerActiveQueues, workerBacklog *atomic.Int64, onJobDone func(*jobs.Job), onIdle func(string), slowStart bool, onSlowStartSignal func(bool), onMaxBacklogSignal func(int64), shared *sharedPace) *AccountQueue {
 	q := &AccountQueue{
+		shared:             shared,
 		key:                key,
 		upstream:           upstream,
 		pool:               pool,
@@ -385,6 +395,15 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 				default:
 				}
 				dispatchTimer.Reset(retry.Jitter(interval - elapsed))
+				break
+			}
+			if wait := q.shared.reserve(time.Now()); wait > 0 {
+				dispatchTimer.Stop()
+				select {
+				case <-dispatchTimer.C:
+				default:
+				}
+				dispatchTimer.Reset(retry.Jitter(wait))
 				break
 			}
 
