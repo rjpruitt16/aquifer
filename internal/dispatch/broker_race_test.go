@@ -6,9 +6,10 @@ package dispatch
 import (
 	"sync"
 	"testing"
+	"time"
 )
 
-// TestBrokerPublishWhileUnsubscribing runs Publish against subscribers that
+// TestBrokerPublishWhileUnsubscribing runs Publish and PublishTerminal against subscribers that
 // unsubscribe at the same time. Unsubscribe compacts the subscriber slice in
 // place, so Publish must not read that slice after releasing the lock. Run
 // with -race.
@@ -28,6 +29,7 @@ func TestBrokerPublishWhileUnsubscribing(t *testing.T) {
 			for i := 0; i < 20; i++ {
 				b.Publish(job, SSEEvent{Event: "queued"})
 			}
+			b.PublishTerminal(job, SSEEvent{Event: "completed"}, time.Millisecond)
 		}()
 		go func() {
 			defer wg.Done()
