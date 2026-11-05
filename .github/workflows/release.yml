@@ -49,10 +49,10 @@ jobs:
         env:
           TAG: ${{ github.ref_name }}
         run: |
-          if ! grep -q "^Pinned to Aquifer $TAG\." skills/*/SKILL.md; then
-            echo "::error::skills/*/SKILL.md aren't pinned to $TAG. Run scripts/pin-skills.py $TAG and commit before tagging."
+          python3 scripts/pin-skills.py "$TAG" --check || {
+            echo "::error::Run scripts/pin-skills.py $TAG and commit before tagging."
             exit 1
-          fi
+          }
 
       - name: Attach pinned skills to the release
         env:
