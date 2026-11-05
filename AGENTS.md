@@ -24,16 +24,17 @@ Shared contracts that must stay identical across Aquifer and Spillway: `X-Aquedu
 
 ## Where things live
 
-- `aquifer.go` (`PrepareJob`, `Enqueue`), `server.go` (HTTP routes), `proxy.go` (`/proxy`).
+- Root `aquifer.go` is the whole public package `github.com/rjpruitt16/aquifer`: re-exports of `internal/core`'s exported names, so library users' imports keep working. Regenerate it when that set changes. It's the only Go file in the root.
+- `internal/core`: what used to be the root package. `aquifer.go` (`PrepareJob`, `Enqueue`), `server.go` (HTTP routes), `proxy.go` (`/proxy`), lifecycle, shutdown, region redirect, and the alias files below. Its tests live beside it.
 - `internal/dispatch`: the dispatch path. `Registry` (one `URLWorker` per target API), `AccountQueue` (per-tenant queues; `execute` and `MakeRequest` are the single target API dispatch path), pools, the SSE broker, webhook delivery, drain mode and registration. Root `dispatch.go` keeps `Registry`, `NewRegistry`, `Config` and the rest as aliases.
-- `internal/jobs`: `Job`, `Request`, `Result`, validation, `DedupHash` (the only place idempotency hashes are derived). Root `job.go` keeps `Job`, `JobRequest`, `JobResult` and the status and retry constants as aliases.
-- `internal/storage`: the `Store` interface, `SQLite`, `Pebble`, `Open` (picks the backend), and `Remote` (the shared idempotency and result ledger in Valkey). Root `store.go` keeps `JobStore`, `Store`, `PebbleStore` and their constructors as aliases.
-- `cluster_routing.go` (`clusterRoutingKey`).
-- `l8/` (public package `github.com/rjpruitt16/aquifer/l8`): L8 handshake, signing, payload encryption, request-schema validation. `l8_compat.go` keeps the old root names (`NewL8Registry`, `L8Registry`, ...) as aliases.
-- `internal/websocket`: the durable WebSocket proxy (`Manager`, Valkey transcripts, follower, scheduler, transcript export). `websocket.go` keeps the old root names (`WebSocketManager`, `NewWebSocketManager`, ...) as aliases.
+- `internal/jobs`: `Job`, `Request`, `Result`, validation, `DedupHash` (the only place idempotency hashes are derived). `internal/core/job.go` keeps `Job`, `JobRequest`, `JobResult` and the status and retry constants as aliases.
+- `internal/storage`: the `Store` interface, `SQLite`, `Pebble`, `Open` (picks the backend), and `Remote` (the shared idempotency and result ledger in Valkey). `internal/core/store.go` keeps `JobStore`, `Store`, `PebbleStore` and their constructors as aliases.
+- `internal/core/cluster_routing.go` (`clusterRoutingKey`).
+- `l8/` (public package `github.com/rjpruitt16/aquifer/l8`): L8 handshake, signing, payload encryption, request-schema validation. `internal/core/l8_compat.go` keeps the old root names (`NewL8Registry`, `L8Registry`, ...) as aliases.
+- `internal/websocket`: the durable WebSocket proxy (`Manager`, Valkey transcripts, follower, scheduler, transcript export). `internal/core/websocket.go` keeps the old root names (`WebSocketManager`, `NewWebSocketManager`, ...) as aliases.
 - `internal/admission` (admission limits, fair admission, inbound rate), `internal/region` (region discovery, redirect helpers), `internal/cluster` (membership, routing, Valkey coordination, `State`), `internal/metrics` (the Prometheus adapter, `TargetStats`), `internal/orca` (ORCA load headers). Root `admission.go`, `region.go`, `cluster.go`, `lifecycle.go` and `metrics.go` keep the old root names as aliases.
-- `mcpadapter/` and `a2aadapter/`: the MCP and A2A adapters, outside the root package.
-- `internal/env`, `internal/httpx`, `internal/retry`, `internal/nodeid`, `internal/urlpolicy`: small helpers shared by the root and the internal packages (env parsing, JSON errors and drain responses, jitter, node ID, the URL allowlist).
+- `mcpadapter/` and `a2aadapter/`: the MCP and A2A adapters, outside `internal/core`.
+- `internal/env`, `internal/httpx`, `internal/retry`, `internal/nodeid`, `internal/urlpolicy`: small helpers shared by `internal/core` and the other internal packages (env parsing, JSON errors and drain responses, jitter, node ID, the URL allowlist).
 - `internal/` packages can't be imported from outside this module, so they can change freely; the root package and `l8/` are the public API.
 - `docs/reference/API.md` is the endpoint and env-var reference; `README.md` is a short overview for people. Longer guides live in `docs/pages/`. The docs site (https://rjpruitt16.github.io/aquifer/) is built from those and the references in `docs/reference/` by `docs/site/`; a new page goes in `docs/site/pages.mjs`. Link between docs with relative paths to the `.md` files: the build rewrites them for the site.
 

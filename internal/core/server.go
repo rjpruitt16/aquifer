@@ -1,0 +1,883 @@
+// Copyright 2026 Rahmi Pruitt
+// SPDX-License-Identifier: Apache-2.0
+
+package core
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"math"
+	"net"
+	"net/http"
+	"net/http/httptrace"
+	"strconv"
+	"strings"
+	"sync/atomic"
+	"time"
+
+	"github.com/rjpruitt16/aquifer/internal/cluster"
+	"github.com/rjpruitt16/aquifer/internal/dispatch"
+	"github.com/rjpruitt16/aquifer/internal/httpx"
+	"github.com/rjpruitt16/aquifer/internal/region"
+	"github.com/rjpruitt16/aquifer/l8"
+)
+
+type Server struct {
+	aquifer *Aquifer
+}
+
+// clusterForwardResponseTimeout is how long a forwarding node waits for the
+// owner's answer before returning 504. The same value is sent to the owner as
+// a deadline, so an owner that only gets to the request after its sender gave
+// up refuses it instead of running a job the caller is about to retry.
+var clusterForwardResponseTimeout = 10 * time.Second
+
+var clusterForwardClient = func() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext
+	transport.ResponseHeaderTimeout = clusterForwardResponseTimeout
+	return &http.Client{Transport: transport}
+}()
+
+func NewServer(aquifer *Aquifer) *Server {
+	return &Server{aquifer: aquifer}
+}
+
+type HTTPAdapter struct {
+	addr string
+}
+
+func NewHTTPAdapter(addr string) *HTTPAdapter {
+	return &HTTPAdapter{addr: addr}
+}
+
+func (a *HTTPAdapter) Name() string {
+	return "http"
+}
+
+func (a *HTTPAdapter) Start(ctx context.Context, aquifer *Aquifer) error {
+	server := &http.Server{
+		Addr:    a.addr,
+		Handler: NewServer(aquifer).Routes(),
+	}
+
+	go func() {
+		<-ctx.Done()
+		ShutdownHTTPServer(server)
+	}()
+
+	err := server.ListenAndServe()
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
+}
+
+func (s *Server) Routes() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /jobs", s.createJob)
+	mux.HandleFunc("POST /proxy", s.proxyJob)
+	mux.HandleFunc("GET /websocket", s.webSocket)
+	mux.HandleFunc("GET /results", s.getJobResult)
+	mux.HandleFunc("GET /jobs/{id}/stream", s.streamJob)
+	mux.HandleFunc("GET /jobs/{id}", s.getJob)
+	mux.HandleFunc("GET /health", s.health)
+	mux.HandleFunc("GET /metrics", s.metrics)
+	mux.HandleFunc("GET /ready", s.ready)
+	mux.HandleFunc("POST /pools/{pool_id}/members", s.registerPoolMember)
+	mux.HandleFunc("GET /.well-known/l8", s.wellKnownL8)
+	mux.HandleFunc("POST /l8/challenge", s.l8Challenge)
+	mux.HandleFunc("GET /l8-spec", s.l8Spec)
+	return withFullnessHeader(mux, s.aquifer)
+}
+
+func (s *Server) webSocket(w http.ResponseWriter, r *http.Request) {
+	if s.aquifer == nil || s.aquifer.webSockets == nil {
+		httpx.JSONError(w, "websocket proxy is disabled", http.StatusNotFound)
+		return
+	}
+	s.aquifer.webSockets.ServeHTTP(w, r)
+}
+
+// registerPoolMember handles both initial registration and heartbeat
+// refresh for a pool member — the same request shape serves both, per
+// the API design: re-calling this resets the member's liveness TTL and
+// updates its declared capacity.
+func (s *Server) registerPoolMember(w http.ResponseWriter, r *http.Request) {
+	poolID := r.PathValue("pool_id")
+
+	var req struct {
+		MemberID                 string  `json:"member_id"`
+		Address                  string  `json:"address"`
+		CapacityRPS              float64 `json:"capacity_rps"`
+		HeartbeatIntervalSeconds int     `json:"heartbeat_interval_seconds"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpx.JSONError(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.aquifer.RegisterPoolMember(poolID, req.MemberID, req.Address, req.CapacityRPS, req.HeartbeatIntervalSeconds); err != nil {
+		httpx.JSONError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]any{"status": "registered"})
+}
+
+func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
+	body := r.Body
+	if maxBytes := s.aquifer.MaxBodyBytes(); maxBytes > 0 {
+		body = http.MaxBytesReader(w, r.Body, maxBytes)
+	}
+
+	var req JobRequest
+	if err := json.NewDecoder(body).Decode(&req); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			jsonErrorFields(w, "request body too large", http.StatusRequestEntityTooLarge, map[string]any{
+				"limit_bytes": maxErr.Limit,
+			})
+			return
+		}
+		httpx.JSONError(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+
+	// Account-queue mode is a request header, never part of the JSON body —
+	// same X-Aqueduct-*/X-Aquifer-* precedence used for pacing headers
+	// elsewhere. Empty means "no opinion," leaving the target API's current
+	// mode unchanged rather than forcing it off for every request that
+	// doesn't happen to set this.
+	req.AccountQueueMode = dispatch.PacingHeader(r.Header, "Account-Queue")
+	if err := applyMaxRetriesHeader(r.Header, &req); err != nil {
+		httpx.JSONError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	setInboundRPS(w, s.aquifer, req.UserID)
+
+	if s.forwardClusterRequest(w, r, "/jobs", req) {
+		return
+	}
+	finishClusterRequest := s.trackLocalClusterRequest(w, req)
+	defer finishClusterRequest()
+
+	result, err := s.aquifer.Enqueue(req)
+	if err != nil {
+		if errors.Is(err, ErrAquiferDraining) {
+			httpx.WriteDraining(w, s.aquifer.RetryAfterSeconds())
+			return
+		}
+		var admissionErr *AdmissionRejectedError
+		if errors.As(err, &admissionErr) {
+			s.observeRejected(admissionErr.Decision.Reason)
+			if admissionErr.Decision.Queue != nil {
+				setQueueHeaders(w.Header(), *admissionErr.Decision.Queue)
+			}
+			w.Header().Set("Retry-After", fmt.Sprintf("%d", s.aquifer.RetryAfterSeconds()))
+			jsonErrorFields(w, err.Error(), http.StatusTooManyRequests, map[string]any{
+				"limit_reason": admissionErr.Decision.Reason,
+				"limit":        admissionErr.Decision.Limit,
+				"current":      admissionErr.Decision.Current,
+			})
+			return
+		}
+		if writeSchemaMismatch(w, err) {
+			return
+		}
+		httpx.JSONError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if !result.Duplicate {
+		setQueueHeaders(w.Header(), result.Queue)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if result.Duplicate {
+		w.WriteHeader(http.StatusOK)
+	} else {
+		w.WriteHeader(http.StatusCreated)
+	}
+	json.NewEncoder(w).Encode(result)
+}
+
+func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	job, err := s.aquifer.GetJob(id)
+	if err != nil {
+		httpx.JSONError(w, "job not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	body := map[string]any{
+		"job_id":         job.ID,
+		"status":         job.Status,
+		"url":            job.URL,
+		"method":         job.Method,
+		"created_at":     job.CreatedAt,
+		"execute_before": job.ExecuteBefore,
+	}
+	if result, ok := s.aquifer.JobResult(job.ID); ok {
+		body["result"] = map[string]any{
+			"response_status": result.ResponseStatus,
+			"content_type":    result.ContentType,
+			"body":            result.Body,
+			"body_truncated":  result.BodyTruncated,
+		}
+	}
+	json.NewEncoder(w).Encode(body)
+}
+
+func (s *Server) getJobResult(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	result, err := s.aquifer.GetJobResult(q.Get("user_id"), q.Get("idempotent_key"), q.Get("idempotency_scope"))
+	if err != nil {
+		if errors.Is(err, ErrJobResultNotFound) {
+			httpx.JSONError(w, "job result not found", http.StatusNotFound)
+			return
+		}
+		httpx.JSONError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
+func (s *Server) health(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(s.aquifer.Health())
+}
+
+func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if s.aquifer.IsDraining() {
+		httpx.WriteDraining(w, s.aquifer.RetryAfterSeconds())
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]string{"status": "ready"})
+}
+
+func (s *Server) wellKnownL8(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(s.aquifer.L8Metadata(r.Host))
+}
+
+func (s *Server) l8Challenge(w http.ResponseWriter, r *http.Request) {
+	var req L8ChallengeReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpx.JSONError(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	resp, err := s.aquifer.HandleL8Challenge(req)
+	if err != nil {
+		httpx.JSONError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+func (s *Server) l8Spec(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+	w.Write([]byte(l8.SpecDocument))
+}
+
+// ProxyFallbackInfo carries the one extra SSE event proxy mode's fallback
+// path emits before the normal queued/dispatching/terminal sequence — see
+// streamEvents. Status is 0 when a real target API status was never received
+// (a skipped attempt or a timeout), non-zero when the target API actually
+// responded (e.g. 429/503).
+type ProxyFallbackInfo struct {
+	Reason string
+	Status int
+}
+
+func (s *Server) streamJob(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	job, events, unsubscribe, err := s.aquifer.SubscribeJob(id)
+	if err != nil {
+		httpx.JSONError(w, "job not found", http.StatusNotFound)
+		return
+	}
+	s.streamEvents(w, r, job, events, unsubscribe, nil)
+}
+
+// streamEvents is streamJob's actual event loop, extracted so proxy mode's
+// fallback path can reuse the identical SSE behavior on the same
+// connection ("automatically start streaming") instead of reimplementing
+// it. Writes catch-up events, then loops on the events channel, a 30s
+// keepalive, and request cancellation, exactly as streamJob always has.
+//
+// proxyFallback is nil for a plain /jobs/:id/stream — this job never had a
+// direct attempt to explain. When non-nil (proxy mode's fallback path
+// only), one extra event is written first: a client watching the stream
+// (a browser, an agent with no server of its own to learn this any other
+// way) sees explicitly why it's in the queue instead of just "queued"
+// with no context.
+func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request, job *Job, events <-chan SSEEvent, unsubscribe func(), proxyFallback *ProxyFallbackInfo) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		httpx.JSONError(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	defer unsubscribe()
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+
+	if proxyFallback != nil {
+		data := map[string]any{"job_id": job.ID, "reason": proxyFallback.Reason}
+		if proxyFallback.Status != 0 {
+			data["upstream_status"] = proxyFallback.Status
+		}
+		dispatch.WriteSSE(w, "proxy_fallback", data)
+	}
+
+	// Catchup events for states already passed before client connected
+	dispatch.WriteSSE(w, "queued", map[string]any{"job_id": job.ID, "status": "queued"})
+	if job.Status == StatusInFlight {
+		dispatch.WriteSSE(w, "dispatching", map[string]any{"job_id": job.ID})
+	}
+	flusher.Flush()
+
+	keepalive := time.NewTicker(30 * time.Second)
+	defer keepalive.Stop()
+
+	ctx := r.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+
+		case event, ok := <-events:
+			if !ok {
+				return
+			}
+			writeErr := dispatch.WriteSSE(w, event.Event, event.Data)
+			if event.Event == "completed" || event.Event == "failed" {
+				// Confirm only a final event written and flushed while the
+				// client was still connected; anything else gets a webhook.
+				if writeErr == nil && http.NewResponseController(w).Flush() == nil && ctx.Err() == nil {
+					s.aquifer.broker.ConfirmDelivered(job.ID)
+				}
+				return
+			}
+			flusher.Flush()
+
+		case <-keepalive.C:
+			fmt.Fprintf(w, ": keepalive\n\n")
+			flusher.Flush()
+		}
+	}
+}
+
+// proxyJob is proxy mode's HTTP entry point: try the target API directly and
+// synchronously; on success, relay its response verbatim; on failure,
+// overload, or an already-open circuit breaker, fall back to the same
+// durable-queue-and-SSE path createJob/streamJob always use, on this same
+// connection.
+func (s *Server) proxyJob(w http.ResponseWriter, r *http.Request) {
+	body := r.Body
+	if maxBytes := s.aquifer.MaxBodyBytes(); maxBytes > 0 {
+		body = http.MaxBytesReader(w, r.Body, maxBytes)
+	}
+
+	var req JobRequest
+	if err := json.NewDecoder(body).Decode(&req); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			jsonErrorFields(w, "request body too large", http.StatusRequestEntityTooLarge, map[string]any{
+				"limit_bytes": maxErr.Limit,
+			})
+			return
+		}
+		httpx.JSONError(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	req.AccountQueueMode = dispatch.PacingHeader(r.Header, "Account-Queue")
+	if err := applyMaxRetriesHeader(r.Header, &req); err != nil {
+		httpx.JSONError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	setInboundRPS(w, s.aquifer, req.UserID)
+
+	if s.forwardClusterRequest(w, r, "/proxy", req) {
+		return
+	}
+	finishClusterRequest := s.trackLocalClusterRequest(w, req)
+	defer finishClusterRequest()
+
+	outcome := s.aquifer.AttemptDirect(r.Context(), req, proxyDirectAttemptTimeout())
+
+	if outcome.Err != nil {
+		if errors.Is(outcome.Err, ErrAquiferDraining) {
+			httpx.WriteDraining(w, s.aquifer.RetryAfterSeconds())
+			return
+		}
+		var admissionErr *AdmissionRejectedError
+		if errors.As(outcome.Err, &admissionErr) {
+			s.observeRejected(admissionErr.Decision.Reason)
+			if admissionErr.Decision.Queue != nil {
+				setQueueHeaders(w.Header(), *admissionErr.Decision.Queue)
+			}
+			w.Header().Set("Retry-After", fmt.Sprintf("%d", s.aquifer.RetryAfterSeconds()))
+			jsonErrorFields(w, outcome.Err.Error(), http.StatusTooManyRequests, map[string]any{
+				"limit_reason": admissionErr.Decision.Reason,
+				"limit":        admissionErr.Decision.Limit,
+				"current":      admissionErr.Decision.Current,
+			})
+			return
+		}
+		var redirectErr *RedirectExhaustedError
+		if errors.As(outcome.Err, &redirectErr) {
+			w.Header().Set("Retry-After", fmt.Sprintf("%d", region.ExhaustedRetryAfterSeconds()))
+			jsonErrorFields(w, outcome.Err.Error(), http.StatusTooManyRequests, map[string]any{
+				"limit_reason": "redirect_exhausted",
+			})
+			return
+		}
+		if writeSchemaMismatch(w, outcome.Err) {
+			return
+		}
+		httpx.JSONError(w, outcome.Err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if outcome.Duplicate {
+		s.streamExistingJob(w, r, outcome.ExistingJob)
+		return
+	}
+
+	if outcome.Direct {
+		ours := w.Header().Get("X-Aqueduct-Rps")
+		for k, vs := range outcome.Header {
+			if k == "X-Aqueduct-Rps" || k == "X-Aquifer-Rps" {
+				continue
+			}
+			for _, v := range vs {
+				w.Header().Add(k, v)
+			}
+		}
+		// The caller gets one rate: the lower of Aquifer's and the target's.
+		if rps := lowerRPS(ours, dispatch.PacingHeader(outcome.Header, "Rps")); rps != "" {
+			w.Header().Set("X-Aqueduct-Rps", rps)
+			w.Header().Set("X-Aquifer-Rps", rps)
+		}
+		w.WriteHeader(outcome.Status)
+		_, writeErr := w.Write(outcome.Body)
+		delivered := writeErr == nil && http.NewResponseController(w).Flush() == nil && r.Context().Err() == nil
+		s.aquifer.SettleDirectWebhook(outcome, delivered)
+		return
+	}
+
+	// RelayFrom is set when AttemptDirect redirected this request to
+	// another region (region_redirect.go) and that region accepted it
+	// into its own durable queue -- relay its live SSE stream onto this
+	// connection so the original caller sees one continuous stream
+	// regardless of which region actually ends up handling the job.
+	if outcome.RelayFrom != nil {
+		s.relaySSE(w, r, outcome.RelayFrom, outcome.RerouteRegion)
+		return
+	}
+
+	// DirectOnly is only ever set on an internal cross-region redirect hop
+	// (region_redirect.go) -- a real caller never sets it. It means "try
+	// direct, but if you can't, tell me cleanly, don't commit to your own
+	// queue" -- AttemptDirect already deleted the job row it inserted
+	// (fallbackOutcome, proxy.go) for exactly this case, so it's safe to
+	// just report the reason back synchronously here, no streaming, no
+	// Dispatch call.
+	if req.DirectOnly {
+		jsonErrorFields(w, "could not complete directly", http.StatusServiceUnavailable, map[string]any{
+			"reason":          outcome.FallbackReason,
+			"upstream_status": outcome.FallbackStatus,
+		})
+		return
+	}
+
+	// Fallback: subscribe before dispatching, so a fast completion can't
+	// publish before anyone's listening for it.
+	_, events, unsubscribe, err := s.aquifer.SubscribeJob(outcome.Job.ID)
+	if err != nil {
+		httpx.JSONError(w, "job not found", http.StatusNotFound)
+		return
+	}
+	queue, err := s.aquifer.Dispatch(outcome.Job, req.AccountQueueMode)
+	if err != nil {
+		unsubscribe()
+		var admissionErr *AdmissionRejectedError
+		if errors.As(err, &admissionErr) {
+			s.observeRejected(admissionErr.Decision.Reason)
+			setQueueHeaders(w.Header(), queue)
+			w.Header().Set("Retry-After", fmt.Sprintf("%d", s.aquifer.RetryAfterSeconds()))
+			jsonErrorFields(w, err.Error(), http.StatusTooManyRequests, map[string]any{
+				"limit_reason": admissionErr.Decision.Reason,
+				"limit":        admissionErr.Decision.Limit,
+				"current":      admissionErr.Decision.Current,
+			})
+			return
+		}
+		httpx.JSONError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	setQueueHeaders(w.Header(), queue)
+	s.streamEvents(w, r, outcome.Job, events, unsubscribe, &ProxyFallbackInfo{
+		Reason: outcome.FallbackReason,
+		Status: outcome.FallbackStatus,
+	})
+}
+
+func setQueueHeaders(headers http.Header, snapshot QueueSnapshot) {
+	dispatch.SetLoadHeader(headers, "Active-Queues", fmt.Sprintf("%d", snapshot.ActiveQueues))
+	dispatch.SetLoadHeader(headers, "Upstream-Backlog", fmt.Sprintf("%d", snapshot.UpstreamBacklog))
+	dispatch.SetLoadHeader(headers, "Queue-Backlog", fmt.Sprintf("%d", snapshot.QueueBacklog))
+	dispatch.SetLoadHeader(headers, "Admission-Pressure", fmt.Sprintf("%.3f", snapshot.AdmissionPressure))
+}
+
+// relaySSE forwards a redirected region's own SSE response byte-for-byte
+// onto the original caller's connection in real time — a pure relay, not a
+// re-parse/re-emit, since preserving the target's own event framing
+// exactly is both simpler and more faithful than reconstructing it. Used
+// only when AttemptDirect's cross-region redirect (region_redirect.go)
+// found a sibling region that accepted the job into its own durable
+// queue; the caller sees one continuous stream regardless of which region
+// actually ends up handling the job. Owns closing resp.Body.
+//
+// region, when non-empty, is announced via a synthetic "rerouted" event
+// before the relay starts — same rationale as proxy_fallback: a client
+// with no server of its own to explain this (a browser, an agent) should
+// know why its connection is still open and where the response is
+// actually coming from, not just start seeing target's own queued/
+// dispatching events with no context.
+func (s *Server) relaySSE(w http.ResponseWriter, r *http.Request, resp *http.Response, region string) {
+	defer resp.Body.Close()
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		httpx.JSONError(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	for k, vs := range resp.Header {
+		for _, v := range vs {
+			w.Header().Add(k, v)
+		}
+	}
+	w.WriteHeader(http.StatusOK)
+	if region != "" {
+		dispatch.WriteSSE(w, "rerouted", map[string]any{"region": region})
+	}
+	flusher.Flush()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		buf := make([]byte, 4096)
+		for {
+			n, err := resp.Body.Read(buf)
+			if n > 0 {
+				if _, werr := w.Write(buf[:n]); werr != nil {
+					return
+				}
+				flusher.Flush()
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-r.Context().Done():
+		// Caller disconnected — resp.Body.Close() (deferred above) unblocks
+		// the read goroutine, which exits shortly after via its own error.
+	}
+}
+
+// streamExistingJob handles a proxy-mode request that turned out to be a
+// duplicate of one already in flight or already finished. Job never
+// persists its target API response body past the transient SSE/webhook
+// payload (see Job), so a duplicate of an already-terminal job has no
+// cached response to replay — opening a stream for it would just keepalive
+// forever, since its completed/failed event already fired before this
+// request ever subscribed. Return its current status synchronously
+// instead; only a still-in-flight duplicate gets a real stream.
+func (s *Server) streamExistingJob(w http.ResponseWriter, r *http.Request, job *Job) {
+	if job.Status == StatusCompleted || job.Status == StatusFailed {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"job_id": job.ID, "status": job.Status, "duplicate": true,
+		})
+		return
+	}
+	_, events, unsubscribe, err := s.aquifer.SubscribeJob(job.ID)
+	if err != nil {
+		httpx.JSONError(w, "job not found", http.StatusNotFound)
+		return
+	}
+	s.streamEvents(w, r, job, events, unsubscribe, nil)
+}
+
+func (s *Server) forwardClusterRequest(w http.ResponseWriter, r *http.Request, path string, req JobRequest) bool {
+	if cluster.HasForwardedHeader(r) {
+		if cluster.ForwardExpired(r, time.Now()) {
+			// The sender already answered its caller with 504, and that caller
+			// is retrying, possibly on a new owner if this node stalled past the
+			// instance TTL. Accepting now would run the job twice.
+			w.Header().Set("Retry-After", "1")
+			httpx.JSONError(w, "forwarded request arrived after its sender's deadline; nothing was accepted. Retry with the same idempotent_key", http.StatusServiceUnavailable)
+			return true
+		}
+		return false
+	}
+	if s.aquifer == nil || s.aquifer.clusterRouter == nil {
+		return false
+	}
+
+	key := clusterRoutingKey(req)
+	knownOwners := len(s.aquifer.clusterRouter.RankedOwners(key))
+	if knownOwners == 0 {
+		return false
+	}
+	maxAttempts := knownOwners + 1
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		httpx.JSONError(w, err.Error(), http.StatusBadRequest)
+		return true
+	}
+
+	triedSet := make(map[string]bool, maxAttempts)
+	var tried []string
+	for len(tried) < maxAttempts {
+		owner, ok := s.aquifer.clusterRouter.ResolveOwner(key, triedSet)
+		if !ok {
+			break
+		}
+		if owner.ID == s.aquifer.clusterRouter.SelfID() {
+			if s.aquifer.IsDraining() {
+				triedSet[owner.ID] = true
+				tried = append(tried, owner.ID)
+				s.aquifer.clusterRouter.MarkUnavailable(key, owner.ID)
+				continue
+			}
+			return false
+		}
+		triedSet[owner.ID] = true
+		tried = append(tried, owner.ID)
+
+		target := strings.TrimRight(owner.Address, "/") + path
+		outbound, err := http.NewRequestWithContext(r.Context(), http.MethodPost, target, bytes.NewReader(body))
+		if err != nil {
+			httpx.JSONError(w, err.Error(), http.StatusBadRequest)
+			return true
+		}
+		outbound.Header.Set("Content-Type", "application/json")
+		outbound.Header.Set(cluster.ForwardedHeader, "true")
+		outbound.Header.Set(cluster.ForwardDeadlineHeader, strconv.FormatInt(time.Now().Add(clusterForwardResponseTimeout).UnixMilli(), 10))
+		if accountQueue := dispatch.PacingHeader(r.Header, "Account-Queue"); accountQueue != "" {
+			dispatch.SetLoadHeader(outbound.Header, "Account-Queue", accountQueue)
+		}
+
+		// Bound connection and response-header setup, but not the response body:
+		// /proxy may legitimately relay a paced SSE stream for much longer.
+		var delivered atomic.Bool
+		outbound = outbound.WithContext(httptrace.WithClientTrace(outbound.Context(), &httptrace.ClientTrace{
+			WroteRequest: func(info httptrace.WroteRequestInfo) { delivered.Store(info.Err == nil) },
+		}))
+		resp, err := clusterForwardClient.Do(outbound)
+		if err != nil {
+			if delivered.Load() && r.Context().Err() == nil {
+				// The owner has the whole request and may already have accepted
+				// the job. Failing over would let a second node run it too, so
+				// hand the decision back to the caller: a retry with the same
+				// idempotent_key reaches the same owner and is deduplicated there.
+				w.Header().Set("Retry-After", "1")
+				jsonErrorFields(w, "cluster owner did not answer in time; the job may have been accepted there. Retry with the same idempotent_key", http.StatusGatewayTimeout, map[string]any{
+					"owner_id": owner.ID,
+				})
+				return true
+			}
+			s.aquifer.clusterRouter.MarkUnavailable(key, owner.ID)
+			continue
+		}
+		if resp.StatusCode == http.StatusServiceUnavailable && dispatch.PacingHeader(resp.Header, "Node-State") == "draining" {
+			resp.Body.Close()
+			s.aquifer.clusterRouter.MarkUnavailable(key, owner.ID)
+			continue
+		}
+		defer resp.Body.Close()
+
+		for k, vs := range resp.Header {
+			for _, v := range vs {
+				w.Header().Add(k, v)
+			}
+		}
+		w.Header().Set("X-Aquifer-Cluster-Owner", owner.ID)
+		w.WriteHeader(resp.StatusCode)
+
+		flusher, stream := w.(http.Flusher)
+		buf := make([]byte, 4096)
+		for {
+			n, readErr := resp.Body.Read(buf)
+			if n > 0 {
+				if _, writeErr := w.Write(buf[:n]); writeErr != nil {
+					return true
+				}
+				if stream {
+					flusher.Flush()
+				}
+			}
+			if readErr != nil {
+				if readErr != io.EOF {
+					return true
+				}
+				return true
+			}
+		}
+	}
+
+	jsonErrorFields(w, "cluster owner unavailable", http.StatusBadGateway, map[string]any{
+		"tried_owner_ids": tried,
+	})
+	return true
+}
+
+func (s *Server) trackLocalClusterRequest(w http.ResponseWriter, req JobRequest) func() {
+	if s.aquifer == nil || s.aquifer.clusterRouter == nil || req.UserID == "" {
+		return func() {}
+	}
+	w.Header().Set("X-Aquifer-Cluster-Owner", s.aquifer.clusterRouter.SelfID())
+	s.aquifer.clusterRouter.TrackLocalJob(clusterRoutingKey(req))
+	return func() {
+		s.aquifer.clusterRouter.CompleteLocalJob(clusterRoutingKey(req))
+	}
+}
+
+// jsonErrorFields writes an error body that also identifies which limit was
+// hit, so a caller (or an operator reading logs) knows exactly why a request
+// was rejected rather than just that it was.
+func jsonErrorFields(w http.ResponseWriter, msg string, code int, fields map[string]any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	body := map[string]any{"error": msg}
+	for k, v := range fields {
+		body[k] = v
+	}
+	json.NewEncoder(w).Encode(body)
+}
+
+func writeSchemaMismatch(w http.ResponseWriter, err error) bool {
+	var schemaErr *SchemaMismatchError
+	if !errors.As(err, &schemaErr) {
+		return false
+	}
+	jsonErrorFields(w, err.Error(), http.StatusUnprocessableEntity, map[string]any{
+		"schema_route":  schemaErr.Route,
+		"schema_hash":   schemaErr.SchemaHash,
+		"schema_errors": schemaErr.Detail,
+	})
+	return true
+}
+
+// applyMaxRetriesHeader lets X-Aqueduct-Max-Retries (or X-Aquifer-Max-Retries)
+// override the body's max_retries, and X-Aqueduct-Webhook-Max-Retries the
+// body's webhook_max_retries; -1 means retry until complete.
+func applyMaxRetriesHeader(header http.Header, req *JobRequest) error {
+	if raw := dispatch.PacingHeader(header, "Max-Retries"); raw != "" {
+		n, err := strconv.Atoi(strings.TrimSpace(raw))
+		if err != nil {
+			return errors.New("X-Aqueduct-Max-Retries must be an integer: -1 (retry until complete) or 0-100")
+		}
+		req.MaxRetries = &n
+	}
+	if raw := dispatch.PacingHeader(header, "Webhook-Max-Retries"); raw != "" {
+		n, err := strconv.Atoi(strings.TrimSpace(raw))
+		if err != nil {
+			return errors.New("X-Aqueduct-Webhook-Max-Retries must be an integer: -1 (retry until delivered) or 0-100")
+		}
+		req.WebhookMaxRetries = &n
+	}
+	return nil
+}
+
+// lowerRPS is the lower of two X-Aqueduct-Rps values, ignoring one that
+// isn't a positive number; "" when neither is.
+func lowerRPS(a, b string) string {
+	av, aErr := strconv.ParseFloat(a, 64)
+	bv, bErr := strconv.ParseFloat(b, 64)
+	aOK := aErr == nil && av > 0 && !math.IsInf(av, 0)
+	bOK := bErr == nil && bv > 0 && !math.IsInf(bv, 0)
+	switch {
+	case aOK && bOK && bv < av:
+		return b
+	case aOK:
+		return a
+	case bOK:
+		return b
+	}
+	return ""
+}
+
+// setInboundRPS advertises this caller's share of Aquifer's own inbound
+// capacity, so a calling Aquifer paces itself without any special code.
+func setInboundRPS(w http.ResponseWriter, a *Aquifer, userID string) {
+	if rps := a.InboundRPS(userID); rps > 0 {
+		value := strconv.FormatFloat(rps, 'f', 2, 64)
+		if rps < 0.01 {
+			// Many callers at a low rate: two decimals would round a
+			// positive share to 0.00, which reads as no limit at all.
+			value = strconv.FormatFloat(rps, 'f', -1, 64)
+		}
+		w.Header().Set("X-Aqueduct-Rps", value)
+		w.Header().Set("X-Aquifer-Rps", value)
+	}
+}
+
+// metrics serves GET /metrics when the node runs the built-in Prometheus
+// adapter (the aquifer binary's default); 404 otherwise.
+func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
+	prom, ok := s.aquifer.registry.Metrics().(*PrometheusMetrics)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	prom.Write(w, NodeID(), s.aquifer.registry.TargetStats())
+	// Only in the default background-flush mode; with every write synced
+	// there's no lag to show.
+	if wal, ok := s.aquifer.store.(walSyncReporter); ok && wal.FlushInterval() > 0 {
+		fmt.Fprintf(w, "# HELP aquifer_wal_sync_lag_seconds How long acknowledged jobs may have gone without reaching disk; a crash loses them.\n# TYPE aquifer_wal_sync_lag_seconds gauge\naquifer_wal_sync_lag_seconds %g\n", wal.SyncLag().Seconds())
+		fmt.Fprintf(w, "# HELP aquifer_wal_last_sync_seconds How long the newest completed WAL sync took.\n# TYPE aquifer_wal_last_sync_seconds gauge\naquifer_wal_last_sync_seconds %g\n", wal.LastSyncDuration().Seconds())
+	}
+}
+
+// syncLagReporter is a store that can say how far its disk is behind; it's
+// all inbound pacing needs.
+type syncLagReporter interface {
+	SyncLag() time.Duration
+}
+
+// walSyncReporter is a store that acknowledges writes before they reach
+// disk and syncs them in the background (Pebble's default flush mode).
+type walSyncReporter interface {
+	FlushInterval() time.Duration
+	SyncLag() time.Duration
+	LastSyncDuration() time.Duration
+}
+
+func (s *Server) observeRejected(reason string) {
+	dispatch.ObserveRejected(s.aquifer.registry.Metrics(), reason)
+}
