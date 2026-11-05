@@ -96,6 +96,7 @@ export function assemble() {
 		'',
 		`- [Source code](${repo})`,
 		`- [Aquifer pilot skill](${repo}/blob/main/skills/aquifer-pilot/SKILL.md): evaluates Aquifer against your own workload in a shadow run`,
+		`- [Aquifer engineer skill](${repo}/blob/main/skills/aquifer-engineer/SKILL.md): benchmarks, tunes, partitions and scales an Aquifer deployment (with or without Inlet)`,
 		'- [L8 specification](https://rjpruitt16.github.io/l8-protocol/)',
 		'',
 	].join('\n');
