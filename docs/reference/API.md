@@ -33,11 +33,11 @@ Idempotent — duplicate `idempotent_key` per `user_id` returns the existing job
 
 ### Best practice: confirm batched webhook intake
 
-For high-throughput webhook intake, keep Pebble's default 100 ms batched flush and use Aquifer's idempotency as a confirmation retry. For Shopify, Stripe, GitHub and the other providers [Inlet](https://github.com/rjpruitt16/inlet) supports, use Inlet instead: it acknowledges the provider after its own durable enqueue, so this recipe isn't needed.
+For high-throughput webhook intake, keep Pebble's default 100 ms batched flush and use Aquifer's idempotency as a confirmation retry. For Shopify, Stripe, GitHub and the other providers [Inlet](https://github.com/rjpruitt16/inlet) supports, use Inlet instead: it acknowledges the provider after its own durable enqueue.
 
 1. Verify the provider signature, use its event ID as `idempotent_key`, and keep the provider request open.
 2. Submit the event to Aquifer. Continue only after Aquifer returns **200** or **201**.
-3. Wait with jitter, leaving most of the provider's response deadline for the rest of the request, then submit the exact same request again. A wait of about 1 s fits a 5 s deadline such as Shopify's; longer waits narrow the crash-loss window further but need a provider that waits longer for your `2xx`.
+3. Wait with jitter, well inside the provider's response deadline (about 1 s for Shopify's 5 s), then submit the exact same request again.
 4. A **200** response with `"duplicate": true` confirms that Aquifer still knows the accepted job. Return `2xx` to the provider.
 5. If the confirmation returns **201**, the earlier job was absent and this request created its replacement. Wait and confirm again before acknowledging the provider.
 6. If the intake process dies first, it never acknowledges the provider, so the provider's normal retry sends the event again.

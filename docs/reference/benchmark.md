@@ -1,6 +1,6 @@
 # Benchmarks
 
-> **Read the configuration before the numbers.** Sections 1–7 ran before v0.13.0 (2026-10-05), when SQLite was the default store; Pebble has been the default since then. Section 8 compares the two, section 11 measures both, and sections 12–13 ran on Pebble. Older sections describe the code as it was then and are kept as history, not as a description of today's defaults.
+> Sections 1–7 ran before v0.13.0 (2026-10-05), when SQLite was the default store; Pebble is the default now. Sections 8 and 11 compare both, and 12–13 ran on Pebble.
 
 Real runs against a live deployment, not simulated numbers. Target: `aquifer-bench.fly.dev`, a single `shared-cpu-1x`/512MB Fly.io machine in `iad`, `AQUIFER_MEMORY_LIMIT_MB=400`, default pacing (2 RPS/1 concurrent per target API domain, no `CONFIG_PATH`). Load generated with [vegeta](https://github.com/tsenart/vegeta); scripts are in [`benchmark/`](../../benchmark).
 

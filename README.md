@@ -53,7 +53,7 @@ EOF
 CONFIG_PATH=aquifer.yml aquifer
 ```
 
-`rps` caps the host's total across all tenants. `max_concurrent` applies to each tenant's queue, so with N busy tenants up to N × 2 requests can be in flight; size it for the backend's own concurrency limit with that in mind. Hosts without an entry get 2 requests a second, one at a time per tenant. The target can lower its rate live with `X-Aquifer-Rps` and `X-Aquifer-Max-Concurrent` response headers.
+`rps` caps the host's total; `max_concurrent` is per tenant, so N busy tenants can have N × 2 in flight. Hosts without an entry get 2 requests a second, one at a time per tenant. The target can lower its rate live with `X-Aquifer-Rps` and `X-Aquifer-Max-Concurrent` response headers.
 
 Send it a job and watch it go through the line:
 
