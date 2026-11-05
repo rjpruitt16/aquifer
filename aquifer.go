@@ -6,8 +6,10 @@
 //
 // The implementation lives in internal/core and the other internal/ packages.
 // This file re-exports the public names, so code that imports
-// github.com/rjpruitt16/aquifer keeps working unchanged. Regenerate it when
-// internal/core's exported identifiers change.
+// github.com/rjpruitt16/aquifer keeps working unchanged. When you add an
+// exported name to internal/core, add it here too (a type alias, a constant, or
+// a wrapper function); TestRootPackageReExportsEveryExportedName in
+// internal/core fails until you do.
 package aquifer
 
 import (
