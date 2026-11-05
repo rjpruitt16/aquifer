@@ -6,7 +6,7 @@ Rate limits are set per target API hostname via a YAML file (`CONFIG_PATH`) and 
 Set `CONFIG_PATH` to a YAML file to configure rate limits per target API hostname. A key is matched against the job URL's host exactly, port included: for `http://your-backend.internal:8080`, the key is `your-backend.internal:8080`. A URL whose host matches no key gets `defaults`.
 
 ```yaml
-# aquifer.yml — copy from aquifer.example.yml
+# aquifer.yml — copy from examples/aquifer.example.yml
 defaults:
   rps: 2
   max_concurrent: 1
