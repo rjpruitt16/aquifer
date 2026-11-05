@@ -57,3 +57,20 @@ func TestSharedPaceWithoutARateNeverLimits(t *testing.T) {
 		}
 	}
 }
+
+func TestSharedPaceUsesTheCurrentRate(t *testing.T) {
+	rate := 1.0 // one slot per second
+	p := newSharedPace(func() float64 { return rate })
+	now := time.Unix(1000, 0)
+	for p.reserve(now) == 0 {
+	}
+	if wait := p.reserve(now); wait < 500*time.Millisecond {
+		t.Fatalf("at 1/s the next slot should be about 1s away, got %v", wait)
+	}
+	// Capacity rises tenfold: the wait must shrink right away, not stay at
+	// the old one-second deadline.
+	rate = 10
+	if wait := p.reserve(now); wait > 100*time.Millisecond {
+		t.Fatalf("after the rate rose to 10/s the wait should be at most 100ms, got %v", wait)
+	}
+}
