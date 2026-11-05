@@ -35,21 +35,22 @@ func NewBroker() *Broker {
 // stream confirmed delivering it, waiting up to wait. It returns false at
 // once when nobody is streaming the job.
 func (b *Broker) PublishTerminal(jobID string, event SSEEvent, wait time.Duration) bool {
+	// Sends happen under the lock for the same reason as in Publish: an
+	// unsubscribe could otherwise close a channel between the copy and the send.
 	b.mu.Lock()
-	subs := append([]chan SSEEvent(nil), b.subscribers[jobID]...)
+	subs := b.subscribers[jobID]
 	var done chan struct{}
 	if len(subs) > 0 {
 		done = make(chan struct{})
 		b.delivered[jobID] = done
 	}
-	b.mu.Unlock()
-
 	for _, ch := range subs {
 		select {
 		case ch <- event:
 		default:
 		}
 	}
+	b.mu.Unlock()
 	if done == nil {
 		return false
 	}
@@ -112,11 +113,13 @@ func (b *Broker) HasSubscribers(jobID string) bool {
 }
 
 func (b *Broker) Publish(jobID string, event SSEEvent) {
+	// Send while holding the lock. Unsubscribing compacts the slice in place
+	// and then closes the channel, so sending after unlocking could read a
+	// slot mid-update or send on a closed channel (a panic). The sends never
+	// block, so holding the read lock for them is cheap.
 	b.mu.RLock()
-	subs := b.subscribers[jobID]
-	b.mu.RUnlock()
-
-	for _, ch := range subs {
+	defer b.mu.RUnlock()
+	for _, ch := range b.subscribers[jobID] {
 		select {
 		case ch <- event:
 		default: // never block if the subscriber is slow
