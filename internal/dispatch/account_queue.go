@@ -397,7 +397,7 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 				dispatchTimer.Reset(retry.Jitter(interval - elapsed))
 				break
 			}
-			if wait := q.shared.reserve(time.Now()); wait > 0 {
+			if wait := q.shared.reserve(q, time.Now()); wait > 0 {
 				dispatchTimer.Stop()
 				select {
 				case <-dispatchTimer.C:
