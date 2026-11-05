@@ -227,7 +227,7 @@ expected above capacity. A pass means:
 
 About 3 hours on three Aquifer nodes running cluster routing
 (`AQUIFER_CLUSTER_PROVIDER=valkey`, remote idempotency on), to check the
-failure semantics [API.md](../../API.md#regional-cluster-routing) promises
+failure semantics [API.md](../../docs/reference/API.md#regional-cluster-routing) promises
 under load:
 - an unreachable owner is skipped;
 - a slow owner gets a 504, not a second copy of the job;

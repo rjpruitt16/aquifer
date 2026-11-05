@@ -8,7 +8,7 @@ Envoy's circuit breaking protects an overloaded service by rejecting excess work
 
 Hookdeck does something similar for inbound webhooks, as a hosted service billed by usage. Aquifer is open source and runs on your own machines like Envoy, so scaling it costs only the machines you add, and it paces outbound API calls, agent tool calls and WebSocket sessions too.
 
-Results come back however suits the caller: synchronously on the same connection ([`POST /proxy`](../../API.md#post-proxy)), over a WebSocket that replays anything missed after a reconnect ([`GET /websocket`](../../API.md#get-websocket)), or by durable webhook.
+Results come back however suits the caller: synchronously on the same connection ([`POST /proxy`](../reference/API.md#post-proxy)), over a WebSocket that replays anything missed after a reconnect ([`GET /websocket`](../reference/API.md#get-websocket)), or by durable webhook.
 
 You can run it with both: Envoy in front as the gateway, Aquifer behind it holding the work, and Hookdeck delivering its webhooks into Aquifer.
 
@@ -28,7 +28,7 @@ What's usually behind that backend can't scale instantly either: a GPU, a databa
 
 Exposed through pluggable adapters (an MCP server for agent tool-calling, a plain HTTP API, or an A2A/Agent2Agent-protocol agent), with cryptographic agent identity via the L8 protocol for trustless webhook delivery.
 
-**Benchmarked:** 10x traffic spikes accepted with zero errors (this measures intake), 30/30 jobs surviving a `kill -9` (with per-write sync, `AQUIFER_PEBBLE_FLUSH_INTERVAL_MS=0`), and clean `429` admission shedding under sustained overload, including a real GPU under load, where a fixed rate cut peak backend queue depth from 449 to 8 waiting requests, and the ORCA fallback signal held the KV cache in a 22–79% cycle once the rate ceiling was raised past what vLLM could take. See [benchmark.md](../../benchmark.md) for throughput ceilings, crash recovery, memory behavior, capacity by machine size, and the [GPU/vLLM run](../../benchmark.md#9-gpu-inference-and-the-retry-tax-runpodvllm). Longer, end-to-end tests of Aquifer in front of real open-source systems, starting with Hatchet, are in [aqueduct-benchmarks](https://github.com/rjpruitt16/aqueduct-benchmarks).
+**Benchmarked:** 10x traffic spikes accepted with zero errors (this measures intake), 30/30 jobs surviving a `kill -9` (with per-write sync, `AQUIFER_PEBBLE_FLUSH_INTERVAL_MS=0`), and clean `429` admission shedding under sustained overload, including a real GPU under load, where a fixed rate cut peak backend queue depth from 449 to 8 waiting requests, and the ORCA fallback signal held the KV cache in a 22–79% cycle once the rate ceiling was raised past what vLLM could take. See [benchmark.md](../reference/benchmark.md) for throughput ceilings, crash recovery, memory behavior, capacity by machine size, and the [GPU/vLLM run](../reference/benchmark.md#9-gpu-inference-and-the-retry-tax-runpodvllm). Longer, end-to-end tests of Aquifer in front of real open-source systems, starting with Hatchet, are in [aqueduct-benchmarks](https://github.com/rjpruitt16/aqueduct-benchmarks).
 
 ![Traditional load balancing collapsing under a spike, round-robin flickering faster as instances die, versus Aqueduct pacing that keeps the fleet stable while an autoscaler brings real capacity online](../images/fleet-degradation.gif)
 

@@ -1,6 +1,6 @@
 # WebSocket benchmark lab
 
-Fly apps for [benchmark.md §13](../../benchmark.md#13-websocket-sessions-per-machine-flyio-2026-10-10). Create them in one organization so they share a private network, deploy from the repository root, then drive the benchmark from the client machine.
+Fly apps for [benchmark.md §13](../../docs/reference/benchmark.md#13-websocket-sessions-per-machine-flyio-2026-10-10). Create them in one organization so they share a private network, deploy from the repository root, then drive the benchmark from the client machine.
 
 ```sh
 for a in ws-lab-valkey ws-lab-backend ws-lab-aquifer ws-lab-client; do fly apps create $a --org <org>; done

@@ -85,7 +85,7 @@ EOF
 # connectivity works regardless of it (any port the app listens on is
 # reachable via <region>.$AQUIFER_APP.internal from other machines in this
 # org), but omitting it means Fly's public edge proxy has nothing to route
-# to this app at all. See API.md's "Cross-region redirect" section.
+# to this app at all. See docs/reference/API.md's "Cross-region redirect" section.
 
 fly apps create "$AQUIFER_APP" --org "$FLY_ORG"
 fly deploy "$REPO_ROOT" --config "$AQUIFER_CONFIG" --app "$AQUIFER_APP" --ha=false -y

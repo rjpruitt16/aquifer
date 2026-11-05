@@ -96,7 +96,7 @@ Each accepted job is written to the local disk of the node that accepted it (Peb
 
 For coding agents: [`llms.txt`](https://rjpruitt16.github.io/aquifer/llms.txt) lists every page as plain Markdown, so an agent can fetch only what it needs. To try Aquifer on your own workload, point your agent at the [Aquifer pilot skill](skills/aquifer-pilot/SKILL.md): it runs Aquifer in a shadow run on a branch and shows you the numbers.
 
-The same pages are in this repository: [docs/pages](docs/pages), [API.md](API.md), [CONFIGURATION.md](CONFIGURATION.md), [ADAPTERS.md](ADAPTERS.md), [DRAIN_MODE.md](DRAIN_MODE.md), [REGISTRATION.md](REGISTRATION.md) and [benchmark.md](benchmark.md).
+The same pages are in this repository: [docs/pages](docs/pages), [API.md](docs/reference/API.md), [CONFIGURATION.md](docs/reference/CONFIGURATION.md), [ADAPTERS.md](docs/reference/ADAPTERS.md), [DRAIN_MODE.md](docs/reference/DRAIN_MODE.md), [REGISTRATION.md](docs/reference/REGISTRATION.md) and [benchmark.md](docs/reference/benchmark.md).
 
 ## Writing
 

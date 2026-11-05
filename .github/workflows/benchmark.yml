@@ -87,7 +87,7 @@ jobs:
             | tee /tmp/admission_provoked.txt
           fly deploy --app aquifer-bench --config fly.bench.toml
 
-      - name: Generate benchmark.md
+      - name: Generate docs/reference/benchmark.md
         run: |
           python3 benchmark/generate_report.py \
             --throughput /tmp/throughput.txt \
@@ -95,12 +95,12 @@ jobs:
             --crash-recovery /tmp/crash_recovery.txt \
             --fairness /tmp/fairness.txt \
             --admission-provoked /tmp/admission_provoked.txt \
-            --out benchmark.md
+            --out docs/reference/benchmark.md
 
-      - name: Commit updated benchmark.md
+      - name: Commit updated docs/reference/benchmark.md
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add benchmark.md
-          git diff --cached --quiet && echo "no changes" || git commit -m "Update benchmark.md from automated run"
+          git add docs/reference/benchmark.md
+          git diff --cached --quiet && echo "no changes" || git commit -m "Update docs/reference/benchmark.md from automated run"
           git push

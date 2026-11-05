@@ -1,6 +1,6 @@
 # Benchmarks
 
-Real runs against a live deployment, not simulated numbers. Target: `aquifer-bench.fly.dev`, a single `shared-cpu-1x`/512MB Fly.io machine in `iad`, `AQUIFER_MEMORY_LIMIT_MB=400`, default pacing (2 RPS/1 concurrent per target API domain, no `CONFIG_PATH`). Load generated with [vegeta](https://github.com/tsenart/vegeta); scripts are in [`benchmark/`](benchmark/).
+Real runs against a live deployment, not simulated numbers. Target: `aquifer-bench.fly.dev`, a single `shared-cpu-1x`/512MB Fly.io machine in `iad`, `AQUIFER_MEMORY_LIMIT_MB=400`, default pacing (2 RPS/1 concurrent per target API domain, no `CONFIG_PATH`). Load generated with [vegeta](https://github.com/tsenart/vegeta); scripts are in [`benchmark/`](../../benchmark).
 
 Scenarios 1-6 dispatch to a dummy target API (`postman-echo.com`) at the default 2 req/s ceiling — intentional, since Aquifer protects target APIs that haven't told it otherwise. A large batch queues for a while before draining; that's the configured ceiling working as intended, not a bottleneck. Production sets real per-domain rates via `CONFIG_PATH`. Scenario 7 deliberately raises the ceiling so machine size, not the default rate limit, is what's measured.
 
@@ -175,7 +175,7 @@ Pebble roughly doubles the point where Aquifer stops reliably completing request
 
 ## 9. GPU inference and the retry tax (RunPod/vLLM)
 
-Everything above dispatches to a dummy HTTP echo target API. This one targets a real GPU: `Qwen/Qwen2.5-1.5B-Instruct` on a single RunPod RTX PRO 4500 Blackwell running vLLM (`--max-num-seqs 48`, KV cache deliberately capped at 512MB so a realistic burst can actually pressure it), pacing driven entirely by the ORCA fallback signal (see [Dynamic pacing](docs/pages/pacing.md)) — `kv_cache_usage_perc` on vLLM's own response headers, no `X-Aqueduct-*` config needed. Requests forced to `min_tokens=max_tokens=300` so each one holds GPU/KV-cache resources long enough to matter, not a one-token echo.
+Everything above dispatches to a dummy HTTP echo target API. This one targets a real GPU: `Qwen/Qwen2.5-1.5B-Instruct` on a single RunPod RTX PRO 4500 Blackwell running vLLM (`--max-num-seqs 48`, KV cache deliberately capped at 512MB so a realistic burst can actually pressure it), pacing driven entirely by the ORCA fallback signal (see [Dynamic pacing](../pages/pacing.md)) — `kv_cache_usage_perc` on vLLM's own response headers, no `X-Aqueduct-*` config needed. Requests forced to `min_tokens=max_tokens=300` so each one holds GPU/KV-cache resources long enough to matter, not a one-token echo.
 
 **Same offered load (40 req/s for 30s), direct-to-vLLM vs. through Aquifer:**
 
@@ -269,7 +269,7 @@ On Fly (performance-1x with a volume, every job also delivering a webhook), sync
 
 How many jobs per second one Aquifer machine sustains end to end, measured on Fly in `iad`:
 - **Target:** one Aquifer machine with a volume and Pebble.
-- **Load generator:** a separate machine running [`benchmark/loadgen`](benchmark/loadgen/main.go). It ramps `POST /jobs` open-loop across 50 users and also serves as the target API and the webhook receiver, both answering instantly.
+- **Load generator:** a separate machine running [`benchmark/loadgen`](../../benchmark/loadgen/main.go). It ramps `POST /jobs` open-loop across 50 users and also serves as the target API and the webhook receiver, both answering instantly.
 - **Webhooks:** every job also delivers a webhook, so each job is one request in and two requests out.
 - **Config:** a high rate ceiling (`defaults: {rps: 100000, max_concurrent: 256}`) and the 100ms flush (`AQUIFER_PEBBLE_FLUSH_INTERVAL_MS`, the default).
 
@@ -311,9 +311,9 @@ How many `aqueduct.v1` WebSocket sessions one machine holds, and how many messag
 - **Target:** one performance-1x machine (1 CPU, 2 GB).
 - **Valkey:** on its own performance-1x machine.
 - **Backend:** a no-limits backend that acks each command and sends one event (`aquifer-websocket-bench -backend`).
-- **Client:** a performance-2x machine running [`cmd/aquifer-websocket-bench`](cmd/aquifer-websocket-bench/main.go).
+- **Client:** a performance-2x machine running [`cmd/aquifer-websocket-bench`](../../cmd/aquifer-websocket-bench/main.go).
 
-Run with the Valkey reader-pool fix (#33). Lab configs are in [`benchmark/websocket`](benchmark/websocket/README.md). Spillway was measured on the same lab for comparison.
+Run with the Valkey reader-pool fix (#33). Lab configs are in [`benchmark/websocket`](../../benchmark/websocket/README.md). Spillway was measured on the same lab for comparison.
 
 **Sessions held (idle):**
 
