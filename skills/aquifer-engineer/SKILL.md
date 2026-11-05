@@ -5,7 +5,7 @@ description: Engineer, benchmark, tune, deploy, scale, or review Inlet-to-Aquife
 
 # Aquifer Engineer
 
-Pinned to Aquifer v0.15.1. Check the version they run (`aquifer --version`, or the image tag). If it's different, read this skill at that release instead: https://github.com/rjpruitt16/aquifer/tree/<version>/skills/aquifer-engineer, or the copy attached to the [GitHub release](https://github.com/rjpruitt16/aquifer/releases) (releases before v0.16.1 don't have one). Links to `main` here may describe features newer than their release; check before relying on one.
+Pinned to Aquifer v0.15.1. Check the version they run (`aquifer --version`, or the image tag). If it's different, read this skill at that release instead: https://github.com/rjpruitt16/aquifer/tree/<version>/skills/aquifer-engineer, or the copy attached to the [GitHub release](https://github.com/rjpruitt16/aquifer/releases) (releases from v0.16.1 on). Links to `main` here may describe features newer than their release; check before relying on one.
 
 Engineer Inlet and Aquifer from measured limits, not guessed rate values. Treat Inlet as the authenticated provider-verification and ordered-intake edge, and Aquifer as the trusted, availability-first traffic coordinator behind it.
 

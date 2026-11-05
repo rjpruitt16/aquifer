@@ -2,8 +2,9 @@
 """Pin the agent skills in skills/ to an Aquifer release.
 
   pin-skills.py v0.16.1            update the "Pinned to" line in skills/*/SKILL.md
+                                   (run it and commit before tagging a release)
   pin-skills.py v0.16.1 --out DIR  also write a copy whose repo links point at
-                                   that tag instead of main (for the release asset)
+                                   that tag instead of main (the release asset)
 """
 import argparse, pathlib, re, shutil, sys
 
@@ -30,7 +31,10 @@ def main():
             sys.exit(f"{p}: expected exactly one 'Pinned to Aquifer vX.' line")
         p.write_text(PIN.sub(pin_line(a.version), s))
     if a.out:
-        out = pathlib.Path(a.out)
+        out = pathlib.Path(a.out).resolve()
+        repo = root.parent
+        if out == repo or root == out or root in out.parents or out in repo.parents:
+            sys.exit(f"--out must be a separate directory, not {a.out}")
         if out.exists():
             shutil.rmtree(out)
         shutil.copytree(root, out)
@@ -38,6 +42,8 @@ def main():
             s = p.read_text()
             s = s.replace(f"{REPO}/blob/main/", f"{REPO}/blob/{a.version}/")
             s = s.replace(f"{REPO}/tree/main/", f"{REPO}/tree/{a.version}/")
+            # In the pinned copy the links already point at the tag.
+            s = s.replace(" Links to `main` here may describe features newer than their release; check before relying on one.", "")
             p.write_text(s)
     print(f"pinned {len(skills)} skills to {a.version}")
 
