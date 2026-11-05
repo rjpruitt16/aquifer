@@ -30,3 +30,35 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  skills:
+    # Attach a copy of the agent skills, with their repository links pinned to
+    # this tag, to the release. Build it from the tagged commit, and fail if the
+    # skills in that commit weren't pinned to this tag before tagging
+    # (scripts/pin-skills.py vX.Y.Z is part of release prep).
+    needs: goreleaser
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Check the skills are pinned to this tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          python3 scripts/pin-skills.py "$TAG" --check || {
+            echo "::error::Run scripts/pin-skills.py $TAG and commit before tagging."
+            exit 1
+          }
+
+      - name: Attach pinned skills to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          python3 scripts/pin-skills.py "$TAG" --out "dist/aquifer-skills-$TAG"
+          tar -czf "aquifer-skills-$TAG.tar.gz" -C dist "aquifer-skills-$TAG"
+          gh release upload "$TAG" "aquifer-skills-$TAG.tar.gz" --clobber

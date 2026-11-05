@@ -5,6 +5,8 @@ description: Evaluate Aquifer against your own workload. A shadow pilot on a bra
 
 # Aquifer pilot
 
+Pinned to Aquifer v0.15.1. Check the version they run (`aquifer --version`, or the image tag). If it's different, read this skill at that release instead: https://github.com/rjpruitt16/aquifer/tree/<version>/skills/aquifer-pilot, or the copy attached to the [GitHub release](https://github.com/rjpruitt16/aquifer/releases) (releases from v0.16.1 on). Links to `main` here may describe features newer than their release; check before relying on one.
+
 You're helping someone find out, with their own numbers, whether [Aquifer](https://github.com/rjpruitt16/aquifer) helps their workload. Keep it simple:
 - a branch, not a migration;
 - a replica, staging or a shadow copy, never production;
