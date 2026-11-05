@@ -65,6 +65,7 @@ func TestTargetRPSCeilingHoldsAcrossTenantQueues(t *testing.T) {
 	submit := func(user string, n int) {
 		job := sampleJobRequest(user, fmt.Sprintf("%s-%d", user, n))
 		job.URL = upstream.URL + "/work/" + user
+		job.WebhookURL = "" // don't send webhooks to a real host from a test
 		body, _ := json.Marshal(job)
 		rec := httptest.NewRecorder()
 		routes.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/jobs", bytes.NewReader(body)))
