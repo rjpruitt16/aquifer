@@ -1,0 +1,346 @@
+// Copyright 2026 Rahmi Pruitt
+// SPDX-License-Identifier: Apache-2.0
+
+package core
+
+import (
+	"context"
+	"io"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/rjpruitt16/aquifer/internal/dispatch"
+	"github.com/rjpruitt16/aquifer/internal/env"
+	"github.com/rjpruitt16/aquifer/internal/orca"
+)
+
+const (
+	defaultProxyBreakerRetryMultiplier   = 3
+	defaultProxyBreakerCooldownSeconds   = 5
+	defaultProxyDirectAttemptTimeoutSecs = 3
+	defaultQueueCodes                    = "429"
+	defaultRerouteCodes                  = "503"
+)
+
+// ProxyOutcome is AttemptDirect's result. Exactly one of the following
+// holds: Err is set (validation/admission failure, same contract as
+// Enqueue); Duplicate is true (ExistingJob holds the prior job); or Job is
+// set, with Direct indicating whether it was completed synchronously
+// (Status/Header/Body then valid) or needs the caller to Dispatch it and
+// stream the result the normal way.
+type ProxyOutcome struct {
+	Err         error
+	Duplicate   bool
+	ExistingJob *Job
+	Job         *Job
+	Direct      bool
+	Status      int
+	Header      http.Header
+	Body        []byte
+
+	// FallbackReason and FallbackStatus are set whenever Job is set but
+	// Direct is false — a short, stable label for why a direct attempt
+	// wasn't completed, surfaced to the caller as a proxy_fallback SSE
+	// event before the normal queued/dispatching/terminal sequence, so a
+	// client watching the stream (a browser, an agent with no server of
+	// its own to explain this some other way) knows it's in the queue
+	// because something specific happened, not just "queued" with no
+	// context. FallbackStatus is the target API's real status code when one
+	// was actually received (0 for a skipped or timed-out attempt).
+	FallbackReason string
+	FallbackStatus int
+
+	// pendingWebhook is a direct success's completion webhook, held back
+	// until the handler knows whether the relayed response reached the
+	// caller. See SettleDirectWebhook.
+	pendingWebhook map[string]any
+
+	// RelayFrom is set when this request was redirected to another region
+	// (region_redirect.go) and that region accepted it into its own
+	// durable queue rather than completing directly — the caller
+	// (server.go's proxyJob) should relay every SSE event read from this
+	// response body onto the original caller's connection in real time,
+	// rather than subscribing to a local job's events the normal way.
+	// Job/Direct/FallbackReason are meaningless in this case; the real job
+	// now lives on the target region under its own ID — the caller learns
+	// it from the relayed stream itself, the same place it always would
+	// for any fallback. The caller owns closing RelayFrom.Body once the
+	// stream ends. RerouteRegion is always set alongside it — which region
+	// actually ended up owning the job — so the caller can tell the client
+	// via a synthetic "rerouted" event before relaying, same rationale as
+	// FallbackReason/proxy_fallback: a client with no server of its own to
+	// explain this (a browser, an agent) shouldn't have to wonder why its
+	// connection is still open or where the response actually came from.
+	RelayFrom     *http.Response
+	RerouteRegion string
+}
+
+// AttemptDirect is proxy mode's entry point: persist the job (same
+// idempotency/admission path Enqueue uses), then — for URL-based jobs only,
+// see the PoolID check below — try dispatching it directly and
+// synchronously before ever touching the durable queue. A direct attempt
+// is skipped entirely if this job's target already has its circuit breaker
+// open (see URLWorker.BreakerOpen), so a known-bad target API doesn't cost
+// every subsequent request the latency of a doomed attempt.
+func (a *Aquifer) AttemptDirect(ctx context.Context, req JobRequest, timeout time.Duration) ProxyOutcome {
+	job, duplicate, err := a.PrepareJob(req)
+	if err != nil {
+		return ProxyOutcome{Err: err}
+	}
+	if duplicate != nil {
+		return ProxyOutcome{Duplicate: true, ExistingJob: a.store.GetJob(duplicate.JobID)}
+	}
+	if job.ExecutionExpired(time.Now()) {
+		return ProxyOutcome{Job: job, FallbackReason: "execution_deadline_exceeded"}
+	}
+
+	// Pool-routed jobs have no single canonical target API to try directly —
+	// pool routing's whole premise (spread across members, one might be
+	// unhealthy) is in tension with "there's one target API, try it". Fall
+	// straight back to queue+stream, same as any other job the caller
+	// couldn't attempt directly.
+	if job.PoolID != "" {
+		// Pool-routed jobs also skip cross-region redirect consideration:
+		// a redirected target instance has no reason to share the same
+		// pool membership, so there's no single canonical destination to
+		// even try there either.
+		return a.fallbackOutcome(ctx, req, job, "pool_routed", 0, timeout, false)
+	}
+
+	// BreakerOpen and QueueActive are checked separately, not OR'd together
+	// into one branch: QueueActive alone (breaker closed) is routine
+	// pacing under a configured rps limit -- Aquifer working exactly as
+	// designed, not a signal anything needs rerouting -- so it never tries
+	// redirect, only ever falls back to this instance's own queue exactly
+	// as it always has. BreakerOpen means an actual overload signal
+	// tripped it; whether THAT retry also tries redirect depends on which
+	// kind of signal tripped it (BreakerKind), decided below the same way
+	// a fresh overload response decides it.
+	worker := a.registry.WorkerFor(job)
+	if worker.BreakerOpen() {
+		return a.fallbackOutcome(ctx, req, job, "domain_degraded", 0, timeout, worker.BreakerKind() == "reroute")
+	}
+	if worker.QueueActive() {
+		return a.fallbackOutcome(ctx, req, job, "domain_degraded", 0, timeout, false)
+	}
+
+	attemptCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	counts := a.store.Counts()
+	queues := worker.Snapshot()
+	resp, attemptErr := dispatch.MakeRequest(attemptCtx, job, job.URL, counts.TotalJobs, counts.QueueDepth, 0, queues.ActiveQueues, queues.UpstreamBacklog, a.l8)
+	if attemptErr != nil {
+		return a.fallbackOutcome(ctx, req, job, "upstream_unreachable", 0, timeout, true)
+	}
+	defer resp.Body.Close()
+	worker.HandleMaxBacklogHeader(dispatch.PacingHeader(resp.Header, "Max-Backlog"))
+	// The destination's say on one queue per tenant vs one shared queue,
+	// learned from direct responses as well as queued ones.
+	if on, ok := dispatch.ParseAccountQueueValue(dispatch.PacingHeader(resp.Header, "Account-Queue")); ok {
+		worker.HandleDestinationAccountQueue(on)
+	}
+
+	if overloadCooldown, kind, overloaded := isOverloadSignal(resp); overloaded {
+		worker.TripBreaker(overloadCooldown, kind)
+		return a.fallbackOutcome(ctx, req, job, "upstream_overloaded", resp.StatusCode, timeout, kind == "reroute")
+	}
+
+	// The target API can proactively ask to be routed through the durable
+	// queue going forward — X-Aqueduct-Queue-Active: true — even on an
+	// otherwise-healthy response, e.g. "I'm nearing capacity, stop firing
+	// directly at me." Unlike isOverloadSignal, this response is still a
+	// real, valid answer already in hand: it's relayed to the caller as
+	// normal below, only future requests to this domain start queuing --
+	// always "queue" kind, never reroute, matching its own name.
+	if dispatch.PacingHeader(resp.Header, "Queue-Active") == "true" {
+		worker.TripBreaker(breakerCooldown(resp.Header), "queue")
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	a.store.UpdateStatus(job.ID, StatusCompleted)
+	dispatch.SaveLocalResult(a.store, job, StatusCompleted, resp.StatusCode, resp.Header.Get("Content-Type"), string(body))
+	a.broker.Publish(job.ID, SSEEvent{Event: "completed", Data: map[string]any{
+		"job_id": job.ID, "response_status": resp.StatusCode, "body": string(body),
+	}})
+	outcome := ProxyOutcome{Job: job, Direct: true, Status: resp.StatusCode, Header: resp.Header, Body: body}
+	if job.WebhookURL != "" {
+		payload := map[string]any{
+			"job_id": job.ID, "status": "completed", "response_status": resp.StatusCode, "body": string(body),
+		}
+		outcome.pendingWebhook = payload
+	}
+	return outcome
+}
+
+// SettleDirectWebhook sends a direct success's held-back webhook unless the
+// relayed response reached a still-connected caller.
+func (a *Aquifer) SettleDirectWebhook(outcome ProxyOutcome, delivered bool) {
+	if outcome.pendingWebhook == nil || delivered {
+		return
+	}
+	job := outcome.Job
+	a.registry.EnqueueWebhook(job.ID, job.UserID, job.WebhookURL, job.WebhookRetryLimit(), outcome.pendingWebhook)
+}
+
+// fallbackOutcome builds AttemptDirect's local-fallback result — but tries
+// cross-region redirect first (region_redirect.go) when tryRedirect is
+// true, so a caller only ever falls back to its own local queue after a
+// sibling region genuinely couldn't take the job either (or redirect isn't
+// configured/available/gated at all, in which case attemptRedirect returns
+// immediately with no side effects). tryRedirect is false only for
+// pool-routed jobs, which have no single canonical destination for a
+// redirected target to even try.
+//
+// When req.DirectOnly is set (only ever true on an internal cross-region
+// redirect hop — a real caller never sets it), this instance has been
+// explicitly told not to commit to its own local queue: it deletes the job
+// row PrepareJob already inserted, mirroring exactly how PrepareJob itself
+// cleans up an admission-rejected job, so a DirectOnly hop that couldn't
+// succeed doesn't leave a ghost "queued" row that's never actually
+// dispatched. Without this, an origin's redirect tour trying several
+// regions in sequence could leave the SAME job durably committed in more
+// than one place — the earlier candidate queuing locally while the tour
+// moves on to try the next. (attemptRedirect itself never runs for a
+// DirectOnly request — job.OriginMachineID is already set by construction,
+// which is attemptRedirect's own first check.)
+func (a *Aquifer) fallbackOutcome(ctx context.Context, req JobRequest, job *Job, reason string, status int, timeout time.Duration, tryRedirect bool) ProxyOutcome {
+	if tryRedirect {
+		outcome, result := a.attemptRedirect(ctx, job, req.AccountQueueMode, timeout)
+		switch result {
+		case redirectSucceeded:
+			return outcome
+		case redirectExhausted:
+			// Nothing was committed anywhere -- this instance's own row is
+			// moot, same as the DirectOnly-rejection cleanup below.
+			a.store.DeleteJob(job.ID)
+			return ProxyOutcome{Err: &RedirectExhaustedError{JobID: job.ID}}
+		}
+		// redirectNotApplicable: fall through to today's existing
+		// local-fallback behavior, completely unchanged.
+	}
+	if req.DirectOnly {
+		a.store.DeleteJob(job.ID)
+	}
+	return ProxyOutcome{Job: job, FallbackReason: reason, FallbackStatus: status}
+}
+
+// isOverloadSignal reports whether a direct-dispatch response means "hand
+// this off to the durable, paced queue instead" — classifyOverload decides
+// which of two ways: "queue" locally, or also try cross-region redirect
+// first (region_redirect.go) before queueing. Distinct from execute()'s own
+// >=500-only retry classification (internal/dispatch/account_queue.go): a direct attempt has
+// no retry loop of its own, so either kind means fall back, not retry
+// inline. When true, the second return value is how long to trip this
+// target API's circuit breaker for — anchored to the target API's own
+// Retry-After header when it sends one (times a configurable safety
+// multiplier), falling back to a fixed configured default otherwise, since
+// 5xx/timeout/ORCA signals don't carry that header.
+func isOverloadSignal(resp *http.Response) (cooldown time.Duration, kind string, overloaded bool) {
+	kind, overloaded = classifyOverload(resp.Header, resp.StatusCode)
+	if !overloaded {
+		return 0, "", false
+	}
+	return breakerCooldown(resp.Header), kind, true
+}
+
+// classifyOverload decides whether a status code means "queue locally" or
+// "try cross-region redirect first" — a real, deliberate scope narrowing
+// from earlier behavior (every 5xx used to mean the same thing): 429 is
+// usually a global per-key rate limit, not a regional one, so rerouting to
+// a sibling region wouldn't even help — reroute is reserved for signals
+// that plausibly ARE regional (503 by default). A status matching neither
+// configured set isn't treated as overload at all — relayed to the caller
+// as a normal, if unfortunate, direct response, exactly like any other
+// non-2xx status a target API might legitimately return.
+//
+// AQUIFER_QUEUE_CODES / AQUIFER_REROUTE_CODES (as X-Aqueduct-Queue-Codes /
+// X-Aqueduct-Reroute-Codes response headers, same dual-namespace lookup as
+// every other Aqueduct header) let the target API configure its own sets,
+// comma-separated, each entry either a literal code ("502") or an HTTP
+// status class ("5xx") — due diligence is on the target API to say so if it
+// uses something nonstandard; defaults are deliberately narrow
+// (429 → queue, 503 → reroute) rather than sweeping in every 5xx.
+//
+// An ORCA overload signal (orca.Rps returning non-nil) is always
+// reroute-eligible — sustained backend load reported this way is commonly
+// instance/pool-specific, unlike a generic rate limit.
+func classifyOverload(headers http.Header, status int) (kind string, overloaded bool) {
+	if orca.Rps(headers) != nil {
+		return "reroute", true
+	}
+	if codeListMatches(parseCodeList(headerOrDefault(headers, "Reroute-Codes", defaultRerouteCodes)), status) {
+		return "reroute", true
+	}
+	if codeListMatches(parseCodeList(headerOrDefault(headers, "Queue-Codes", defaultQueueCodes)), status) {
+		return "queue", true
+	}
+	return "", false
+}
+
+func headerOrDefault(headers http.Header, name, def string) string {
+	if v := dispatch.PacingHeader(headers, name); v != "" {
+		return v
+	}
+	return def
+}
+
+// codeMatcher matches either one literal status code or a whole HTTP
+// status class ("5xx" matches every 500-599 code).
+type codeMatcher struct {
+	literal int
+	class   int // 1-5 for 1xx-5xx; 0 means this matcher is a literal, not a class
+}
+
+func (m codeMatcher) matches(status int) bool {
+	if m.class != 0 {
+		return status/100 == m.class
+	}
+	return status == m.literal
+}
+
+func parseCodeList(raw string) []codeMatcher {
+	var matchers []codeMatcher
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if len(part) == 3 && (part[1] == 'x' || part[1] == 'X') && (part[2] == 'x' || part[2] == 'X') &&
+			part[0] >= '1' && part[0] <= '5' {
+			matchers = append(matchers, codeMatcher{class: int(part[0] - '0')})
+			continue
+		}
+		if n, err := strconv.Atoi(part); err == nil {
+			matchers = append(matchers, codeMatcher{literal: n})
+		}
+	}
+	return matchers
+}
+
+func codeListMatches(matchers []codeMatcher, status int) bool {
+	for _, m := range matchers {
+		if m.matches(status) {
+			return true
+		}
+	}
+	return false
+}
+
+func breakerCooldown(headers http.Header) time.Duration {
+	if raw := headers.Get("Retry-After"); raw != "" {
+		if secs, err := strconv.Atoi(raw); err == nil && secs > 0 {
+			multiplier := env.Int64("AQUIFER_PROXY_BREAKER_RETRY_MULTIPLIER", defaultProxyBreakerRetryMultiplier)
+			return time.Duration(secs) * time.Duration(multiplier) * time.Second
+		}
+	}
+	return time.Duration(env.Int64("AQUIFER_PROXY_BREAKER_DEFAULT_COOLDOWN_SECONDS", defaultProxyBreakerCooldownSeconds)) * time.Second
+}
+
+// proxyDirectAttemptTimeout is how long AttemptDirect waits for a direct
+// response before giving up and falling back — deliberately short and
+// separate from the queue path's own 30s client timeout (dispatch.MakeRequest),
+// since the whole point of proxy mode is failing fast, not tying up the
+// caller's connection.
+func proxyDirectAttemptTimeout() time.Duration {
+	return time.Duration(env.Int64("AQUIFER_PROXY_DIRECT_ATTEMPT_TIMEOUT_SECONDS", defaultProxyDirectAttemptTimeoutSecs)) * time.Second
+}

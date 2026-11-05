@@ -1,0 +1,382 @@
+// Copyright 2026 Rahmi Pruitt
+// SPDX-License-Identifier: Apache-2.0
+
+package core
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/rjpruitt16/aquifer/internal/dispatch"
+)
+
+// fakeRegionAdapter is a test double for RegionAdapter — a plain, static
+// live-region list, no polling. Real polling behavior (FlyRegionAdapter)
+// has its own tests in internal/region/adapter_test.go; these tests are about
+// AttemptDirect/attemptRedirect's orchestration, not region discovery.
+type fakeRegionAdapter struct {
+	live []string
+	self string
+}
+
+func (f fakeRegionAdapter) LiveRegions() []string { return f.live }
+func (f fakeRegionAdapter) SelfRegion() string    { return f.self }
+
+func TestSelfMachineIDIsStableAndReadsFlyMachineID(t *testing.T) {
+	// selfMachineIDOnce/selfMachineIDValue are package-level and cached
+	// after first use in the real binary, but Setenv + a direct reset
+	// here confirms the env-var-read path itself, isolated from whatever
+	// other tests may have already triggered the sync.Once in this
+	// process.
+	selfMachineIDOnce = sync.Once{}
+	t.Setenv("FLY_MACHINE_ID", "test-machine-123")
+
+	first := selfMachineID()
+	second := selfMachineID()
+
+	if first != "test-machine-123" {
+		t.Fatalf("expected FLY_MACHINE_ID to be used, got %q", first)
+	}
+	if first != second {
+		t.Fatalf("expected repeat calls to return the same cached value, got %q vs %q", first, second)
+	}
+}
+
+// buildRedirectTestPair constructs two independent, fully real Aquifer +
+// Server pairs -- "origin" and "target" -- with origin's redirectTargetURL
+// overridden to dial target's real httptest.Server instead of real Fly
+// .internal DNS (which can't resolve in a unit test environment; see
+// internal/region/adapter_test.go's identical justification for FlyRegionAdapter).
+// origin's RegionAdapter reports exactly one live region, "target-region",
+// which resolves to target's server.
+func buildRedirectTestPair(t *testing.T) (origin *Aquifer, originSrv *httptest.Server, target *Aquifer) {
+	t.Helper()
+
+	origin, _ = testAquiferWithLimits(t, AdmissionLimits{})
+	target, _ = testAquiferWithLimits(t, AdmissionLimits{})
+
+	targetServer := NewServer(target)
+	targetHTTP := httptest.NewServer(targetServer.Routes())
+	t.Cleanup(targetHTTP.Close)
+
+	origin.SetRegionAdapter(fakeRegionAdapter{live: []string{"target-region"}, self: "origin-region"})
+	origin.redirectTargetURL = func(region string) string {
+		if region == "target-region" {
+			return targetHTTP.URL + "/proxy"
+		}
+		return "http://127.0.0.1:1/proxy" // unreachable, shouldn't be dialed in these tests
+	}
+
+	originServer := NewServer(origin)
+	originHTTP := httptest.NewServer(originServer.Routes())
+	t.Cleanup(originHTTP.Close)
+
+	return origin, originHTTP, target
+}
+
+func TestRedirectSucceedsDirectlyOnTargetRegion(t *testing.T) {
+	origin, originHTTP, target := buildRedirectTestPair(t)
+
+	// A single, real, always-healthy target API both origin and target would
+	// dispatch the SAME job.URL to. To make origin fail locally while
+	// target succeeds against that identical URL, pre-trip origin's own
+	// per-domain breaker for it directly -- origin's AttemptDirect then
+	// takes the domain_degraded fallback path without ever calling the
+	// target API at all, exactly as it would for a real recently-overloaded
+	// domain. target has never seen this URL, so its own breaker is
+	// closed and its real attempt succeeds.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Served-By", "target-region")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("served by target region"))
+	}))
+	defer upstream.Close()
+
+	throwawayJob := NewJob(&JobRequest{UserID: "user-1", IdempotentKey: "throwaway", URL: upstream.URL, Method: "GET"})
+	origin.registry.WorkerFor(throwawayJob).TripBreaker(time.Minute, "reroute")
+	_ = target
+
+	reqBody, _ := json.Marshal(JobRequest{
+		UserID:        "user-1",
+		IdempotentKey: "redirect-direct-success-key",
+		URL:           upstream.URL,
+		Method:        "GET",
+		WebhookURL:    "https://example.com/callback",
+	})
+
+	resp, err := http.Post(originHTTP.URL+"/proxy", "application/json", bytes.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("request to origin failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body := make([]byte, 1024)
+	n, _ := resp.Body.Read(body)
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 relayed from the target region, got %d: %s", resp.StatusCode, body[:n])
+	}
+	if resp.Header.Get("X-Served-By") != "target-region" {
+		t.Fatalf("expected the target region's response header relayed verbatim, got headers: %v", resp.Header)
+	}
+	if string(body[:n]) != "served by target region" {
+		t.Fatalf("expected the target region's body relayed verbatim, got: %s", body[:n])
+	}
+	if got := resp.Header.Get("X-Aquifer-Served-By-Region"); got != "target-region" {
+		t.Fatalf("expected X-Aquifer-Served-By-Region: target-region so the client can tell this was rerouted, got %q", got)
+	}
+}
+
+func TestRedirectFallsBackToTargetsQueueWhenNoRegionCanDispatchDirectly(t *testing.T) {
+	oldSleep := dispatch.RetrySleepFunc.Load()
+	dispatch.RetrySleepFunc.Store(func(time.Duration) {})
+	oldBackoff := dispatch.RetryBackoffFunc.Load()
+	dispatch.RetryBackoffFunc.Store(func(int) time.Duration { return 0 })
+	t.Cleanup(func() { dispatch.RetryBackoffFunc.Store(oldBackoff) })
+	t.Cleanup(func() { dispatch.RetrySleepFunc.Store(oldSleep) })
+
+	origin, originHTTP, target := buildRedirectTestPair(t)
+
+	// This target API fails everywhere -- neither origin nor target can
+	// dispatch it directly, so the phase-2 committing hop should land on
+	// target's own durable queue, and origin should relay that live SSE
+	// stream back to the caller.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer upstream.Close()
+
+	throwawayJob := NewJob(&JobRequest{UserID: "user-1", IdempotentKey: "throwaway2", URL: upstream.URL, Method: "GET"})
+	origin.registry.WorkerFor(throwawayJob).TripBreaker(time.Minute, "reroute")
+	_ = target
+
+	reqBody, _ := json.Marshal(JobRequest{
+		UserID:        "user-1",
+		IdempotentKey: "redirect-fallback-queue-key",
+		URL:           upstream.URL,
+		Method:        "GET",
+		WebhookURL:    "https://example.com/callback",
+	})
+
+	resp, err := http.Post(originHTTP.URL+"/proxy", "application/json", bytes.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("request to origin failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if ct := resp.Header.Get("Content-Type"); ct != "text/event-stream" {
+		t.Fatalf("expected origin to relay target's SSE stream, got Content-Type %q", ct)
+	}
+
+	buf := make([]byte, 4096)
+	n, _ := io.ReadFull(io.LimitReader(resp.Body, 4096), buf)
+	out := string(buf[:n])
+	if !strings.Contains(out, "event: proxy_fallback") {
+		t.Fatalf("expected the relayed stream to include target's own proxy_fallback event, got: %s", out)
+	}
+	if !strings.Contains(out, "event: queued") {
+		t.Fatalf("expected the relayed stream to include target's own queued event, got: %s", out)
+	}
+
+	reroutedIdx := strings.Index(out, "event: rerouted")
+	if reroutedIdx == -1 {
+		t.Fatalf("expected origin to announce the reroute before relaying target's stream, got: %s", out)
+	}
+	if !strings.Contains(out, `"region":"target-region"`) {
+		t.Fatalf("expected the rerouted event to name which region the job actually landed on, got: %s", out)
+	}
+	if fallbackIdx := strings.Index(out, "event: proxy_fallback"); reroutedIdx > fallbackIdx {
+		t.Fatalf("expected rerouted to be announced BEFORE target's own proxy_fallback event, not after, got: %s", out)
+	}
+}
+
+func TestRedirectDoesNotOriginateFromAnAlreadyRedirectedRequest(t *testing.T) {
+	oldSleep := dispatch.RetrySleepFunc.Load()
+	dispatch.RetrySleepFunc.Store(func(time.Duration) {})
+	oldBackoff := dispatch.RetryBackoffFunc.Load()
+	dispatch.RetryBackoffFunc.Store(func(int) time.Duration { return 0 })
+	t.Cleanup(func() { dispatch.RetryBackoffFunc.Store(oldBackoff) })
+	t.Cleanup(func() { dispatch.RetrySleepFunc.Store(oldSleep) })
+
+	origin, originHTTP, _ := buildRedirectTestPair(t)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer upstream.Close()
+
+	throwawayJob := NewJob(&JobRequest{UserID: "user-1", IdempotentKey: "throwaway3", URL: upstream.URL, Method: "GET"})
+	origin.registry.WorkerFor(throwawayJob).TripBreaker(time.Minute, "reroute")
+
+	// This request already carries OriginMachineID -- as if it were itself
+	// a redirect hop from some OTHER instance. origin must not try to
+	// redirect it further, even though its own local attempt will also
+	// fail (breaker tripped above) -- it must fall straight through to
+	// its own local queue+stream, exactly like today's existing fallback
+	// behavior with the feature absent entirely.
+	reqBody, _ := json.Marshal(JobRequest{
+		UserID:          "user-1",
+		IdempotentKey:   "already-redirected-key",
+		URL:             upstream.URL,
+		Method:          "GET",
+		WebhookURL:      "https://example.com/callback",
+		OriginMachineID: "some-other-machine",
+		OriginRegion:    "some-other-region",
+	})
+
+	resp, err := http.Post(originHTTP.URL+"/proxy", "application/json", bytes.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("request to origin failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if ct := resp.Header.Get("Content-Type"); ct != "text/event-stream" {
+		t.Fatalf("expected origin's OWN local fallback stream (not a relay), got Content-Type %q", ct)
+	}
+
+	buf := make([]byte, 4096)
+	n, _ := io.ReadFull(io.LimitReader(resp.Body, 4096), buf)
+	out := string(buf[:n])
+	if !strings.Contains(out, `"reason":"domain_degraded"`) {
+		t.Fatalf("expected origin's own domain_degraded fallback reason (not a redirected outcome), got: %s", out)
+	}
+}
+
+func TestQueueKindBreakerDoesNotAttemptRedirect(t *testing.T) {
+	oldSleep := dispatch.RetrySleepFunc.Load()
+	dispatch.RetrySleepFunc.Store(func(time.Duration) {})
+	oldBackoff := dispatch.RetryBackoffFunc.Load()
+	dispatch.RetryBackoffFunc.Store(func(int) time.Duration { return 0 })
+	t.Cleanup(func() { dispatch.RetryBackoffFunc.Store(oldBackoff) })
+	t.Cleanup(func() { dispatch.RetrySleepFunc.Store(oldSleep) })
+
+	origin, originHTTP, target := buildRedirectTestPair(t)
+	_ = target
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer upstream.Close()
+
+	// A "queue" kind trip (e.g. a 429, or X-Aqueduct-Queue-Active) must
+	// never attempt redirect on a later retry during that same cooldown —
+	// only a "reroute" kind trip does (see internal/dispatch/url_worker.go's BreakerKind).
+	// target is live and reachable (buildRedirectTestPair), so if this
+	// wrongly tried redirect, it would succeed directly against target
+	// instead of falling to origin's own local queue.
+	throwawayJob := NewJob(&JobRequest{UserID: "user-1", IdempotentKey: "throwaway-queue-kind", URL: upstream.URL, Method: "GET"})
+	origin.registry.WorkerFor(throwawayJob).TripBreaker(time.Minute, "queue")
+
+	reqBody, _ := json.Marshal(JobRequest{
+		UserID:        "user-1",
+		IdempotentKey: "queue-kind-key",
+		URL:           upstream.URL,
+		Method:        "GET",
+		WebhookURL:    "https://example.com/callback",
+	})
+
+	resp, err := http.Post(originHTTP.URL+"/proxy", "application/json", bytes.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("request to origin failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if ct := resp.Header.Get("Content-Type"); ct != "text/event-stream" {
+		t.Fatalf("expected origin's OWN local fallback stream (queue-kind trip must not redirect), got Content-Type %q", ct)
+	}
+
+	buf := make([]byte, 4096)
+	n, _ := io.ReadFull(io.LimitReader(resp.Body, 4096), buf)
+	out := string(buf[:n])
+	if !strings.Contains(out, `"reason":"domain_degraded"`) {
+		t.Fatalf("expected origin's own domain_degraded fallback reason (not a redirected outcome), got: %s", out)
+	}
+	if strings.Contains(out, "event: rerouted") {
+		t.Fatalf("expected no rerouted event -- a queue-kind breaker trip must never redirect, got: %s", out)
+	}
+}
+
+func TestRedirectExhaustionReturnsHardErrorNotLocalQueue(t *testing.T) {
+	oldSleep := dispatch.RetrySleepFunc.Load()
+	dispatch.RetrySleepFunc.Store(func(time.Duration) {})
+	oldBackoff := dispatch.RetryBackoffFunc.Load()
+	dispatch.RetryBackoffFunc.Store(func(int) time.Duration { return 0 })
+	t.Cleanup(func() { dispatch.RetryBackoffFunc.Store(oldBackoff) })
+	t.Cleanup(func() { dispatch.RetrySleepFunc.Store(oldSleep) })
+	t.Setenv("AQUIFER_REDIRECT_EXHAUSTED_RETRY_AFTER_SECONDS", "123")
+
+	origin, _ := testAquiferWithLimits(t, AdmissionLimits{})
+	origin.SetRegionAdapter(fakeRegionAdapter{live: []string{"target-region"}, self: "origin-region"})
+	// Deliberately unreachable -- nothing listens here, so every hop in
+	// both phases comes back reached=false, forcing total exhaustion.
+	origin.redirectTargetURL = func(region string) string { return "http://127.0.0.1:1/proxy" }
+
+	originServer := NewServer(origin)
+	originHTTP := httptest.NewServer(originServer.Routes())
+	t.Cleanup(originHTTP.Close)
+
+	// origin's own local target API is also broken, so AttemptDirect takes
+	// the domain_degraded fallback path and attemptRedirect actually runs
+	// -- exactly the real-world trigger, not a synthetic direct call.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer upstream.Close()
+	throwawayJob := NewJob(&JobRequest{UserID: "user-1", IdempotentKey: "throwaway4", URL: upstream.URL, Method: "GET"})
+	origin.registry.WorkerFor(throwawayJob).TripBreaker(time.Minute, "reroute")
+
+	reqBody, _ := json.Marshal(JobRequest{
+		UserID:        "user-1",
+		IdempotentKey: "redirect-exhausted-key",
+		URL:           upstream.URL,
+		Method:        "GET",
+		WebhookURL:    "https://example.com/callback",
+	})
+
+	resp, err := http.Post(originHTTP.URL+"/proxy", "application/json", bytes.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("request to origin failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 on total redirect exhaustion, got %d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Retry-After"); got != "123" {
+		t.Fatalf("expected Retry-After to use AQUIFER_REDIRECT_EXHAUSTED_RETRY_AFTER_SECONDS (123), got %q", got)
+	}
+
+	body := make([]byte, 1024)
+	n, _ := resp.Body.Read(body)
+	if !strings.Contains(string(body[:n]), `"limit_reason":"redirect_exhausted"`) {
+		t.Fatalf("expected limit_reason=redirect_exhausted in the error body, got: %s", body[:n])
+	}
+}
+
+func TestTryRedirectHopSetsAccountQueueHeader(t *testing.T) {
+	var gotHeader string
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeader = r.Header.Get("X-Aquifer-Account-Queue")
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer target.Close()
+
+	origin, _ := testAquiferWithLimits(t, AdmissionLimits{})
+	origin.redirectTargetURL = func(string) string { return target.URL + "/proxy" }
+
+	job := NewJob(&JobRequest{UserID: "user-1", IdempotentKey: "hop-header-key", URL: "http://example.com", Method: "GET"})
+
+	origin.tryRedirectHop(context.Background(), job, "target-region", "tenant-42", time.Second, true)
+
+	if gotHeader != "tenant-42" {
+		t.Fatalf("expected the hop to carry X-Aquifer-Account-Queue: tenant-42, got %q", gotHeader)
+	}
+}

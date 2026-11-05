@@ -13,7 +13,7 @@ test: build start-servers
 # Aquifer's own overhead per job (accept, queue, dispatch) and end-to-end
 # throughput, on SQLite and Pebble. Compare runs on the same machine only.
 perf:
-	go test -run '^$$' -bench 'JobLatency|PipelineThroughput' -benchtime 200x -count 1 .
+	go test -run '^$$' -bench 'JobLatency|PipelineThroughput' -benchtime 200x -count 1 ./internal/core
 
 integration-test: build start-servers
 	@echo "Running smoke + load tests..."
