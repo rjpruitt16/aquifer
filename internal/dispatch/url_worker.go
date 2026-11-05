@@ -30,6 +30,9 @@ type URLWorker struct {
 	rps     float64
 	maxConc int
 	pool    *Pool // nil unless this worker dispatches into a registered pool instead of a fixed domain
+	// shared holds every account queue for this target to the ceiling in
+	// total; see sharedPace.
+	shared *sharedPace
 	// accountQueueMode is the effective mode -- one queue per tenant, or one
 	// shared queue -- recomputed by applyAccountQueueModeLocked from, in
 	// order: the destination's own say (destinationMode, from its
@@ -172,6 +175,7 @@ func NewURLWorker(domain string, rps float64, maxConc int, pool *Pool, store sto
 		done:           make(chan struct{}),
 	}
 	w.maxBacklog.Store(admission.MaxPendingPerUpstream())
+	w.shared = newSharedPace(w.budgetCeiling)
 	go w.enforceAggregateBudget()
 	return w
 }
@@ -369,7 +373,7 @@ func (w *URLWorker) reserve(job *jobs.Job, enforceAdmission bool) (*AccountQueue
 	}
 
 	if !ok {
-		q = NewAccountQueue(key, w.domain, w.rps, w.maxConc, w.pool, w.store, w.broker, w.l8, w.metrics, w.enqueueWebhook, w.resultRecorder, &w.activeQueues, &w.backlog, w.onJobDone, func(k string) {
+		q = newAccountQueue(key, w.domain, w.rps, w.maxConc, w.pool, w.store, w.broker, w.l8, w.metrics, w.enqueueWebhook, w.resultRecorder, &w.activeQueues, &w.backlog, w.onJobDone, func(k string) {
 			w.mu.Lock()
 			// Retire only this queue, and only if nothing was reserved on it
 			// or buffered for it since its run loop went idle.
@@ -396,7 +400,7 @@ func (w *URLWorker) reserve(job *jobs.Job, enforceAdmission bool) (*AccountQueue
 			w.mu.Unlock()
 		}, func(v int64) {
 			w.setMaxBacklog(v)
-		})
+		}, w.shared)
 		destinationSignal := w.HandleDestinationAccountQueue
 		q.accountQueueSignal.Store(&destinationSignal)
 		w.queues[key] = q
