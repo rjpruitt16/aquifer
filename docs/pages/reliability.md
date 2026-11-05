@@ -1,6 +1,6 @@
 # Reliability
 
-Durable queue, automatic crash recovery, panic isolation per job. See [benchmark.md](../../benchmark.md) for the numbers behind these claims.
+Durable queue, automatic crash recovery, panic isolation per job. See [benchmark.md](../reference/benchmark.md) for the numbers behind these claims.
 
 
 - **Durable queue**: jobs persist to the configured storage backend. With Pebble's default `AQUIFER_PEBBLE_FLUSH_INTERVAL_MS=100`, Aquifer answers before a write reaches disk, so a crash loses the jobs accepted since the last completed sync; set it to `0` for every write to wait for its own fsync (see [Configuration](configuration.md))

@@ -73,7 +73,7 @@ just the manifests applying cleanly.
 - **Image**: `deployment.yaml` hardcodes `ghcr.io/rjpruitt16/aquifer:latest` — pin a specific tag for
   anything beyond local testing, or repoint at your own fork's registry.
 - **Sizing**: the CPU/memory requests in `deployment.yaml` are a starting point, not a benchmarked
-  recommendation — see the root [benchmark.md](../../benchmark.md) and "Choosing a machine size" in
+  recommendation — see [benchmark.md](../../docs/reference/benchmark.md) and "Choosing a machine size" in
   [Deployment](../../docs/pages/deployment.md) before sizing for real traffic.
 - **TLS**: this example is HTTP-only on the Gateway listener, to keep the example focused on the
   Gateway API wiring itself. A production deployment would add an HTTPS listener with a cert (e.g.

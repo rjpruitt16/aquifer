@@ -33,7 +33,7 @@ type Follow interface {
 //
 // Per-session blocking reads re-issued every AQUIFER_WS_READ_BLOCK_MS even
 // when idle and held one Valkey connection each; those loops took half of a
-// CPU at 5,000 sessions (benchmark.md §13). A single multi-stream XREAD per
+// CPU at 5,000 sessions (docs/reference/benchmark.md §13). A single multi-stream XREAD per
 // shard was tried first: it cut idle CPU but re-read every followed stream
 // on each wake, which under load cost more than the per-session reads.
 //

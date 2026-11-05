@@ -24,7 +24,7 @@ const (
 	// seconds of memory at one reading every 5 seconds.
 	loadSmoothing = 0.3
 
-	// Measured per CPU: benchmark.md section 11 (jobs end to end, webhook
+	// Measured per CPU: docs/reference/benchmark.md section 11 (jobs end to end, webhook
 	// included) and section 13 (WebSocket round trips).
 	loadJobsPerCPU = 750
 	// A round trip is two messages, a client one and a backend one, and

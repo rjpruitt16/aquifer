@@ -8,4 +8,4 @@ Aquifer has a framework-neutral core (idempotency, persistence, rate control, di
 | MCP stdio | `AQUIFER_ADAPTER=mcp-stdio` | MCP server exposing Aquifer tools over stdio (the published Docker image's default) |
 | A2A | `AQUIFER_ADAPTER=a2a` | Agent2Agent protocol (v1.0) agent over JSON-RPC/HTTPS |
 
-**[ADAPTERS.md](../../ADAPTERS.md)** has the full reference for each built-in adapter (MCP tool list, A2A Agent Card details), plus how to write your own `FrameworkAdapter`, storage backend, or metrics adapter.
+**[ADAPTERS.md](../reference/ADAPTERS.md)** has the full reference for each built-in adapter (MCP tool list, A2A Agent Card details), plus how to write your own `FrameworkAdapter`, storage backend, or metrics adapter.

@@ -2,7 +2,7 @@
 # Copyright 2026 Rahmi Pruitt
 # SPDX-License-Identifier: Apache-2.0
 
-"""Render benchmark.md from raw output captured by the benchmark/*.sh scripts.
+"""Render docs/reference/benchmark.md from raw output captured by the benchmark/*.sh scripts.
 
 Each --<scenario> flag points at a text file holding that scenario's stdout
 verbatim. The prose framing is static (explains what each test proves); the
@@ -26,7 +26,7 @@ def main():
     p.add_argument("--crash-recovery")
     p.add_argument("--fairness")
     p.add_argument("--admission-provoked")
-    p.add_argument("--out", default="benchmark.md")
+    p.add_argument("--out", default="docs/reference/benchmark.md")
     args = p.parse_args()
 
     throughput = read(args.throughput)

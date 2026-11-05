@@ -6,11 +6,11 @@ package dispatch
 // Load is how many HTTP users and WebSocket sessions this instance has, and
 // how many of each it can hold, for whatever is in front of it (Canalis):
 // reported in the registration ping and on every response. See
-// REGISTRATION.md.
+// docs/reference/REGISTRATION.md.
 //
 // Both kinds of traffic spend the same CPU, so they share one budget:
 // whatever one isn't using, the other can have. The CPU in use is split
-// between the two by what each costs (benchmark.md: about 750 jobs/s and
+// between the two by what each costs (docs/reference/benchmark.md: about 750 jobs/s and
 // 1,500 WebSocket round trips/s per CPU, which is 3,000 messages: a client
 // message and a backend one), which gives the CPU one user or one session
 // costs, and:

@@ -60,7 +60,7 @@ release:
 	@echo "Released v$(VERSION)!"
 
 # Real, multi-region cross-region /proxy redirect test against actual Fly.io
-# infrastructure -- see tests/region-redirect/ and API.md's "Cross-region
+# infrastructure -- see tests/region-redirect/ and docs/reference/API.md's "Cross-region
 # redirect" section. Requires `flyctl auth login` first and FLY_ORG set.
 # Deploys two ephemeral, private-only (no public exposure) Fly apps;
 # region-redirect-destroy always tears them down, never leaves them merely

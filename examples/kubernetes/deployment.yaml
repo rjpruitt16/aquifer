@@ -54,7 +54,7 @@ spec:
             periodSeconds: 10
           resources:
             # Starting point only -- see "Choosing a machine size" in
-            # docs/pages/deployment.md and benchmark.md for real numbers before
+            # docs/pages/deployment.md and docs/reference/benchmark.md for real numbers before
             # sizing this for your own traffic shape.
             requests:
               cpu: 250m
