@@ -60,7 +60,15 @@ type Limits struct {
 	DBMaxBytes        int64 // AQUIFER_DB_MAX_BYTES
 	RetryAfterSeconds int   // AQUIFER_RETRY_AFTER_SECONDS
 	MaxSyncLagMS      int64 // AQUIFER_MAX_SYNC_LAG_MS
+	// MemoryHardLimitPercent (AQUIFER_MEMORY_HARD_LIMIT_PERCENT, default
+	// 115) is where memory refuses every new job. Between MemoryLimitMB and
+	// this, only jobs for targets that aren't draining are refused (see
+	// Decision.Soft); 100 or less refuses everything at MemoryLimitMB, as
+	// before.
+	MemoryHardLimitPercent int64
 }
+
+const defaultMemoryHardLimitPercent = 115
 
 // defaultMaxSyncLagMS: refuse new jobs once accepted ones may have gone a
 // second without reaching disk, ten times the default flush interval.
@@ -81,11 +89,12 @@ const defaultMaxSyncLagMS = 1000
 // warning to set it explicitly.
 func LoadLimits() Limits {
 	limits := Limits{
-		MemoryLimitMB:     env.Int64("AQUIFER_MEMORY_LIMIT_MB", autoMemoryLimitMB),
-		MaxBodyBytes:      env.Int64("AQUIFER_MAX_BODY_BYTES", defaultMaxBodyBytes),
-		DBMaxBytes:        env.Int64("AQUIFER_DB_MAX_BYTES", autoDBMaxBytes),
-		RetryAfterSeconds: int(env.Int64("AQUIFER_RETRY_AFTER_SECONDS", 5)),
-		MaxSyncLagMS:      env.Int64("AQUIFER_MAX_SYNC_LAG_MS", defaultMaxSyncLagMS),
+		MemoryLimitMB:          env.Int64("AQUIFER_MEMORY_LIMIT_MB", autoMemoryLimitMB),
+		MaxBodyBytes:           env.Int64("AQUIFER_MAX_BODY_BYTES", defaultMaxBodyBytes),
+		DBMaxBytes:             env.Int64("AQUIFER_DB_MAX_BYTES", autoDBMaxBytes),
+		RetryAfterSeconds:      int(env.Int64("AQUIFER_RETRY_AFTER_SECONDS", 5)),
+		MemoryHardLimitPercent: env.Int64("AQUIFER_MEMORY_HARD_LIMIT_PERCENT", defaultMemoryHardLimitPercent),
+		MaxSyncLagMS:           env.Int64("AQUIFER_MAX_SYNC_LAG_MS", defaultMaxSyncLagMS),
 	}
 	switch {
 	case limits.MemoryLimitMB == autoMemoryLimitMB:
@@ -157,6 +166,11 @@ type Decision struct {
 	Limit   int64
 	Current int64
 	Queue   *QueueSnapshot
+	// Soft marks a memory refusal below the hard limit: the caller admits
+	// the job anyway if its target is draining, and calls Refused if not.
+	// Before, one dead target's backlog filled memory and every target was
+	// refused (issue #87).
+	Soft bool
 }
 
 // RejectedError is returned when a genuinely new job is rejected by
@@ -297,12 +311,19 @@ func deriveDBMaxBytes(dbPath string) int64 {
 }
 
 func (c *Controller) Check() Decision {
+	var soft *Decision
 	if c.limits.MemoryLimitMB > 0 {
 		currentMB := c.memSample.Get(processMemoryMB)
 		if currentMB > c.limits.MemoryLimitMB {
-			log.Printf("admission: rejecting job — memory %dMB exceeds limit %dMB", currentMB, c.limits.MemoryLimitMB)
-			c.rejectStreak.Add(1)
-			return Decision{Allowed: false, Reason: "memory", Limit: c.limits.MemoryLimitMB, Current: currentMB}
+			memory := Decision{Allowed: false, Reason: "memory", Limit: c.limits.MemoryLimitMB, Current: currentMB}
+			if currentMB > c.memoryHardLimitMB() {
+				c.Refused(memory)
+				return memory
+			}
+			// Under the hard limit: the other checks still come first, and
+			// the caller decides by the job's target.
+			memory.Soft = true
+			soft = &memory
 		}
 	}
 
@@ -325,9 +346,33 @@ func (c *Controller) Check() Decision {
 		}
 	}
 
+	if soft != nil {
+		return *soft
+	}
 	c.rejectStreak.Store(0)
 	return Decision{Allowed: true}
 }
+
+// memoryHardLimitMB is where memory refuses every new job.
+func (c *Controller) memoryHardLimitMB() int64 {
+	pct := c.limits.MemoryHardLimitPercent
+	if pct <= 100 {
+		return c.limits.MemoryLimitMB
+	}
+	return c.limits.MemoryLimitMB * pct / 100
+}
+
+// Refused records a refusal the caller made from a Soft decision (or Check
+// made itself): it is logged and counts toward the Retry-After streak.
+func (c *Controller) Refused(d Decision) {
+	if d.Reason == "memory" {
+		log.Printf("admission: rejecting job — memory %dMB exceeds limit %dMB", d.Current, d.Limit)
+	}
+	c.rejectStreak.Add(1)
+}
+
+// Admitted records that the caller admitted a job despite a Soft decision.
+func (c *Controller) Admitted() { c.rejectStreak.Store(0) }
 
 // Snapshot reports current admission pressure for /health, independent of
 // whether any request is currently being rejected.
