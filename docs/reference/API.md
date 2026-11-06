@@ -15,7 +15,7 @@
 }
 ```
 
-`execute_before` is optional Unix time in milliseconds. Aquifer checks it immediately before dispatch and before every retry. A job that has not started its next attempt by that time is never sent target API; it becomes `failed` with reason `execution_deadline_exceeded`, remains available through the normal status/result retention window, and emits the normal failed SSE/webhook event.
+`execute_before` is optional Unix time in milliseconds. Aquifer checks it immediately before dispatch and before every retry. A job that has not started its next attempt by that time is never sent target API; it becomes `failed` with reason `execution_deadline_exceeded`, remains available through the normal status/result retention window, and emits the normal failed SSE/webhook event. A job without `execute_before` that is still queued 24 hours after submission fails the same way, with reason `queued_ttl_exceeded`, instead of disappearing when its stored record expires.
 
 `webhook_url` is optional. Omit it when the caller only needs Aquifer to execute the job and will use `GET /jobs/{id}` or remote result storage if it needs the terminal result. When set, Aquifer delivers the normal completion webhook.
 
@@ -497,7 +497,7 @@ If literally no known-live region can help either — none live at all, or every
 
 ## GET /jobs/:id/stream
 
-Server-Sent Events stream for live job updates: `queued` → `dispatching` → `completed` (`{"job_id","response_status","body"}`) or `failed` (`{"job_id","reason"}`), plus a `position` event every 2s while queued. Connecting late is safe — you'll receive synthetic catchup events for states you missed. SSE is a convenience, not the source of truth: the webhook fires regardless of whether the stream was ever open.
+Server-Sent Events stream for live job updates: `queued` → `dispatching` → `completed` (`{"job_id","response_status","body"}`) or `failed` (`{"job_id","reason"}`), plus a `position` event every 2s while queued. Connecting late is safe — you'll receive synthetic catchup events for states you missed. If the job already finished, the stream sends its stored result as the `completed` or `failed` event (`{"job_id","status","response_status","content_type","body","body_truncated"}`; no `reason`, which isn't stored) and ends. SSE is a convenience, not the source of truth: the webhook fires regardless of whether the stream was ever open.
 
 ```bash
 curl -N http://localhost:8080/jobs/<id>/stream
@@ -541,7 +541,7 @@ Prometheus text format, on the same port as `/health`. The `aquifer` binary serv
 | `aquifer_webhooks_total` | counter | `outcome` | Completion webhooks `delivered` (the receiver answered 2xx), or `failed`: refused with an answer Aquifer doesn't retry, such as `401`, or out of retries. They aren't counted in the job metrics above. |
 | `aquifer_active_queues` | gauge | `target` | Queues with work waiting (one per tenant with account queues on) |
 | `aquifer_backlog_jobs` | gauge | `target` | Jobs queued or in flight |
-| `aquifer_flow_rate_rps` | gauge | `target` | Sum of the active queues' current rates, after the target API's pacing headers |
+| `aquifer_flow_rate_rps` | gauge | `target` | Rate Aquifer currently allows the target API: the active queues' rates after its pacing headers, summed and capped at the target's ceiling (configured `rps` or a pool's live capacity, never below the 0.5 rps floor; 0 for a pool with no live members). An upper bound; queues with little work send less |
 | `aquifer_fairness_jain` | gauge | `target` | [Jain's index](https://en.wikipedia.org/wiki/Fairness_measure) over queues with work waiting, by jobs each finished in about the last minute. `1` is perfectly even, `1/n` is one queue getting everything. Absent when nothing is waiting. |
 | `aquifer_node_info` | gauge | `node_id` | `1`, carrying the id sent as `X-Aqueduct-Node-Id` |
 | `aquifer_wal_sync_lag_seconds` | gauge | | Pebble's default flush only: how long accepted jobs may have gone without reaching disk. A crash loses them. Normally under about 0.15 |

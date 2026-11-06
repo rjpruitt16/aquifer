@@ -33,6 +33,8 @@ type URLWorker struct {
 	// shared holds every account queue for this target to the ceiling in
 	// total; see sharedPace.
 	shared *sharedPace
+	// health is how long this target has gone without a successful answer.
+	health targetHealth
 	// accountQueueMode is the effective mode -- one queue per tenant, or one
 	// shared queue -- recomputed by applyAccountQueueModeLocked from, in
 	// order: the destination's own say (destinationMode, from its
@@ -400,7 +402,7 @@ func (w *URLWorker) reserve(job *jobs.Job, enforceAdmission bool) (*AccountQueue
 			w.mu.Unlock()
 		}, func(v int64) {
 			w.setMaxBacklog(v)
-		}, w.shared)
+		}, w.shared, &w.health)
 		destinationSignal := w.HandleDestinationAccountQueue
 		q.accountQueueSignal.Store(&destinationSignal)
 		w.queues[key] = q
@@ -559,6 +561,18 @@ func (w *URLWorker) Stats() metrics.TargetStats {
 			stats.FlowRate += qs.RPS
 		}
 		stats.Queues = append(stats.Queues, qs)
+	}
+	// Every queue takes its slots from the shared pace, so the target is
+	// never allowed more than its ceiling, however many queues are active.
+	// Summing the queues' own rates read 126-210 for a target held to 70
+	// (issue #145).
+	switch ceiling := w.budgetCeiling(); {
+	case ceiling > 0:
+		stats.FlowRate = math.Min(stats.FlowRate, math.Max(ceiling, MinRPS))
+	case w.pool != nil:
+		// A pool with no live members dispatches nothing, whatever rates
+		// its queues still hold.
+		stats.FlowRate = 0
 	}
 	return stats
 }
