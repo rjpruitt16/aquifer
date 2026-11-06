@@ -33,6 +33,8 @@ type URLWorker struct {
 	// shared holds every account queue for this target to the ceiling in
 	// total; see sharedPace.
 	shared *sharedPace
+	// health is how long this target has gone without a successful answer.
+	health targetHealth
 	// accountQueueMode is the effective mode -- one queue per tenant, or one
 	// shared queue -- recomputed by applyAccountQueueModeLocked from, in
 	// order: the destination's own say (destinationMode, from its
@@ -400,7 +402,7 @@ func (w *URLWorker) reserve(job *jobs.Job, enforceAdmission bool) (*AccountQueue
 			w.mu.Unlock()
 		}, func(v int64) {
 			w.setMaxBacklog(v)
-		}, w.shared)
+		}, w.shared, &w.health)
 		destinationSignal := w.HandleDestinationAccountQueue
 		q.accountQueueSignal.Store(&destinationSignal)
 		w.queues[key] = q

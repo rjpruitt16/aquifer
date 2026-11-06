@@ -132,6 +132,12 @@ func (a *Aquifer) AttemptDirect(ctx context.Context, req JobRequest, timeout tim
 	counts := a.store.Counts()
 	queues := worker.Snapshot()
 	resp, attemptErr := dispatch.MakeRequest(attemptCtx, job, job.URL, counts.TotalJobs, counts.QueueDepth, 0, queues.ActiveQueues, queues.UpstreamBacklog, a.l8)
+	status := 0
+	if resp != nil {
+		status = resp.StatusCode
+	}
+	// Direct answers count toward the target's health like queued ones.
+	worker.ReportAnswer(status, attemptErr)
 	if attemptErr != nil {
 		return a.fallbackOutcome(ctx, req, job, "upstream_unreachable", 0, timeout, true)
 	}
