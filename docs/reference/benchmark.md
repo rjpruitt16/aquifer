@@ -350,7 +350,7 @@ One 1-CPU Aquifer moves about **1,500–2,000 WebSocket round trips/s**. Past th
 **Configuration that matters.**
 - **File descriptors:** each Aquifer session uses three (client, backend, Valkey reader). Container platforms often default to 10,240 open files, which caps an instance near 3,000 sessions; raise `ulimit -n`.
 - **Valkey `maxclients`:** needs one connection per live session, across every Aquifer sharing it.
-- **Session ceiling:** `AQUIFER_WS_MAX_CLIENT_CONNECTIONS` defaults to 1,000, which is safe. Raise it no higher than memory allows (about 90 KB per session). Nothing yet rejects sessions on memory pressure.
+- **Session ceiling:** `AQUIFER_WS_MAX_CLIENT_CONNECTIONS` defaults to 1,000, which is safe. Raise it no higher than memory allows (about 90 KB per session). Since this benchmark, new sessions are also refused with `429` (`limit_reason: memory`) while the process is over `AQUIFER_MEMORY_LIMIT_MB`.
 
 **Bugs this benchmark found:**
 - **Aquifer #33:** sessions starved the Valkey connection pool past ~10 per CPU. Command confirmations took 3.1 s at p50 on one CPU with 200 sessions; 0.34 ms after the fix.
