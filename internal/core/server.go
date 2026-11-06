@@ -346,8 +346,28 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request, job *Job, 
 
 	// Catchup events for states already passed before client connected
 	dispatch.WriteSSE(w, "queued", map[string]any{"job_id": job.ID, "status": "queued"})
-	if job.Status == StatusInFlight {
+	finished := job.Status == StatusCompleted || job.Status == StatusFailed
+	if job.Status == StatusInFlight || finished {
 		dispatch.WriteSSE(w, "dispatching", map[string]any{"job_id": job.ID})
+	}
+	// A job that finished before this stream subscribed published its final
+	// event to nobody. Send its stored result as that event and end the
+	// stream, instead of waiting for an event that already went out. With no
+	// stored result yet (the status is written just before it), wait for the
+	// live event as usual.
+	if finished {
+		if result, ok := s.aquifer.JobResult(job.ID); ok {
+			dispatch.WriteSSE(w, string(job.Status), map[string]any{
+				"job_id":          job.ID,
+				"status":          job.Status,
+				"response_status": result.ResponseStatus,
+				"content_type":    result.ContentType,
+				"body":            result.Body,
+				"body_truncated":  result.BodyTruncated,
+			})
+			flusher.Flush()
+			return
+		}
 	}
 	flusher.Flush()
 

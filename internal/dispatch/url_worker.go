@@ -562,6 +562,18 @@ func (w *URLWorker) Stats() metrics.TargetStats {
 		}
 		stats.Queues = append(stats.Queues, qs)
 	}
+	// Every queue takes its slots from the shared pace, so the target is
+	// never allowed more than its ceiling, however many queues are active.
+	// Summing the queues' own rates read 126-210 for a target held to 70
+	// (issue #145).
+	switch ceiling := w.budgetCeiling(); {
+	case ceiling > 0:
+		stats.FlowRate = math.Min(stats.FlowRate, math.Max(ceiling, MinRPS))
+	case w.pool != nil:
+		// A pool with no live members dispatches nothing, whatever rates
+		// its queues still hold.
+		stats.FlowRate = 0
+	}
 	return stats
 }
 
