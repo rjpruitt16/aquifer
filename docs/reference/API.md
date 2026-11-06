@@ -15,7 +15,7 @@
 }
 ```
 
-`execute_before` is optional Unix time in milliseconds. Aquifer checks it immediately before dispatch and before every retry. A job that has not started its next attempt by that time is never sent target API; it becomes `failed` with reason `execution_deadline_exceeded`, remains available through the normal status/result retention window, and emits the normal failed SSE/webhook event.
+`execute_before` is optional Unix time in milliseconds. Aquifer checks it immediately before dispatch and before every retry. A job that has not started its next attempt by that time is never sent target API; it becomes `failed` with reason `execution_deadline_exceeded`, remains available through the normal status/result retention window, and emits the normal failed SSE/webhook event. A job without `execute_before` that is still queued 24 hours after submission fails the same way, with reason `queued_ttl_exceeded`, instead of disappearing when its stored record expires.
 
 `webhook_url` is optional. Omit it when the caller only needs Aquifer to execute the job and will use `GET /jobs/{id}` or remote result storage if it needs the terminal result. When set, Aquifer delivers the normal completion webhook.
 

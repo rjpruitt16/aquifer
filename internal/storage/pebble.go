@@ -315,7 +315,7 @@ func (s *Pebble) CheckOrInsert(job *jobs.Job) (string, bool) {
 		return existingID, true
 	}
 
-	rec := pebbleRecord{Job: job, ExpiresAt: time.Now().Add(ttlQueued).UnixMilli()}
+	rec := pebbleRecord{Job: job, ExpiresAt: job.PendingExpiresAt(time.Now())}
 	data, err := json.Marshal(rec)
 	if err != nil {
 		log.Printf("pebble: marshal job %s: %v", job.ID, err)
@@ -471,7 +471,7 @@ func (s *Pebble) UpdateStatus(jobID string, status jobs.Status) {
 	s.moveStatus(rec.Job.Status, status)
 	rec.Job.Status = status
 	previousExpiresAt := rec.ExpiresAt
-	rec.ExpiresAt = time.Now().Add(ttlForStatus(status)).UnixMilli()
+	rec.ExpiresAt = expiresAtFor(rec.Job, status, time.Now())
 	s.putRecordWithExpiry(jobID, rec, previousExpiresAt)
 	if (status == jobs.StatusCompleted || status == jobs.StatusFailed) && !s.skipDrainEvents.Load() {
 		s.recordDrainEvent(rec, status)
