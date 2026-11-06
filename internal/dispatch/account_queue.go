@@ -169,6 +169,15 @@ func (q *AccountQueue) reserveBacklog() {
 	}
 }
 
+// markServed counts a job that left this queue for good (finished, failed
+// or expired), here and in its target's total.
+func (q *AccountQueue) markServed() {
+	q.served.Add(1)
+	if q.health != nil {
+		q.health.served.Add(1)
+	}
+}
+
 func (q *AccountQueue) releaseBacklog() {
 	if q.backlog.Add(-1) == 0 && q.workerActiveQueues != nil {
 		q.workerActiveQueues.Add(-1)
@@ -507,7 +516,7 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 					resetRetryTimer(retryTimer, waiting)
 				} else {
 					q.releaseBacklog()
-					q.served.Add(1)
+					q.markServed()
 					if q.onJobDone != nil && msg.job != nil {
 						q.onJobDone(msg.job)
 					}
@@ -647,6 +656,7 @@ func (q *AccountQueue) dropExpiredWaiting(waiting []waitingJob) []waitingJob {
 			continue
 		}
 		q.releaseBacklog()
+		q.markServed()
 		failExpiredJob(w.job, w.reason, q.upstream, q.store, q.broker, q.metrics, q.enqueueWebhook, q.resultRecorder)
 		if q.onJobDone != nil {
 			q.onJobDone(w.job)
@@ -680,6 +690,7 @@ func (q *AccountQueue) dropExpiredJobs(queue []*jobs.Job) []*jobs.Job {
 			continue
 		}
 		q.releaseBacklog()
+		q.markServed()
 		failExpiredJob(job, "", q.upstream, q.store, q.broker, q.metrics, q.enqueueWebhook, q.resultRecorder)
 		if q.onJobDone != nil {
 			q.onJobDone(job)

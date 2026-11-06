@@ -33,6 +33,9 @@ type URLWorker struct {
 	// shared holds every account queue for this target to the ceiling in
 	// total; see sharedPace.
 	shared *sharedPace
+	// drain is how fast this target's queues finish jobs, for admission
+	// under memory pressure; see BacklogStuck.
+	drain drainTracker
 	// health is how long this target has gone without a successful answer.
 	health targetHealth
 	// accountQueueMode is the effective mode -- one queue per tenant, or one
@@ -220,8 +223,9 @@ func (w *URLWorker) enforceAggregateBudget() {
 	defer ticker.Stop()
 	for {
 		select {
-		case <-ticker.C:
+		case now := <-ticker.C:
 			w.checkAndThrottle()
+			w.sampleDrain(now)
 		case <-w.stop:
 			return
 		}
