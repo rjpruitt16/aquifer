@@ -31,15 +31,7 @@ type drainTracker struct {
 	sampled    bool
 }
 
-func (w *URLWorker) servedTotal() int64 {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	var total int64
-	for _, q := range w.queues {
-		total += q.Served()
-	}
-	return total
-}
+func (w *URLWorker) servedTotal() int64 { return w.health.served.Load() }
 
 // sampleDrain records how many jobs left this target's queues since the
 // last sample.
@@ -48,9 +40,11 @@ func (w *URLWorker) sampleDrain(now time.Time) {
 	d := &w.drain
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	// A retired queue takes its count with it; start over from here.
-	if d.lastAt.IsZero() || served < d.lastServed {
-		d.lastAt, d.lastServed = now, served
+	// With no backlog there is nothing to drain, and idle time says nothing
+	// about the target's pace: forget the rate until work resumes, so a
+	// target that was idle isn't judged by a near-zero average.
+	if d.lastAt.IsZero() || w.backlog.Load() <= 0 {
+		d.lastAt, d.lastServed, d.sampled = now, served, false
 		return
 	}
 	dt := now.Sub(d.lastAt).Seconds()
