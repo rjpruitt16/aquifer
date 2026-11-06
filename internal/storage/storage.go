@@ -37,6 +37,14 @@ type Store interface {
 	Counts() Counts
 	GetJob(jobID string) *jobs.Job
 	GetQueuedJobs() []*jobs.Job
+	// PendingQueueKeys counts unfinished jobs by the queue key they were
+	// last handed to ("" for jobs never handed to a queue), without loading
+	// them, so restart recovery can load each queue a page at a time.
+	PendingQueueKeys() map[string]int
+	// QueuedPage returns up to limit of a queue's unfinished jobs after
+	// cursor, in (CreatedAt, ID) order, as queued. createdBefore, if
+	// non-zero, stops at jobs created at or after it.
+	QueuedPage(queueKey string, after jobs.PageCursor, createdBefore int64, limit int) []*jobs.Job
 
 	// ListIdempotentKeys and ClearIdempotentKeys back drain mode (see
 	// internal/dispatch/drain.go) -- an opt-in feature, off by default, so calling these on

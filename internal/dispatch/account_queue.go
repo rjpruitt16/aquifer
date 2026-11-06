@@ -89,6 +89,16 @@ type jobDoneMsg struct {
 type WebhookEnqueuer func(originalJobID, userID, webhookURL string, maxRetries int, payload map[string]any)
 
 type AccountQueue struct {
+	// Paged recovery (paged_recovery.go). spillPending is attached from any
+	// goroutine under spillMu and nudges spillWake; the rest is owned by the
+	// run goroutine.
+	inMemory       atomic.Int64
+	spillMu        sync.Mutex
+	spillPending   []spillSource
+	spillWake      chan struct{}
+	spills         []spillSource
+	recentLoads    map[string]time.Time
+	lastSpillSweep time.Time
 	// accountQueueSignal, when set, hears the destination's
 	// X-Aqueduct-Account-Queue answer (true: one queue per tenant, false:
 	// one shared queue). Set by the URLWorker right after creating the
@@ -160,6 +170,17 @@ func (q *AccountQueue) reserveBacklog() {
 	}
 }
 
+// reportDepth records how many jobs the queue holds in memory: for
+// metrics, and for InMemory (jobs still on disk aren't counted).
+func (q *AccountQueue) reportDepth(n int) {
+	q.inMemory.Store(int64(n))
+	q.metrics.QueueDepth(q.upstream, n)
+}
+
+// InMemory is how many queued jobs the queue holds in memory, as of its
+// last report; with paged recovery the rest of its backlog is on disk.
+func (q *AccountQueue) InMemory() int64 { return q.inMemory.Load() }
+
 func (q *AccountQueue) releaseBacklog() {
 	if q.backlog.Add(-1) == 0 && q.workerActiveQueues != nil {
 		q.workerActiveQueues.Add(-1)
@@ -222,6 +243,7 @@ func newAccountQueue(key, upstream string, rps float64, maxConc int, pool *Pool,
 		upstream:           upstream,
 		pool:               pool,
 		cmds:               make(chan *jobs.Job, 1000),
+		spillWake:          make(chan struct{}, 1),
 		done:               make(chan jobDoneMsg, 100),
 		store:              store,
 		broker:             broker,
@@ -249,7 +271,7 @@ func (q *AccountQueue) Enqueue(job *jobs.Job) bool {
 // after releasing its lock, so the store write and the channel send don't
 // serialize every submission and webhook on one lock.
 func (q *AccountQueue) handoff(job *jobs.Job) bool {
-	q.store.SetQueueKey(job.ID, q.key)
+	q.store.SetQueueKey(job.ID, q.storeKey())
 	select {
 	case q.cmds <- job:
 		return true
@@ -290,18 +312,13 @@ func (q *AccountQueue) supervise(rps float64, maxConc int, onIdle func(string), 
 		}
 
 		if panicked {
-			// The panicked loop's in-memory queue is gone; re-enqueue every
-			// unfinished job of this queue from storage (some may still be
-			// dispatching, which at-least-once delivery already allows).
-			recovered := q.store.RecoverQueued(q.key)
-			for _, j := range recovered {
-				log.Printf("[AccountQueue] re-enqueued job %s after panic", j.ID)
-				select {
-				case q.cmds <- j:
-				case <-q.stop:
-					return
-				}
-			}
+			// The panicked loop's in-memory queue is gone; reload this queue's
+			// unfinished jobs from storage a page at a time (some may still be
+			// dispatching, which at-least-once delivery already allows). They
+			// are still counted in its backlog.
+			log.Printf("[AccountQueue] %s: reloading its jobs from storage after a panic", q.key)
+			q.spills, q.recentLoads = nil, nil
+			q.attachSpill(q.storeKey(), jobs.PageCursor{}, 0)
 			continue
 		}
 
@@ -370,6 +387,8 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 	for {
 		queue = q.dropExpiredJobs(queue)
 		waiting = q.dropExpiredWaiting(waiting)
+		q.takeSpills()
+		queue = q.refill(queue, time.Now())
 
 		// Pool-backed queues don't have a fixed configured ceiling — the
 		// pool's aggregate capacity is the live sum of whatever its
@@ -425,7 +444,7 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 
 			job := queue[0]
 			queue = queue[1:]
-			q.metrics.QueueDepth(q.upstream, len(queue))
+			q.reportDepth(len(queue))
 			inFlight++
 			lastRequestAt = time.Now()
 
@@ -474,9 +493,13 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 
 		select {
 		case job := <-q.cmds:
+			if !q.acceptHandoff(job) {
+				idle.Reset(idleTimeout)
+				continue
+			}
 			queue = append(queue, job)
 			q.trackDeadline(job)
-			q.metrics.QueueDepth(q.upstream, len(queue))
+			q.reportDepth(len(queue))
 			idle.Reset(idleTimeout)
 
 		case msg := <-q.done:
@@ -540,7 +563,11 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 		case <-dispatchTimer.C:
 			// The pace allows the next dispatch; the loop above sends it.
 
+		case <-q.spillWake:
+			// Jobs attached on disk; the top of the loop loads a page.
+
 		case <-positionTicker.C:
+			q.sweepSpilled(time.Now())
 			queue = q.dropExpiredJobs(queue)
 			for i, j := range queue {
 				if !q.broker.HasSubscribers(j.ID) {
@@ -567,11 +594,11 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 			}
 			waiting = kept
 			resetRetryTimer(retryTimer, waiting)
-			q.metrics.QueueDepth(q.upstream, len(queue))
+			q.reportDepth(len(queue))
 			idle.Reset(idleTimeout)
 
 		case <-idle.C:
-			if len(queue) == 0 && inFlight == 0 && len(waiting) == 0 {
+			if len(queue) == 0 && inFlight == 0 && len(waiting) == 0 && len(q.spills) == 0 {
 				return
 			}
 			idle.Reset(idleTimeout)
@@ -659,7 +686,7 @@ func (q *AccountQueue) dropExpiredJobs(queue []*jobs.Job) []*jobs.Job {
 		}
 	}
 	if len(kept) != len(queue) {
-		q.metrics.QueueDepth(q.upstream, len(kept))
+		q.reportDepth(len(kept))
 	}
 	return kept
 }

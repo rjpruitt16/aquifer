@@ -6,8 +6,10 @@ package core
 import (
 	"context"
 	"log"
+	"strings"
 
 	"github.com/rjpruitt16/aquifer/internal/dispatch"
+	"github.com/rjpruitt16/aquifer/internal/jobs"
 )
 
 type RuntimeOptions struct {
@@ -189,17 +191,61 @@ func NewRuntime(opts RuntimeOptions) *Runtime {
 	}
 }
 
+// RecoverQueuedJobs puts the jobs left unfinished by the last run back in
+// their queues before Aquifer serves anything. Each queue gets its first
+// page (AQUIFER_RECOVERY_PAGE_SIZE); the rest stay on disk, counted in its
+// backlog, and load as it drains, so restart memory doesn't grow with the
+// backlog (issue #88). Jobs stored under a key from before this existed
+// (or never handed to a queue) load all at once, as they always did.
 func (r *Runtime) RecoverQueuedJobs(dbPath string) {
-	queued := r.Store.GetQueuedJobs()
-	if len(queued) == 0 {
+	counts := r.Store.PendingQueueKeys()
+	total := 0
+	for _, n := range counts {
+		total += n
+	}
+	if total == 0 {
 		return
 	}
+	log.Printf("recovering %d queued jobs in %d queues from %s", total, len(counts), dbPath)
 
-	log.Printf("recovering %d queued jobs from %s", len(queued), dbPath)
-	for _, job := range queued {
+	size := dispatch.RecoveryPageSize()
+	onDisk := 0
+	for key, n := range counts {
 		// No live HTTP request behind a recovered job, so no account-queue
 		// opinion — "" leaves each target API's mode exactly as it was.
-		r.Registry.Enqueue(job, "")
+		if !strings.Contains(key, "|") {
+			for _, job := range r.Store.RecoverQueued(key) {
+				r.Registry.Enqueue(job, "")
+			}
+			continue
+		}
+		page := r.Store.QueuedPage(key, jobs.PageCursor{}, 0, size)
+		for _, job := range page {
+			r.Registry.Enqueue(job, "")
+		}
+		rest := n - len(page)
+		if len(page) < size || rest <= 0 {
+			continue
+		}
+		last := page[len(page)-1]
+		if r.Registry.AttachRecoveredBacklog(last, key, jobs.CursorAt(last), rest) {
+			onDisk += rest
+			continue
+		}
+		// No queue to page into: load the rest now, as before.
+		for {
+			more := r.Store.QueuedPage(key, jobs.CursorAt(last), 0, size)
+			for _, job := range more {
+				r.Registry.Enqueue(job, "")
+			}
+			if len(more) < size {
+				break
+			}
+			last = more[len(more)-1]
+		}
+	}
+	if onDisk > 0 {
+		log.Printf("recovery: %d jobs stay on disk and load as their queues drain", onDisk)
 	}
 }
 

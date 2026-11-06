@@ -287,6 +287,24 @@ func expKey(expiresAt int64, id string) []byte {
 
 func expKeyBound(expiresAt int64) []byte { return []byte(fmt.Sprintf("exp:%016x", expiresAt)) }
 
+// queueIndexKey indexes a pending job by its queue key and creation order,
+// so restart recovery reads a queue a page at a time instead of decoding
+// every job. Entries for jobs that finished are removed with them; a stale
+// one (a crash between writes) is skipped and dropped when a page reads it.
+func queueIndexKey(queueKey string, createdAt int64, id string) []byte {
+	return []byte(fmt.Sprintf("qk:%s\x00%016x:%s", queueKey, uint64(createdAt), id))
+}
+
+func queueIndexBound(queueKey string, createdAt int64) []byte {
+	return []byte(fmt.Sprintf("qk:%s\x00%016x", queueKey, uint64(createdAt)))
+}
+
+// queueIndexMarker records that every pending job with a queue key has a
+// queueIndexKey. Stores written by older versions are backfilled once.
+var queueIndexMarker = []byte("meta:queue-index-v1")
+
+func pendingStatus(s jobs.Status) bool { return s == jobs.StatusQueued || s == jobs.StatusInFlight }
+
 // expIndexMarker records that every job has an expKey. Stores written by
 // older versions are backfilled once on open.
 var expIndexMarker = []byte("meta:exp-index-v1")
@@ -383,6 +401,9 @@ func (s *Pebble) putRecordWithExpiry(jobID string, rec *pebbleRecord, previousEx
 	batch := s.db.NewBatch()
 	defer batch.Close()
 	batch.Set(jobKey(jobID), data, nil)
+	if rec.QueueKey != "" && !pendingStatus(rec.Job.Status) {
+		batch.Delete(queueIndexKey(rec.QueueKey, rec.Job.CreatedAt, jobID), nil)
+	}
 	if previousExpiresAt != rec.ExpiresAt {
 		batch.Delete(expKey(previousExpiresAt, jobID), nil)
 	}
@@ -402,14 +423,106 @@ func (s *Pebble) SetQueueKey(jobID, queueKey string) {
 	if !ok {
 		return
 	}
+	previous := rec.QueueKey
 	rec.QueueKey = queueKey
 	data, err := json.Marshal(rec)
 	if err != nil {
 		return
 	}
-	if err := s.db.Set(jobKey(jobID), data, pebble.NoSync); err != nil {
+	batch := s.db.NewBatch()
+	defer batch.Close()
+	batch.Set(jobKey(jobID), data, nil)
+	if previous != "" && previous != queueKey {
+		batch.Delete(queueIndexKey(previous, rec.Job.CreatedAt, jobID), nil)
+	}
+	if pendingStatus(rec.Job.Status) {
+		batch.Set(queueIndexKey(queueKey, rec.Job.CreatedAt, jobID), nil, nil)
+	}
+	if err := batch.Commit(pebble.NoSync); err != nil {
 		log.Printf("pebble: set queue key for job %s: %v", jobID, err)
 	}
+}
+
+// PendingQueueKeys counts pending jobs by queue key from the records
+// themselves, so the counts are exact, in one pass that holds no job. The
+// first time on a store written by an older version it also backfills the
+// queue index.
+func (s *Pebble) PendingQueueKeys() map[string]int {
+	_, closer, err := s.db.Get(queueIndexMarker)
+	backfill := err != nil
+	if closer != nil {
+		closer.Close()
+	}
+	batch := s.db.NewBatch()
+	defer func() { batch.Close() }()
+	counts := map[string]int{}
+	s.forEachJob(func(rec *pebbleRecord) {
+		if !pendingStatus(rec.Job.Status) {
+			return
+		}
+		counts[rec.QueueKey]++
+		if backfill && rec.QueueKey != "" {
+			batch.Set(queueIndexKey(rec.QueueKey, rec.Job.CreatedAt, rec.Job.ID), nil, nil)
+			if batch.Count() >= 10_000 {
+				if err := batch.Commit(pebble.NoSync); err != nil {
+					log.Printf("pebble: backfill queue index: %v", err)
+				}
+				batch.Close()
+				batch = s.db.NewBatch()
+			}
+		}
+	})
+	if backfill {
+		batch.Set(queueIndexMarker, nil, nil)
+		if err := batch.Commit(s.syncOpts); err != nil {
+			log.Printf("pebble: backfill queue index: %v", err)
+		}
+	}
+	return counts
+}
+
+func (s *Pebble) QueuedPage(queueKey string, after jobs.PageCursor, createdBefore int64, limit int) []*jobs.Job {
+	lower := []byte("qk:" + queueKey + "\x00")
+	if after != (jobs.PageCursor{}) {
+		lower = append(queueIndexKey(queueKey, after.CreatedAt, after.ID), 0)
+	}
+	upper := []byte("qk:" + queueKey + "\x01")
+	if createdBefore > 0 {
+		upper = queueIndexBound(queueKey, createdBefore)
+	}
+	iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: lower, UpperBound: upper})
+	if err != nil {
+		log.Printf("pebble: iterate queue index: %v", err)
+		return nil
+	}
+	prefix := len("qk:") + len(queueKey) + 1 + 16 + 1
+	now := time.Now().UnixMilli()
+	var found []*jobs.Job
+	var stale [][]byte
+	for iter.First(); iter.Valid() && len(found) < limit; iter.Next() {
+		key := iter.Key()
+		if len(key) <= prefix {
+			continue
+		}
+		id := string(key[prefix:])
+		rec, ok := s.getRecord(id)
+		if !ok || rec.ExpiresAt <= now || rec.QueueKey != queueKey || !pendingStatus(rec.Job.Status) {
+			stale = append(stale, append([]byte(nil), key...))
+			continue
+		}
+		rec.Job.Status = jobs.StatusQueued
+		found = append(found, rec.Job)
+	}
+	iter.Close()
+	if len(stale) > 0 {
+		batch := s.db.NewBatch()
+		for _, key := range stale {
+			batch.Delete(key, nil)
+		}
+		batch.Commit(pebble.NoSync)
+		batch.Close()
+	}
+	return found
 }
 
 // DeleteJob removes both the job row and its idempotency index entry —
@@ -429,6 +542,9 @@ func (s *Pebble) DeleteJob(jobID string) {
 	defer batch.Close()
 	batch.Delete(jobKey(jobID), nil)
 	batch.Delete(idemKey(hashed), nil)
+	if rec.QueueKey != "" {
+		batch.Delete(queueIndexKey(rec.QueueKey, rec.Job.CreatedAt, jobID), nil)
+	}
 	if err := batch.Commit(s.syncOpts); err != nil {
 		log.Printf("pebble: delete job %s: %v", jobID, err)
 		return
@@ -795,6 +911,9 @@ func (s *Pebble) deleteExpired(now int64) {
 		}
 		batch.Delete(jobKey(id), nil)
 		batch.Delete(idemKey(rec.Job.IdempotencyHash()), nil)
+		if rec.QueueKey != "" {
+			batch.Delete(queueIndexKey(rec.QueueKey, rec.Job.CreatedAt, id), nil)
+		}
 		statuses = append(statuses, rec.Job.Status)
 		if len(statuses) == expireBatchSize && !commit() {
 			return

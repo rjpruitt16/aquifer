@@ -430,6 +430,9 @@ type QueueStat struct {
 	Backlog int64
 	RPS     float64
 	Served  int64
+	// InMemory is how many of Backlog's queued jobs are in memory; after a
+	// restart with a big backlog the rest stay on disk until they load.
+	InMemory int64
 }
 
 // TargetStats is one target API (or pool) on this node, for /metrics.

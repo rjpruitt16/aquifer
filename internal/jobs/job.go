@@ -323,6 +323,23 @@ func HashKey(key string) string {
 	return hex.EncodeToString(h[:])
 }
 
+// PageCursor is a position in one queue's pending jobs, which pages read in
+// (CreatedAt, ID) order. The zero value is before every job.
+type PageCursor struct {
+	CreatedAt int64
+	ID        string
+}
+
+// CursorAt is the position just at job: a page read after it starts with
+// the next job.
+func CursorAt(job *Job) PageCursor { return PageCursor{CreatedAt: job.CreatedAt, ID: job.ID} }
+
+// Covers reports whether job is at or before c, so a page read after c
+// won't return it.
+func (c PageCursor) Covers(job *Job) bool {
+	return job.CreatedAt < c.CreatedAt || (job.CreatedAt == c.CreatedAt && job.ID <= c.ID)
+}
+
 // QueuedTTL is how long an unfinished job is kept, which also bounds how
 // long its retries can run.
 const QueuedTTL = 24 * time.Hour
