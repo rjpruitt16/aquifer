@@ -73,7 +73,9 @@ type jobDoneMsg struct {
 	slowStart     *bool
 	maxBacklog    *int64
 	// failed marks a retryable failure; the queue halves its rate for it.
-	failed  bool
+	failed bool
+	// reached marks an answer that isn't a retryable failure: the target is up.
+	reached bool
 	retry   *jobs.Job
 	retryAt time.Time
 }
@@ -87,6 +89,11 @@ type jobDoneMsg struct {
 type WebhookEnqueuer func(originalJobID, userID, webhookURL string, maxRetries int, payload map[string]any)
 
 type AccountQueue struct {
+	// health and deadAfter: see failDeadTarget. lastDeadSweep is owned by
+	// the run goroutine.
+	health        *targetHealth
+	deadAfter     time.Duration
+	lastDeadSweep time.Time
 	// accountQueueSignal, when set, hears the destination's
 	// X-Aqueduct-Account-Queue answer (true: one queue per tenant, false:
 	// one shared queue). Set by the URLWorker right after creating the
@@ -208,14 +215,17 @@ func (q *AccountQueue) Throttle(rps float64) {
 }
 
 func NewAccountQueue(key, upstream string, rps float64, maxConc int, pool *Pool, store storage.Store, broker *Broker, l8 *l8.Registry, metrics MetricsAdapter, enqueueWebhook WebhookEnqueuer, resultRecorder storage.ResultRecorder, workerActiveQueues, workerBacklog *atomic.Int64, onJobDone func(*jobs.Job), onIdle func(string), slowStart bool, onSlowStartSignal func(bool), onMaxBacklogSignal func(int64)) *AccountQueue {
-	return newAccountQueue(key, upstream, rps, maxConc, pool, store, broker, l8, metrics, enqueueWebhook, resultRecorder, workerActiveQueues, workerBacklog, onJobDone, onIdle, slowStart, onSlowStartSignal, onMaxBacklogSignal, nil)
+	return newAccountQueue(key, upstream, rps, maxConc, pool, store, broker, l8, metrics, enqueueWebhook, resultRecorder, workerActiveQueues, workerBacklog, onJobDone, onIdle, slowStart, onSlowStartSignal, onMaxBacklogSignal, nil, nil)
 }
 
 // newAccountQueue is NewAccountQueue plus the target's shared pace, which a
-// URLWorker passes so all of its queues together stay within its ceiling.
-func newAccountQueue(key, upstream string, rps float64, maxConc int, pool *Pool, store storage.Store, broker *Broker, l8 *l8.Registry, metrics MetricsAdapter, enqueueWebhook WebhookEnqueuer, resultRecorder storage.ResultRecorder, workerActiveQueues, workerBacklog *atomic.Int64, onJobDone func(*jobs.Job), onIdle func(string), slowStart bool, onSlowStartSignal func(bool), onMaxBacklogSignal func(int64), shared *sharedPace) *AccountQueue {
+// URLWorker passes so all of its queues together stay within its ceiling,
+// and the target's health, which they report every answer to.
+func newAccountQueue(key, upstream string, rps float64, maxConc int, pool *Pool, store storage.Store, broker *Broker, l8 *l8.Registry, metrics MetricsAdapter, enqueueWebhook WebhookEnqueuer, resultRecorder storage.ResultRecorder, workerActiveQueues, workerBacklog *atomic.Int64, onJobDone func(*jobs.Job), onIdle func(string), slowStart bool, onSlowStartSignal func(bool), onMaxBacklogSignal func(int64), shared *sharedPace, health *targetHealth) *AccountQueue {
 	q := &AccountQueue{
 		shared:             shared,
+		health:             health,
+		deadAfter:          deadTargetFailAfter(),
 		key:                key,
 		upstream:           upstream,
 		pool:               pool,
@@ -368,6 +378,7 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 	for {
 		queue = q.dropExpiredJobs(queue)
 		waiting = q.dropExpiredWaiting(waiting)
+		queue, waiting = q.failDeadTarget(queue, waiting, time.Now())
 
 		// Pool-backed queues don't have a fixed configured ceiling — the
 		// pool's aggregate capacity is the live sum of whatever its
@@ -491,6 +502,13 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 					if q.onJobDone != nil && msg.job != nil {
 						q.onJobDone(msg.job)
 					}
+				}
+			}
+			if q.health != nil {
+				if msg.failed {
+					q.health.failed(time.Now())
+				} else if msg.reached {
+					q.health.answered()
 				}
 			}
 			prevRPS := rps
@@ -733,7 +751,9 @@ func execute(ctx context.Context, job *jobs.Job, dispatchURL, upstream string, s
 			}
 			enqueueWebhook(job.ID, job.UserID, job.WebhookURL, job.WebhookRetryLimit(), payload)
 		}
-		return pacingSignals(resp.Header)
+		done := pacingSignals(resp.Header)
+		done.reached = true
+		return done
 	}
 
 	// Retryable failure from here on.
