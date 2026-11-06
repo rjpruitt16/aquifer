@@ -353,7 +353,7 @@ func (m *Prometheus) Write(w io.Writer, nodeID string, targets []TargetStats) {
 	for _, t := range targets {
 		fmt.Fprintf(w, "aquifer_backlog_jobs{target=%s} %d\n", quote(t.Target), t.Backlog)
 	}
-	help(w, "aquifer_flow_rate_rps", "gauge", "Sum of the active queues' current dispatch rates, after the target API's pacing headers.")
+	help(w, "aquifer_flow_rate_rps", "gauge", "Rate Aquifer currently allows the target API: the sum of the active queues' rates after its pacing headers, capped at the target's ceiling (at least 0.5).")
 	for _, t := range targets {
 		fmt.Fprintf(w, "aquifer_flow_rate_rps{target=%s} %g\n", quote(t.Target), round2(t.FlowRate))
 	}
