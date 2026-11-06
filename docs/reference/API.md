@@ -495,7 +495,7 @@ If literally no known-live region can help either — none live at all, or every
 
 ## GET /jobs/:id/stream
 
-Server-Sent Events stream for live job updates: `queued` → `dispatching` → `completed` (`{"job_id","response_status","body"}`) or `failed` (`{"job_id","reason"}`), plus a `position` event every 2s while queued. Connecting late is safe — you'll receive synthetic catchup events for states you missed. SSE is a convenience, not the source of truth: the webhook fires regardless of whether the stream was ever open.
+Server-Sent Events stream for live job updates: `queued` → `dispatching` → `completed` (`{"job_id","response_status","body"}`) or `failed` (`{"job_id","reason"}`), plus a `position` event every 2s while queued. Connecting late is safe — you'll receive synthetic catchup events for states you missed. If the job already finished, the stream sends its stored result as the `completed` or `failed` event (`{"job_id","status","response_status","content_type","body","body_truncated"}`; no `reason`, which isn't stored) and ends. SSE is a convenience, not the source of truth: the webhook fires regardless of whether the stream was ever open.
 
 ```bash
 curl -N http://localhost:8080/jobs/<id>/stream
