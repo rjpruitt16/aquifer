@@ -76,6 +76,8 @@ type jobDoneMsg struct {
 	failed  bool
 	retry   *jobs.Job
 	retryAt time.Time
+	// retryReason is why the attempt before the retry failed.
+	retryReason string
 }
 
 // WebhookEnqueuer queues a webhook delivery through the same account-queue
@@ -481,7 +483,7 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 			if msg.completed {
 				inFlight--
 				if msg.retry != nil {
-					waiting = append(waiting, waitingJob{job: msg.retry, at: msg.retryAt})
+					waiting = append(waiting, waitingJob{job: msg.retry, at: msg.retryAt, reason: msg.retryReason})
 					resetRetryTimer(retryTimer, waiting)
 				} else {
 					q.releaseBacklog()
@@ -584,6 +586,8 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 type waitingJob struct {
 	job *jobs.Job
 	at  time.Time
+	// reason is why its last attempt failed, reported if it expires waiting.
+	reason string
 }
 
 func resetRetryTimer(timer *time.Timer, waiting []waitingJob) {
@@ -616,7 +620,7 @@ func (q *AccountQueue) dropExpiredWaiting(waiting []waitingJob) []waitingJob {
 			continue
 		}
 		q.releaseBacklog()
-		failExpiredJob(w.job, q.upstream, q.store, q.broker, q.metrics, q.enqueueWebhook, q.resultRecorder)
+		failExpiredJob(w.job, w.reason, q.upstream, q.store, q.broker, q.metrics, q.enqueueWebhook, q.resultRecorder)
 		if q.onJobDone != nil {
 			q.onJobDone(w.job)
 		}
@@ -649,7 +653,7 @@ func (q *AccountQueue) dropExpiredJobs(queue []*jobs.Job) []*jobs.Job {
 			continue
 		}
 		q.releaseBacklog()
-		failExpiredJob(job, q.upstream, q.store, q.broker, q.metrics, q.enqueueWebhook, q.resultRecorder)
+		failExpiredJob(job, "", q.upstream, q.store, q.broker, q.metrics, q.enqueueWebhook, q.resultRecorder)
 		if q.onJobDone != nil {
 			q.onJobDone(job)
 		}
@@ -772,6 +776,7 @@ func execute(ctx context.Context, job *jobs.Job, dispatchURL, upstream string, s
 	})
 	msg.retry = job
 	msg.retryAt = retryAt
+	msg.retryReason = reason
 	return msg
 }
 
@@ -879,11 +884,18 @@ func defaultRetryBackoff(attempts int) time.Duration {
 	return retry.Jitter(backoff)
 }
 
-func failExpiredJob(job *jobs.Job, upstream string, store storage.Store, broker *Broker, metrics MetricsAdapter, enqueueWebhook WebhookEnqueuer, resultRecorder storage.ResultRecorder) {
+// failExpiredJob fails a job whose QueueDeadline passed before it could be
+// sent. lastReason is why its previous attempt failed, if it was waiting to
+// retry: that reports as retry_window_exhausted, like a retry that would have
+// landed past the deadline.
+func failExpiredJob(job *jobs.Job, lastReason, upstream string, store storage.Store, broker *Broker, metrics MetricsAdapter, enqueueWebhook WebhookEnqueuer, resultRecorder storage.ResultRecorder) {
 	// The caller's own deadline, or the queued-job TTL for a job without one.
 	reason := "queued_ttl_exceeded"
-	if job.ExecutionExpired(time.Now()) {
+	switch {
+	case job.ExecutionExpired(time.Now()):
 		reason = "execution_deadline_exceeded"
+	case lastReason != "":
+		reason = "retry_window_exhausted: " + lastReason
 	}
 	store.UpdateStatus(job.ID, jobs.StatusFailed)
 	SaveLocalResult(store, job, jobs.StatusFailed, 0, "", "")

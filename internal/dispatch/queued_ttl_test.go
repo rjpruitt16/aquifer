@@ -116,3 +116,27 @@ func TestQueueDeadline(t *testing.T) {
 		t.Fatalf("a pending row must outlive a far execute_before: expires %d, deadline %d", got, far)
 	}
 }
+
+// A job that expires while waiting to retry keeps its last failure, reported
+// as retry_window_exhausted like a retry scheduled past the deadline.
+func TestJobExpiringWhileWaitingToRetryKeepsItsLastFailure(t *testing.T) {
+	hooks := make(chan capturedWebhook, 4)
+	q, store := queuedTTLQueue(t, "http://127.0.0.1:1", hooks)
+	job := ttlJob("retrying", "http://127.0.0.1:1/unused", time.Now().Add(-jobs.QueuedTTL-time.Second))
+	job.Attempts = 1
+	store.CheckOrInsert(job)
+	q.backlog.Add(1)
+
+	kept := q.dropExpiredWaiting([]waitingJob{{job: job, at: time.Now(), reason: "upstream returned 503"}})
+	if len(kept) != 0 {
+		t.Fatalf("expired waiting job was kept: %+v", kept)
+	}
+	select {
+	case hook := <-hooks:
+		if hook.payload["reason"] != "retry_window_exhausted: upstream returned 503" {
+			t.Fatalf("reason = %v, want retry_window_exhausted: upstream returned 503", hook.payload["reason"])
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no webhook for a job that expired waiting to retry")
+	}
+}
