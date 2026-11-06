@@ -539,7 +539,7 @@ Prometheus text format, on the same port as `/health`. The `aquifer` binary serv
 | `aquifer_webhooks_total` | counter | `outcome` | Completion webhooks `delivered` (the receiver answered 2xx), or `failed`: refused with an answer Aquifer doesn't retry, such as `401`, or out of retries. They aren't counted in the job metrics above. |
 | `aquifer_active_queues` | gauge | `target` | Queues with work waiting (one per tenant with account queues on) |
 | `aquifer_backlog_jobs` | gauge | `target` | Jobs queued or in flight |
-| `aquifer_flow_rate_rps` | gauge | `target` | Rate Aquifer currently allows the target API: the active queues' rates after its pacing headers, summed and capped at the target's ceiling (configured `rps` or a pool's live capacity). An upper bound; queues with little work send less |
+| `aquifer_flow_rate_rps` | gauge | `target` | Rate Aquifer currently allows the target API: the active queues' rates after its pacing headers, summed and capped at the target's ceiling (configured `rps` or a pool's live capacity, never below the 0.5 rps floor; 0 for a pool with no live members). An upper bound; queues with little work send less |
 | `aquifer_fairness_jain` | gauge | `target` | [Jain's index](https://en.wikipedia.org/wiki/Fairness_measure) over queues with work waiting, by jobs each finished in about the last minute. `1` is perfectly even, `1/n` is one queue getting everything. Absent when nothing is waiting. |
 | `aquifer_node_info` | gauge | `node_id` | `1`, carrying the id sent as `X-Aqueduct-Node-Id` |
 | `aquifer_wal_sync_lag_seconds` | gauge | | Pebble's default flush only: how long accepted jobs may have gone without reaching disk. A crash loses them. Normally under about 0.15 |
