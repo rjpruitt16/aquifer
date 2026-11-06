@@ -558,7 +558,7 @@ func (w *URLWorker) Stats() metrics.TargetStats {
 	defer w.mu.Unlock()
 	stats := metrics.TargetStats{Target: w.domain, Queues: make([]metrics.QueueStat, 0, len(w.queues))}
 	for key, q := range w.queues {
-		qs := metrics.QueueStat{Key: key, Backlog: q.Backlog(), RPS: q.RPS(), Served: q.Served()}
+		qs := metrics.QueueStat{Key: key, Backlog: q.Backlog(), RPS: q.RPS(), Served: q.Served(), InMemory: q.InMemory()}
 		if qs.Backlog > 0 {
 			stats.ActiveQueues++
 			stats.Backlog += qs.Backlog
