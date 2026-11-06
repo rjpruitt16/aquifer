@@ -82,9 +82,9 @@ func TestPoolBackedJobDispatchesToRegisteredMember(t *testing.T) {
 // pool stays queued until a member registers, which is the restart-safe
 // behavior for durable pool-backed work.
 func TestPoolBackedJobWaitsForMembers(t *testing.T) {
-	oldSleep := dispatch.PoolEmptySleepFunc.Load()
-	dispatch.PoolEmptySleepFunc.Store(func(time.Duration) { time.Sleep(10 * time.Millisecond) })
-	t.Cleanup(func() { dispatch.PoolEmptySleepFunc.Store(oldSleep) })
+	old := dispatch.PoolEmptyRetryInterval.Load()
+	dispatch.PoolEmptyRetryInterval.Store(int64(10 * time.Millisecond))
+	t.Cleanup(func() { dispatch.PoolEmptyRetryInterval.Store(old) })
 
 	var memberHits atomic.Int64
 	member := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

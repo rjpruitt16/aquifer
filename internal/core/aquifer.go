@@ -370,12 +370,14 @@ func (a *Aquifer) GetJobResult(userID, idempotentKey, scope string) (JobResult, 
 }
 
 func (a *Aquifer) SubscribeJob(id string) (*Job, <-chan SSEEvent, func(), error) {
+	// Subscribe before reading the job: a job that finishes in between then
+	// either shows as finished below or delivers its final event here.
+	events, unsubscribe := a.broker.Subscribe(id)
 	job, err := a.GetJob(id)
 	if err != nil {
+		unsubscribe()
 		return nil, nil, nil, err
 	}
-
-	events, unsubscribe := a.broker.Subscribe(id)
 	return job, events, unsubscribe, nil
 }
 
