@@ -4,6 +4,8 @@
 package dispatch
 
 import (
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -22,5 +24,24 @@ func TestTargetHealthResetsOnAnyAnswer(t *testing.T) {
 	h.answered()
 	if h.failingFor(now.Add(11*time.Second)) != 0 {
 		t.Fatal("one answer means the target is up again")
+	}
+}
+
+func TestOnlyTargetFailuresCountAgainstTargetHealth(t *testing.T) {
+	w := &URLWorker{}
+	w.ReportAnswer(0, localRequestError{errors.New(`net/http: invalid method "BAD METHOD"`)})
+	if w.health.failingFor(time.Now()) != 0 {
+		t.Fatal("a request that couldn't be built counted against the target")
+	}
+	w.ReportAnswer(503, nil)
+	if w.health.failingFor(time.Now().Add(time.Second)) == 0 {
+		t.Fatal("a 503 should count as the target failing")
+	}
+	w.ReportAnswer(200, nil)
+	if w.health.failingFor(time.Now()) != 0 {
+		t.Fatal("a direct success should mark the target up")
+	}
+	if !IsLocalRequestError(fmt.Errorf("wrapped: %w", localRequestError{errors.New("x")})) {
+		t.Fatal("a wrapped local error is still local")
 	}
 }

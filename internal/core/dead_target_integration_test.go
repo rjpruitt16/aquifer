@@ -93,6 +93,7 @@ func TestDeadTargetKeepsJobsWaitingByDefault(t *testing.T) {
 	if testing.Short() {
 		t.Skip("timing test; skipped with -short")
 	}
+	t.Setenv("AQUIFER_DEAD_TARGET_FAIL_AFTER_SECONDS", "") // the default, even if the environment sets it
 	if got := deadTargetRun(t, 4*time.Second); len(got) != 0 {
 		t.Fatalf("with the setting off, retry-until-done jobs must keep waiting; got webhooks %v", got)
 	}

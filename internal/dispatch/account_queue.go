@@ -32,12 +32,15 @@ const (
 )
 
 var RetrySleepFunc atomic.Value
-var PoolEmptySleepFunc atomic.Value
+
+// PoolEmptyRetryInterval (ns) is how long a queue waits before looking for a
+// pool member again while its pool is empty. Tests shorten it.
+var PoolEmptyRetryInterval atomic.Int64
 
 func init() {
 	RetryBackoffFunc.Store(defaultRetryBackoff)
 	RetrySleepFunc.Store(time.Sleep)
-	PoolEmptySleepFunc.Store(time.Sleep)
+	PoolEmptyRetryInterval.Store(int64(noPoolMembersRetryInterval))
 }
 
 func sleepBeforeRetry(d time.Duration) {
@@ -59,10 +62,6 @@ func SleepBeforeRetryContext(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-func sleepWhilePoolEmpty(d time.Duration) {
-	PoolEmptySleepFunc.Load().(func(time.Duration))(d)
-}
-
 type jobDoneMsg struct {
 	userID        string
 	job           *jobs.Job
@@ -76,6 +75,9 @@ type jobDoneMsg struct {
 	failed bool
 	// reached marks an answer that isn't a retryable failure: the target is up.
 	reached bool
+	// local marks a failure before anything was sent (the request couldn't be
+	// built); it says nothing about the target.
+	local   bool
 	retry   *jobs.Job
 	retryAt time.Time
 	// retryReason is why the attempt before the retry failed.
@@ -217,7 +219,7 @@ func (q *AccountQueue) Throttle(rps float64) {
 }
 
 func NewAccountQueue(key, upstream string, rps float64, maxConc int, pool *Pool, store storage.Store, broker *Broker, l8 *l8.Registry, metrics MetricsAdapter, enqueueWebhook WebhookEnqueuer, resultRecorder storage.ResultRecorder, workerActiveQueues, workerBacklog *atomic.Int64, onJobDone func(*jobs.Job), onIdle func(string), slowStart bool, onSlowStartSignal func(bool), onMaxBacklogSignal func(int64)) *AccountQueue {
-	return newAccountQueue(key, upstream, rps, maxConc, pool, store, broker, l8, metrics, enqueueWebhook, resultRecorder, workerActiveQueues, workerBacklog, onJobDone, onIdle, slowStart, onSlowStartSignal, onMaxBacklogSignal, nil, nil)
+	return newAccountQueue(key, upstream, rps, maxConc, pool, store, broker, l8, metrics, enqueueWebhook, resultRecorder, workerActiveQueues, workerBacklog, onJobDone, onIdle, slowStart, onSlowStartSignal, onMaxBacklogSignal, nil, &targetHealth{})
 }
 
 // newAccountQueue is NewAccountQueue plus the target's shared pace, which a
@@ -428,9 +430,16 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 					// restart before members have had a chance to
 					// heartbeat back in. Keep queued work durable here
 					// instead of converting recoverable absence into a
-					// permanent job failure.
-					sleepWhilePoolEmpty(noPoolMembersRetryInterval)
-					continue
+					// permanent job failure. Wait on the dispatch timer, not
+					// inline: the loop keeps reading new jobs, completions
+					// and its sweeps while the pool is empty.
+					dispatchTimer.Stop()
+					select {
+					case <-dispatchTimer.C:
+					default:
+					}
+					dispatchTimer.Reset(time.Duration(PoolEmptyRetryInterval.Load()))
+					break
 				}
 			}
 
@@ -505,7 +514,7 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 				}
 			}
 			if q.health != nil {
-				if msg.failed {
+				if msg.failed && !msg.local {
 					q.health.failed(time.Now())
 				} else if msg.reached {
 					q.health.answered()
@@ -766,6 +775,7 @@ func execute(ctx context.Context, job *jobs.Job, dispatchURL, upstream string, s
 		pool.RecordFailure(member.ID)
 	}
 	msg.failed = true
+	msg.local = IsLocalRequestError(err)
 
 	var header http.Header
 	if resp != nil {
@@ -917,6 +927,13 @@ func failExpiredJob(job *jobs.Job, lastReason, upstream string, store storage.St
 	case lastReason != "":
 		reason = "retry_window_exhausted: " + lastReason
 	}
+	failQueuedJob(job, reason, "expired", upstream, store, broker, metrics, enqueueWebhook, resultRecorder)
+}
+
+// failQueuedJob fails a job that is queued, not in flight: no attempt is
+// reported, and its webhook is handed off from its own goroutine, since it
+// may route back to the queue doing the failing.
+func failQueuedJob(job *jobs.Job, reason, outcome, upstream string, store storage.Store, broker *Broker, metrics MetricsAdapter, enqueueWebhook WebhookEnqueuer, resultRecorder storage.ResultRecorder) {
 	store.UpdateStatus(job.ID, jobs.StatusFailed)
 	SaveLocalResult(store, job, jobs.StatusFailed, 0, "", "")
 	resultKey := recordJobResult(job, resultRecorder, jobs.StatusFailed, 0, "", "")
@@ -924,7 +941,7 @@ func failExpiredJob(job *jobs.Job, lastReason, upstream string, store storage.St
 		"job_id": job.ID, "reason": reason,
 	}})
 	metrics.JobFailed(job.UserID, upstream, reason)
-	ObserveJobFinished(metrics, job, upstream, "expired", 0)
+	ObserveJobFinished(metrics, job, upstream, outcome, 0)
 	if !job.IsWebhookDelivery() && job.WebhookURL != "" {
 		payload := map[string]any{"job_id": job.ID, "status": "failed", "reason": reason}
 		if resultKey != "" {
@@ -997,7 +1014,7 @@ func MakeRequest(ctx context.Context, job *jobs.Job, dispatchURL string, totalJo
 		}
 		sealed, headers, err := l8.SealDelivery(dispatchURL, body, contentType)
 		if err != nil {
-			return nil, err
+			return nil, localRequestError{err}
 		}
 		body, l8Headers = sealed, headers
 	}
@@ -1009,7 +1026,7 @@ func MakeRequest(ctx context.Context, job *jobs.Job, dispatchURL string, totalJo
 
 	req, err := http.NewRequestWithContext(ctx, job.Method, dispatchURL, bodyReader)
 	if err != nil {
-		return nil, err
+		return nil, localRequestError{err}
 	}
 
 	for k, v := range job.Headers {

@@ -4,6 +4,7 @@
 package dispatch
 
 import (
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"time"
@@ -23,6 +24,33 @@ func deadTargetFailAfter() time.Duration {
 
 // deadTargetSweepEvery bounds how often a queue scans itself for such jobs.
 const deadTargetSweepEvery = 2 * time.Second
+
+// localRequestError is a failure before a request was sent: it couldn't be
+// built or sealed. It says nothing about whether the target is up.
+type localRequestError struct{ err error }
+
+func (e localRequestError) Error() string { return e.err.Error() }
+func (e localRequestError) Unwrap() error { return e.err }
+
+// IsLocalRequestError reports whether err came from building a request, not
+// from sending it.
+func IsLocalRequestError(err error) bool {
+	var local localRequestError
+	return errors.As(err, &local)
+}
+
+// ReportAnswer records a direct attempt's outcome (POST /proxy) in the
+// target's health, as a queued attempt's is: an answer that isn't a
+// retryable failure means it is up.
+func (w *URLWorker) ReportAnswer(status int, err error) {
+	switch {
+	case err != nil && IsLocalRequestError(err):
+	case err != nil || retryableStatus(status):
+		w.health.failed(time.Now())
+	default:
+		w.health.answered()
+	}
+}
 
 // targetHealth is how long a target has gone without a successful answer,
 // shared by every queue for it. Any answer that isn't a retryable failure
@@ -60,9 +88,13 @@ func (q *AccountQueue) failDeadTarget(queue []*jobs.Job, waiting []waitingJob, n
 	cutoff := now.Add(-limit).UnixMilli()
 	reason := fmt.Sprintf("target_unavailable: no successful response for %ds", int(q.health.failingFor(now).Seconds()))
 
+	// Like an expired job: nothing is sent, the webhook goes from its own
+	// goroutine (it may route back to this queue's buffer), and it counts as
+	// served.
 	fail := func(job *jobs.Job) {
 		q.releaseBacklog()
-		failJob(job, q.upstream, reason, 0, nil, q.store, q.broker, q.metrics, q.enqueueWebhook, q.resultRecorder)
+		q.served.Add(1)
+		failQueuedJob(job, reason, "failed", q.upstream, q.store, q.broker, q.metrics, q.enqueueWebhook, q.resultRecorder)
 		if q.onJobDone != nil {
 			q.onJobDone(job)
 		}
