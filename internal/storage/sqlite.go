@@ -147,7 +147,7 @@ func (s *SQLite) migrate() {
 func (s *SQLite) CheckOrInsert(job *jobs.Job) (string, bool) {
 	hashed := job.IdempotencyHash()
 	headers, _ := json.Marshal(job.Headers)
-	expiresAt := time.Now().Add(ttlQueued).UnixMilli()
+	expiresAt := job.PendingExpiresAt(time.Now())
 
 	res, err := s.db.Exec(`
 		INSERT OR IGNORE INTO jobs
@@ -233,8 +233,14 @@ func (s *SQLite) RecoverQueued(queueKey string) []*jobs.Job {
 }
 
 func (s *SQLite) UpdateStatus(jobID string, status jobs.Status) {
-	expiresAt := time.Now().Add(ttlForStatus(status)).UnixMilli()
-	s.db.Exec(`UPDATE jobs SET status = ?, expires_at = ? WHERE id = ?`, string(status), expiresAt, jobID)
+	now := time.Now()
+	if status == jobs.StatusCompleted || status == jobs.StatusFailed {
+		s.db.Exec(`UPDATE jobs SET status = ?, expires_at = ? WHERE id = ?`, string(status), now.Add(ttlForStatus(status)).UnixMilli(), jobID)
+	} else {
+		// Same rule as Job.PendingExpiresAt, from the row's own columns.
+		s.db.Exec(`UPDATE jobs SET status = ?, expires_at = MAX(?, CASE WHEN execute_before > 0 THEN execute_before ELSE created_at + ? END) + ? WHERE id = ?`,
+			string(status), now.Add(ttlQueued).UnixMilli(), ttlQueued.Milliseconds(), jobs.PendingRowGrace.Milliseconds(), jobID)
+	}
 	if (status == jobs.StatusCompleted || status == jobs.StatusFailed) && !s.skipDrainEvents.Load() {
 		s.recordDrainEvent(jobID, status)
 	}
@@ -412,6 +418,14 @@ func scanJob(s scanner) *jobs.Job {
 	}
 	json.Unmarshal([]byte(headersJSON), &j.Headers)
 	return &j
+}
+
+// expiresAtFor is when a row of job in status may be deleted.
+func expiresAtFor(job *jobs.Job, status jobs.Status, now time.Time) int64 {
+	if status == jobs.StatusCompleted || status == jobs.StatusFailed {
+		return now.Add(ttlForStatus(status)).UnixMilli()
+	}
+	return job.PendingExpiresAt(now)
 }
 
 func ttlForStatus(s jobs.Status) time.Duration {

@@ -103,6 +103,14 @@ func TestTargetRPSCeilingHoldsAcrossTenantQueues(t *testing.T) {
 		t.Fatalf("target received only %.1f requests/s; the ceiling should still be usable", delivered)
 	}
 
+	// The flow-rate gauge reports what the target is allowed, so it must not
+	// read above the ceiling either (issue #145).
+	for _, ts := range app.registry.TargetStats() {
+		if ts.Target == "http://"+host && ts.FlowRate > ceiling {
+			t.Fatalf("aquifer_flow_rate_rps for the target = %.1f, above the %.0f rps ceiling", ts.FlowRate, ceiling)
+		}
+	}
+
 	// The shared ceiling must not let one tenant take the slots: with equal
 	// backlogs each of the three should get a fair part of the window.
 	mu.Lock()
