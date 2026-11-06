@@ -253,6 +253,7 @@ func (q *AccountQueue) sweepSpilled(now time.Time) {
 					src.consumed++
 				}
 				q.releaseBacklog()
+				q.markServed()
 				failExpiredJob(job, "", q.upstream, q.store, q.broker, q.metrics, q.enqueueWebhook, q.resultRecorder)
 				if q.onJobDone != nil {
 					q.onJobDone(job)

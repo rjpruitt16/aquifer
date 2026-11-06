@@ -57,6 +57,9 @@ func (w *URLWorker) ReportAnswer(status int, err error) {
 // (a 2xx, or a 4xx that won't be retried) counts as the target being up.
 type targetHealth struct {
 	failingSince atomic.Int64 // Unix ms of the first failure since the last answer; 0 when up
+	// served counts jobs that left any of the target's queues for good. It
+	// outlives the queues, so a retiring queue doesn't take its count along.
+	served atomic.Int64
 }
 
 func (h *targetHealth) answered() { h.failingSince.Store(0) }
@@ -94,7 +97,7 @@ func (q *AccountQueue) failDeadTarget(queue []*jobs.Job, waiting []waitingJob, n
 	fail := func(job *jobs.Job) {
 		q.drop(job)
 		q.releaseBacklog()
-		q.served.Add(1)
+		q.markServed()
 		failQueuedJob(job, reason, "failed", q.upstream, q.store, q.broker, q.metrics, q.enqueueWebhook, q.resultRecorder)
 		if q.onJobDone != nil {
 			q.onJobDone(job)
