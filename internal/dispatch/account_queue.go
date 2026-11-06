@@ -114,7 +114,7 @@ type AccountQueue struct {
 	// for the fairness gauge on /metrics.
 	served  atomic.Int64
 	backlog atomic.Int64 // accepted queued + in-flight work
-	// nextDeadline is the earliest execute_before (Unix ms) among queued
+	// nextDeadline is the earliest QueueDeadline (Unix ms) among queued
 	// jobs, or 0 when none has one. Owned by the run goroutine. It lets
 	// dropExpiredJobs skip its scan of the whole queue, which otherwise ran
 	// on every loop pass and grew quadratically once a backlog built up.
@@ -382,7 +382,7 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 		}
 
 		for len(queue) > 0 && inFlight < maxConc {
-			if queue[0].ExecutionExpired(time.Now()) {
+			if queue[0].QueueExpired(time.Now()) {
 				queue = q.dropExpiredJobs(queue)
 				continue
 			}
@@ -473,9 +473,7 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 		select {
 		case job := <-q.cmds:
 			queue = append(queue, job)
-			if job.ExecuteBefore > 0 && (q.nextDeadline == 0 || job.ExecuteBefore < q.nextDeadline) {
-				q.nextDeadline = job.ExecuteBefore
-			}
+			q.trackDeadline(job)
 			q.metrics.QueueDepth(q.upstream, len(queue))
 			idle.Reset(idleTimeout)
 
@@ -563,9 +561,7 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 				queue = append(queue, w.job)
 				// Retried jobs re-enter here, not through q.cmds, so their
 				// deadlines must be tracked here too.
-				if w.job.ExecuteBefore > 0 && (q.nextDeadline == 0 || w.job.ExecuteBefore < q.nextDeadline) {
-					q.nextDeadline = w.job.ExecuteBefore
-				}
+				q.trackDeadline(w.job)
 			}
 			waiting = kept
 			resetRetryTimer(retryTimer, waiting)
@@ -615,7 +611,7 @@ func (q *AccountQueue) dropExpiredWaiting(waiting []waitingJob) []waitingJob {
 	now := time.Now()
 	kept := waiting[:0]
 	for _, w := range waiting {
-		if !w.job.ExecutionExpired(now) {
+		if !w.job.QueueExpired(now) {
 			kept = append(kept, w)
 			continue
 		}
@@ -626,6 +622,13 @@ func (q *AccountQueue) dropExpiredWaiting(waiting []waitingJob) []waitingJob {
 		}
 	}
 	return kept
+}
+
+// trackDeadline keeps nextDeadline at the earliest QueueDeadline in the queue.
+func (q *AccountQueue) trackDeadline(job *jobs.Job) {
+	if d := job.QueueDeadline(); d > 0 && (q.nextDeadline == 0 || d < q.nextDeadline) {
+		q.nextDeadline = d
+	}
 }
 
 func (q *AccountQueue) dropExpiredJobs(queue []*jobs.Job) []*jobs.Job {
@@ -640,11 +643,9 @@ func (q *AccountQueue) dropExpiredJobs(queue []*jobs.Job) []*jobs.Job {
 	q.nextDeadline = 0
 	kept := queue[:0]
 	for _, job := range queue {
-		if !job.ExecutionExpired(now) {
+		if !job.QueueExpired(now) {
 			kept = append(kept, job)
-			if job.ExecuteBefore > 0 && (q.nextDeadline == 0 || job.ExecuteBefore < q.nextDeadline) {
-				q.nextDeadline = job.ExecuteBefore
-			}
+			q.trackDeadline(job)
 			continue
 		}
 		q.releaseBacklog()
@@ -879,7 +880,11 @@ func defaultRetryBackoff(attempts int) time.Duration {
 }
 
 func failExpiredJob(job *jobs.Job, upstream string, store storage.Store, broker *Broker, metrics MetricsAdapter, enqueueWebhook WebhookEnqueuer, resultRecorder storage.ResultRecorder) {
-	const reason = "execution_deadline_exceeded"
+	// The caller's own deadline, or the queued-job TTL for a job without one.
+	reason := "queued_ttl_exceeded"
+	if job.ExecutionExpired(time.Now()) {
+		reason = "execution_deadline_exceeded"
+	}
 	store.UpdateStatus(job.ID, jobs.StatusFailed)
 	SaveLocalResult(store, job, jobs.StatusFailed, 0, "", "")
 	resultKey := recordJobResult(job, resultRecorder, jobs.StatusFailed, 0, "", "")

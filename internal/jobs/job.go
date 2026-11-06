@@ -326,3 +326,41 @@ func HashKey(key string) string {
 // QueuedTTL is how long an unfinished job is kept, which also bounds how
 // long its retries can run.
 const QueuedTTL = 24 * time.Hour
+
+// PendingRowGrace is how much longer a stored row of a pending job outlives
+// the job's QueueDeadline, so the queue always fails the job (and sends its
+// webhook) before store cleanup can delete the row.
+const PendingRowGrace = 15 * time.Minute
+
+// QueueDeadline is when a still-queued job gives up, in Unix ms: its
+// execute_before if set, otherwise QueuedTTL after it was created. 0 when
+// neither is known. Before, a job without execute_before waited until store
+// cleanup deleted it at the TTL, with no webhook.
+func (j *Job) QueueDeadline() int64 {
+	switch {
+	case j == nil:
+		return 0
+	case j.ExecuteBefore > 0:
+		return j.ExecuteBefore
+	case j.CreatedAt > 0:
+		return j.CreatedAt + QueuedTTL.Milliseconds()
+	}
+	return 0
+}
+
+// QueueExpired reports whether a still-queued job's QueueDeadline has passed.
+func (j *Job) QueueExpired(now time.Time) bool {
+	d := j.QueueDeadline()
+	return d > 0 && now.UnixMilli() >= d
+}
+
+// PendingExpiresAt is when a stored row of this job may be deleted while the
+// job is still pending: QueuedTTL from now, or the job's own QueueDeadline if
+// later, plus PendingRowGrace either way.
+func (j *Job) PendingExpiresAt(now time.Time) int64 {
+	exp := now.Add(QueuedTTL).UnixMilli()
+	if d := j.QueueDeadline(); d > exp {
+		exp = d
+	}
+	return exp + PendingRowGrace.Milliseconds()
+}
