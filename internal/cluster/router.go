@@ -6,6 +6,7 @@ package cluster
 import (
 	"context"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"sort"
@@ -491,6 +492,106 @@ func (r *Router) syncState() {
 	updated[r.self.ID] = self
 	r.members = updated
 	r.mu.Unlock()
+
+	r.rebalance()
+}
+
+// rebalanceRatio is how far above the cluster's fair share of active users a
+// node may get before it hands users back to their preferred nodes.
+const rebalanceRatio = 1.5
+
+// rebalance hands users back to their rendezvous-preferred node when this
+// node holds more than rebalanceRatio times its fair share. An assignment is
+// renewed on every request, so after a node failure or drain, users that
+// moved stayed on the node they moved to as long as their traffic was steady
+// (issue #86: one node owned 50 users while two others had 18 and 21).
+//
+// Only users with no local work are released, so a handoff can't run a job
+// twice; their next request is assigned afresh and the assignment script
+// tries the preferred node first. The script is shared with Canalis, so this
+// stays out of it and reuses the same Release an idle user gets.
+func (r *Router) rebalance() {
+	now := time.Now()
+	r.mu.Lock()
+	active, total := 0, 0
+	for _, member := range r.members {
+		if member.State == string(StateDraining) || member.State == string(StateOffline) {
+			continue
+		}
+		active++
+		total += member.ActiveUsers
+	}
+	mine := r.activeScopeCountLocked(now)
+	draining := r.nodeState == string(StateDraining) || r.nodeState == string(StateOffline)
+	var idle []string
+	for key, activity := range r.localScopes {
+		if activity.outstanding == 0 {
+			idle = append(idle, key)
+		}
+	}
+	r.mu.Unlock()
+
+	if draining || active < 2 || total == 0 {
+		return
+	}
+	fair := float64(total) / float64(active)
+	if float64(mine) <= rebalanceRatio*fair {
+		return
+	}
+	excess := mine - int(math.Ceil(fair))
+	// Users handed to each node this pass, so one under-loaded node isn't
+	// sent more than its fair share at once.
+	handed := map[string]int{}
+	sort.Strings(idle)
+	released := 0
+	for _, key := range idle {
+		if excess <= 0 {
+			break
+		}
+		ranked := r.rankedOwners(key, nil)
+		if len(ranked) == 0 || ranked[0].ID == r.self.ID {
+			continue
+		}
+		preferred := ranked[0]
+		capacity := preferred.Capacity
+		if capacity <= 0 {
+			capacity = defaultClusterMaxActiveUsers
+		}
+		load := preferred.ActiveUsers + handed[preferred.ID]
+		if float64(load) >= fair || load >= capacity {
+			continue
+		}
+
+		scopeLock := r.scopeLock(key)
+		scopeLock.Lock()
+		r.mu.Lock()
+		activity := r.localScopes[key]
+		stillIdle := activity != nil && activity.outstanding == 0
+		r.mu.Unlock()
+		if !stillIdle {
+			scopeLock.Unlock()
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
+		err := r.stateStore.Release(ctx, key, r.self.ID)
+		cancel()
+		if err != nil {
+			r.storeErrors.Add(1)
+			scopeLock.Unlock()
+			continue
+		}
+		r.mu.Lock()
+		delete(r.localScopes, key)
+		r.mu.Unlock()
+		scopeLock.Unlock()
+
+		handed[preferred.ID]++
+		excess--
+		released++
+	}
+	if released > 0 {
+		log.Printf("cluster: handed %d users back to their preferred nodes (this node had %d active, fair share %.1f)", released, mine, fair)
+	}
 }
 
 func (r *Router) publishHeartbeat(now time.Time) Member {
