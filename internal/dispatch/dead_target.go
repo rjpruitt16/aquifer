@@ -92,6 +92,7 @@ func (q *AccountQueue) failDeadTarget(queue []*jobs.Job, waiting []waitingJob, n
 	// goroutine (it may route back to this queue's buffer), and it counts as
 	// served.
 	fail := func(job *jobs.Job) {
+		q.drop(job)
 		q.releaseBacklog()
 		q.served.Add(1)
 		failQueuedJob(job, reason, "failed", q.upstream, q.store, q.broker, q.metrics, q.enqueueWebhook, q.resultRecorder)

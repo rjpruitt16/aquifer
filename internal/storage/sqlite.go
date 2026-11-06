@@ -285,29 +285,29 @@ func (s *SQLite) GetJob(jobID string) *jobs.Job {
 	return scanJob(row)
 }
 
-func (s *SQLite) PendingQueueKeys() map[string]int {
+func (s *SQLite) PendingQueueKeys() (map[string]int, error) {
 	rows, err := s.db.Query(`
 		SELECT queue_key, COUNT(*) FROM jobs
 		WHERE status IN ('queued', 'in_flight') AND expires_at > ?
 		GROUP BY queue_key
 	`, time.Now().UnixMilli())
 	if err != nil {
-		log.Printf("PendingQueueKeys: %v", err)
-		return nil
+		return nil, err
 	}
 	defer rows.Close()
 	counts := map[string]int{}
 	for rows.Next() {
 		var key string
 		var n int
-		if rows.Scan(&key, &n) == nil {
-			counts[key] = n
+		if err := rows.Scan(&key, &n); err != nil {
+			return nil, err
 		}
+		counts[key] = n
 	}
-	return counts
+	return counts, rows.Err()
 }
 
-func (s *SQLite) QueuedPage(queueKey string, after jobs.PageCursor, createdBefore int64, limit int) []*jobs.Job {
+func (s *SQLite) QueuedPage(queueKey string, after jobs.PageCursor, createdBefore int64, limit int) ([]*jobs.Job, error) {
 	if createdBefore <= 0 {
 		createdBefore = math.MaxInt64
 	}
@@ -315,13 +315,12 @@ func (s *SQLite) QueuedPage(queueKey string, after jobs.PageCursor, createdBefor
 		SELECT id, user_id, url, method, body, headers, webhook_url, webhook_delivery, status, created_at, execute_before, idempotent_key_hash, max_retries, attempts, webhook_max_retries
 		FROM jobs
 		WHERE queue_key = ? AND status IN ('queued', 'in_flight') AND expires_at > ?
-		  AND (created_at > ? OR (created_at = ? AND id > ?)) AND created_at < ?
+		  AND (created_at, id) > (?, ?) AND created_at < ?
 		ORDER BY created_at, id
 		LIMIT ?
-	`, queueKey, time.Now().UnixMilli(), after.CreatedAt, after.CreatedAt, after.ID, createdBefore, limit)
+	`, queueKey, time.Now().UnixMilli(), after.CreatedAt, after.ID, createdBefore, limit)
 	if err != nil {
-		log.Printf("QueuedPage: %v", err)
-		return nil
+		return nil, err
 	}
 	defer rows.Close()
 	var found []*jobs.Job
@@ -331,7 +330,7 @@ func (s *SQLite) QueuedPage(queueKey string, after jobs.PageCursor, createdBefor
 			found = append(found, j)
 		}
 	}
-	return found
+	return found, rows.Err()
 }
 
 func (s *SQLite) GetQueuedJobs() []*jobs.Job {

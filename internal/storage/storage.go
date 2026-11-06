@@ -40,11 +40,13 @@ type Store interface {
 	// PendingQueueKeys counts unfinished jobs by the queue key they were
 	// last handed to ("" for jobs never handed to a queue), without loading
 	// them, so restart recovery can load each queue a page at a time.
-	PendingQueueKeys() map[string]int
+	PendingQueueKeys() (map[string]int, error)
 	// QueuedPage returns up to limit of a queue's unfinished jobs after
 	// cursor, in (CreatedAt, ID) order, as queued. createdBefore, if
-	// non-zero, stops at jobs created at or after it.
-	QueuedPage(queueKey string, after jobs.PageCursor, createdBefore int64, limit int) []*jobs.Job
+	// non-zero, stops at jobs created at or after it. queueKey must not be
+	// "": jobs never handed to a queue are read with RecoverQueued. An error
+	// means the read failed, not that the queue is empty.
+	QueuedPage(queueKey string, after jobs.PageCursor, createdBefore int64, limit int) ([]*jobs.Job, error)
 
 	// ListIdempotentKeys and ClearIdempotentKeys back drain mode (see
 	// internal/dispatch/drain.go) -- an opt-in feature, off by default, so calling these on

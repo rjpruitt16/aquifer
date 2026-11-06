@@ -101,7 +101,9 @@ type AccountQueue struct {
 	spillPending   []spillSource
 	spillWake      chan struct{}
 	spills         []spillSource
-	recentLoads    map[string]time.Time
+	present        map[string]struct{}
+	pagedOwnUntil  time.Time
+	refillRetryAt  time.Time
 	lastSpillSweep time.Time
 	// health and deadAfter: see failDeadTarget. lastDeadSweep is owned by
 	// the run goroutine.
@@ -329,8 +331,7 @@ func (q *AccountQueue) supervise(rps float64, maxConc int, onIdle func(string), 
 			// dispatching, which at-least-once delivery already allows). They
 			// are still counted in its backlog.
 			log.Printf("[AccountQueue] %s: reloading its jobs from storage after a panic", q.key)
-			q.spills, q.recentLoads = nil, nil
-			q.attachSpill(q.storeKey(), jobs.PageCursor{}, 0)
+			q.reloadAfterPanic()
 			continue
 		}
 
@@ -400,7 +401,7 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 		queue = q.dropExpiredJobs(queue)
 		waiting = q.dropExpiredWaiting(waiting)
 		q.takeSpills()
-		queue = q.refill(queue, time.Now())
+		queue = q.refill(queue, len(queue)+len(waiting)+inFlight, time.Now())
 		queue, waiting = q.failDeadTarget(queue, waiting, time.Now())
 
 		// Pool-backed queues don't have a fixed configured ceiling — the
@@ -513,10 +514,11 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 
 		select {
 		case job := <-q.cmds:
-			if !q.acceptHandoff(job) {
+			if !q.acceptHandoff(job, time.Now()) {
 				idle.Reset(idleTimeout)
 				continue
 			}
+			q.hold(job)
 			queue = append(queue, job)
 			q.trackDeadline(job)
 			q.reportDepth(len(queue))
@@ -529,6 +531,7 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 					waiting = append(waiting, waitingJob{job: msg.retry, at: msg.retryAt, reason: msg.retryReason})
 					resetRetryTimer(retryTimer, waiting)
 				} else {
+					q.drop(msg.job)
 					q.releaseBacklog()
 					q.served.Add(1)
 					if q.onJobDone != nil && msg.job != nil {
@@ -674,6 +677,7 @@ func (q *AccountQueue) dropExpiredWaiting(waiting []waitingJob) []waitingJob {
 			continue
 		}
 		q.releaseBacklog()
+		q.drop(w.job)
 		failExpiredJob(w.job, w.reason, q.upstream, q.store, q.broker, q.metrics, q.enqueueWebhook, q.resultRecorder)
 		if q.onJobDone != nil {
 			q.onJobDone(w.job)
@@ -707,6 +711,7 @@ func (q *AccountQueue) dropExpiredJobs(queue []*jobs.Job) []*jobs.Job {
 			continue
 		}
 		q.releaseBacklog()
+		q.drop(job)
 		failExpiredJob(job, "", q.upstream, q.store, q.broker, q.metrics, q.enqueueWebhook, q.resultRecorder)
 		if q.onJobDone != nil {
 			q.onJobDone(job)

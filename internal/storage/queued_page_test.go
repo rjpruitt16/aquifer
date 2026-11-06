@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/cockroachdb/pebble"
+
 	"github.com/rjpruitt16/aquifer/internal/jobs"
 )
 
@@ -22,6 +24,24 @@ func eachStore(t *testing.T, fn func(t *testing.T, s Store)) {
 		defer s.Close()
 		fn(t, s)
 	})
+}
+
+func mustCounts(t *testing.T, s Store) map[string]int {
+	t.Helper()
+	counts, err := s.PendingQueueKeys()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return counts
+}
+
+func mustPage(t *testing.T, s Store, key string, after jobs.PageCursor, before int64, limit int) []*jobs.Job {
+	t.Helper()
+	page, err := s.QueuedPage(key, after, before, limit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return page
 }
 
 func pagedJob(s Store, key string, n int, createdAt int64) *jobs.Job {
@@ -43,7 +63,7 @@ func TestQueuedPagesReadAQueueInOrder(t *testing.T) {
 		never := jobs.New(&jobs.Request{UserID: "u", IdempotentKey: "never-handed", URL: "http://x", Method: "POST", WebhookURL: "http://w"})
 		s.CheckOrInsert(never)
 
-		counts := s.PendingQueueKeys()
+		counts := mustCounts(t, s)
 		if counts["http://x|alice"] != 25 || counts["http://x|bob"] != 25 || counts[""] != 1 {
 			t.Fatalf("PendingQueueKeys = %v", counts)
 		}
@@ -52,7 +72,7 @@ func TestQueuedPagesReadAQueueInOrder(t *testing.T) {
 		var got []*jobs.Job
 		cursor := jobs.PageCursor{}
 		for {
-			page := s.QueuedPage("http://x|alice", cursor, 0, 10)
+			page := mustPage(t, s, "http://x|alice", cursor, 0, 10)
 			got = append(got, page...)
 			if len(page) < 10 {
 				break
@@ -70,24 +90,24 @@ func TestQueuedPagesReadAQueueInOrder(t *testing.T) {
 
 		// A finished job leaves the queue's pages and its count.
 		s.UpdateStatus(mine[0].ID, jobs.StatusCompleted)
-		if page := s.QueuedPage("http://x|alice", jobs.PageCursor{}, 0, 1); len(page) != 1 || page[0].ID != mine[1].ID {
+		if page := mustPage(t, s, "http://x|alice", jobs.PageCursor{}, 0, 1); len(page) != 1 || page[0].ID != mine[1].ID {
 			t.Fatalf("after finishing the first job, the first page starts with %v", page)
 		}
-		if n := s.PendingQueueKeys()["http://x|alice"]; n != 24 {
+		if n := mustCounts(t, s)["http://x|alice"]; n != 24 {
 			t.Fatalf("count after one finished = %d, want 24", n)
 		}
 
 		// createdBefore stops before jobs created at or after it.
-		if page := s.QueuedPage("http://x|alice", jobs.PageCursor{}, base+5, 100); len(page) != 4 {
+		if page := mustPage(t, s, "http://x|alice", jobs.PageCursor{}, base+5, 100); len(page) != 4 {
 			t.Fatalf("jobs created before base+5 (minus the finished one) = %d, want 4", len(page))
 		}
 
 		// Moving a job to another queue moves it between pages.
 		s.SetQueueKey(mine[2].ID, "http://x|carol")
-		if page := s.QueuedPage("http://x|carol", jobs.PageCursor{}, 0, 10); len(page) != 1 || page[0].ID != mine[2].ID {
+		if page := mustPage(t, s, "http://x|carol", jobs.PageCursor{}, 0, 10); len(page) != 1 || page[0].ID != mine[2].ID {
 			t.Fatalf("carol's page = %v", page)
 		}
-		for _, job := range s.QueuedPage("http://x|alice", jobs.PageCursor{}, 0, 100) {
+		for _, job := range mustPage(t, s, "http://x|alice", jobs.PageCursor{}, 0, 100) {
 			if job.ID == mine[2].ID {
 				t.Fatal("a job moved to another queue still pages under its old key")
 			}
@@ -116,14 +136,43 @@ func TestPebbleBackfillsTheQueueIndex(t *testing.T) {
 		s.db.Delete(k, nil)
 	}
 	s.db.Delete(queueIndexMarker, nil)
-	if page := s.QueuedPage("http://x|old", jobs.PageCursor{}, 0, 10); len(page) != 0 {
+	if page := mustPage(t, s, "http://x|old", jobs.PageCursor{}, 0, 10); len(page) != 0 {
 		t.Fatalf("setup: index still present: %d", len(page))
 	}
 
-	if n := s.PendingQueueKeys()["http://x|old"]; n != 5 {
+	if n := mustCounts(t, s)["http://x|old"]; n != 5 {
 		t.Fatalf("count = %d, want 5", n)
 	}
-	if page := s.QueuedPage("http://x|old", jobs.PageCursor{}, 0, 10); len(page) != 5 {
+	if page := mustPage(t, s, "http://x|old", jobs.PageCursor{}, 0, 10); len(page) != 5 {
 		t.Fatalf("after backfill the queue pages %d jobs, want 5", len(page))
+	}
+}
+
+// A queue whose index starts with many stale entries still pages its live
+// jobs, and the stale entries are dropped as they're met.
+func TestPebblePageSkipsAndDropsAStalePrefix(t *testing.T) {
+	s := NewPebble(filepath.Join(t.TempDir(), "p"))
+	defer s.Close()
+	const base = int64(1_700_000_000_000)
+	for i := 0; i < 2_500; i++ {
+		job := pagedJob(s, "http://x|stale", i, base+int64(i))
+		s.UpdateStatus(job.ID, jobs.StatusCompleted)
+		// Leave its index entry behind, as a crash between writes would.
+		s.db.Set(queueIndexKey("http://x|stale", job.CreatedAt, job.ID), nil, nil)
+	}
+	live := pagedJob(s, "http://x|stale", 9_999, base+10_000)
+
+	page := mustPage(t, s, "http://x|stale", jobs.PageCursor{}, 0, 10)
+	if len(page) != 1 || page[0].ID != live.ID {
+		t.Fatalf("page = %d jobs, want only the live one", len(page))
+	}
+	iter, _ := s.db.NewIter(&pebble.IterOptions{LowerBound: []byte("qk:http://x|stale\x00"), UpperBound: []byte("qk:http://x|stale\x01")})
+	n := 0
+	for iter.First(); iter.Valid(); iter.Next() {
+		n++
+	}
+	iter.Close()
+	if n != 1 {
+		t.Fatalf("%d index entries left, want only the live job's", n)
 	}
 }

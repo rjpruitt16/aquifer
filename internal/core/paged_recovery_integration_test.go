@@ -49,11 +49,15 @@ func TestRestartRecoversABigBacklogAPageAtATime(t *testing.T) {
 		t.Skip("restarts Aquifer over a 1,200-job backlog; skipped with -short")
 	}
 	for _, backend := range []string{"sqlite", "pebble"} {
-		t.Run(backend, func(t *testing.T) { pagedRecoveryRun(t, backend) })
+		t.Run(backend, func(t *testing.T) { pagedRecoveryRun(t, backend, false) })
 	}
+	// The node switched from one shared queue per target to a queue per
+	// tenant while it was down: the stored key no longer matches where its
+	// jobs route, so they load the old way, each still exactly once.
+	t.Run("routing changed", func(t *testing.T) { pagedRecoveryRun(t, "pebble", true) })
 }
 
-func pagedRecoveryRun(t *testing.T, backend string) {
+func pagedRecoveryRun(t *testing.T, backend string, perTenantAfterRestart bool) {
 	const old, fresh, page = 1200, 50, 100
 	t.Setenv("AQUIFER_RECOVERY_PAGE_SIZE", fmt.Sprint(page))
 
@@ -97,7 +101,7 @@ func pagedRecoveryRun(t *testing.T, backend string) {
 		return app, registry, store, NewServer(app).Routes()
 	}
 	submit := func(routes http.Handler, key string) {
-		job := sampleJobRequest("tenant", key)
+		job := sampleJobRequest("tenant-"+key[len(key)-1:], key)
 		job.URL = target.URL + "/work/" + key
 		job.WebhookURL = ""
 		body, _ := json.Marshal(job)
@@ -109,6 +113,9 @@ func pagedRecoveryRun(t *testing.T, backend string) {
 	}
 
 	// First run: the target hangs, so everything stays queued, then stop.
+	if perTenantAfterRestart {
+		t.Setenv("AQUIFER_ACCOUNT_QUEUE", "off")
+	}
 	app1, _, _, routes1 := start()
 	for i := 0; i < old; i++ {
 		submit(routes1, fmt.Sprintf("old-%04d", i))
@@ -116,14 +123,19 @@ func pagedRecoveryRun(t *testing.T, backend string) {
 	app1.Close()
 
 	// Second run: recover, then let the target answer.
+	if perTenantAfterRestart {
+		t.Setenv("AQUIFER_ACCOUNT_QUEUE", "true")
+	}
 	app2, registry2, store2, routes2 := start()
 	t.Cleanup(app2.Close)
 	stopWatch := make(chan struct{})
 	defer close(stopWatch)
 	peak := watchInMemory(registry2, stopWatch)
-	(&Runtime{Aquifer: app2, Store: store2, Registry: registry2}).RecoverQueuedJobs(dbPath)
+	if err := (&Runtime{Aquifer: app2, Store: store2, Registry: registry2}).RecoverQueuedJobs(dbPath); err != nil {
+		t.Fatal(err)
+	}
 	time.Sleep(100 * time.Millisecond)
-	if got := peak.Load(); got > page*2 {
+	if got := peak.Load(); got > page*2 && !perTenantAfterRestart {
 		t.Fatalf("right after recovery a queue held %d jobs in memory; the page is %d", got, page)
 	}
 	for i := 0; i < fresh; i++ {
@@ -137,7 +149,9 @@ func pagedRecoveryRun(t *testing.T, backend string) {
 		return len(seen) == old+fresh
 	}) {
 		mu.Lock()
-		t.Fatalf("delivered %d distinct jobs, want %d", len(seen), old+fresh)
+		got := len(seen)
+		mu.Unlock()
+		t.Fatalf("delivered %d distinct jobs, want %d", got, old+fresh)
 	}
 	time.Sleep(200 * time.Millisecond) // let any duplicate arrive
 
@@ -148,19 +162,28 @@ func pagedRecoveryRun(t *testing.T, backend string) {
 			t.Fatalf("%s delivered %d times", key, n)
 		}
 	}
-	firstNew := -1
+	// Within each tenant, new jobs come after its recovered ones (tenants
+	// take turns, so across tenants they interleave). Up to 8 run at once,
+	// so allow that much overlap.
+	lastOld, firstNewAt, perTenant := map[string]int{}, map[string]int{}, map[string]int{}
+	firstNew := len(order)
 	for i, key := range order {
-		if strings.HasPrefix(key, "new-") {
-			firstNew = i
-			break
+		tenant := key[len(key)-1:]
+		at := perTenant[tenant] // position within this tenant's deliveries
+		perTenant[tenant]++
+		if strings.HasPrefix(key, "old-") {
+			lastOld[tenant] = at
+		} else if _, ok := firstNewAt[tenant]; !ok {
+			firstNewAt[tenant] = at
+			firstNew = min(firstNew, i)
 		}
 	}
-	// Up to 8 run at once and the first run's in-flight jobs are redone, so
-	// allow some overlap; new jobs mustn't jump the recovered backlog.
-	if firstNew < old-2*8 {
-		t.Fatalf("a new job was delivered at position %d, ahead of most of the %d recovered jobs", firstNew, old)
+	for tenant, at := range firstNewAt {
+		if at < lastOld[tenant]-8 && !perTenantAfterRestart {
+			t.Fatalf("tenant %s: a new job was delivered at %d, before its recovered job at %d", tenant, at, lastOld[tenant])
+		}
 	}
-	if got := peak.Load(); got > page*2 {
+	if got := peak.Load(); got > page*2 && !perTenantAfterRestart {
 		t.Fatalf("a queue held up to %d jobs in memory; with a page of %d it should stay near one page", got, page)
 	}
 	t.Logf("%s: %d jobs delivered once each; first new job at position %d; max in-memory queue %d", backend, len(seen), firstNew, peak.Load())
