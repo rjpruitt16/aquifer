@@ -235,21 +235,6 @@ func qLoad(activeQueues, backlog *atomic.Int64) (int, int64) {
 	return active, pending
 }
 
-// Throttle pushes an external rate adjustment into the queue's dispatch
-// loop, reusing the same jobDoneMsg channel that header-driven pacing
-// already uses — the loop doesn't need to know whether a lower rate came
-// from the target API's own response header or from the URLWorker capping
-// this queue's share of a shared aggregate budget, it's the same signal
-// either way.
-func (q *AccountQueue) Throttle(rps float64) {
-	select {
-	case q.done <- jobDoneMsg{rps: &rps}:
-	default:
-		// Queue's done channel is momentarily full (100-deep buffer) —
-		// skip this tick, the next aggregate-budget check will retry.
-	}
-}
-
 func NewAccountQueue(key, upstream string, rps float64, maxConc int, pool *Pool, store storage.Store, broker *Broker, l8 *l8.Registry, metrics MetricsAdapter, enqueueWebhook WebhookEnqueuer, resultRecorder storage.ResultRecorder, workerActiveQueues, workerBacklog *atomic.Int64, onJobDone func(*jobs.Job), onIdle func(string), slowStart bool, onSlowStartSignal func(bool), onMaxBacklogSignal func(int64)) *AccountQueue {
 	return newAccountQueue(key, upstream, rps, maxConc, pool, store, broker, l8, metrics, enqueueWebhook, resultRecorder, workerActiveQueues, workerBacklog, onJobDone, onIdle, slowStart, onSlowStartSignal, onMaxBacklogSignal, nil, &targetHealth{})
 }
@@ -405,6 +390,12 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 	dispatchTimer.Stop()
 	defer dispatchTimer.Stop()
 	q.currentRPS.Store(int64(rps * 100))
+	// advertised is the rate the target last asked this queue for. It is
+	// this queue's weight in the target's shared pace, so a target can give
+	// one tenant more of its total than another just by advertising it
+	// more, and it can raise the target's total (see sharedPace). Cleared by
+	// a failure.
+	advertised := 0.0
 
 	for {
 		queue = q.dropExpiredJobs(queue)
@@ -441,7 +432,14 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 				dispatchTimer.Reset(retry.Jitter(interval - elapsed))
 				break
 			}
-			if wait := q.shared.reserve(q, time.Now()); wait > 0 {
+			// The weight is the rate the target advertised to this queue
+			// while it holds; only with none is it the queue's own pace.
+			weight := rps
+			if advertised > 0 {
+				weight = advertised
+			}
+			wait, slot := q.shared.reserveSlot(q, weight, advertised, interval, time.Now())
+			if wait > 0 {
 				dispatchTimer.Stop()
 				select {
 				case <-dispatchTimer.C:
@@ -476,7 +474,7 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 			queue = queue[1:]
 			q.reportDepth(len(queue))
 			inFlight++
-			lastRequestAt = time.Now()
+			lastRequestAt = ownSlot(lastRequestAt, slot, interval)
 
 			q.metrics.JobDispatched(job.UserID, q.upstream)
 			observeJobWaited(q.metrics, job, q.upstream)
@@ -572,8 +570,12 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 					next = math.Min(next, *msg.rps)
 				}
 				rps = math.Max(next, MinRPS)
+				advertised = 0
 			case msg.rps != nil:
-				rps = math.Max(math.Min(*msg.rps, configuredRPS), MinRPS)
+				// Not capped by configuredRPS: the target's own number
+				// wins, and the shared pace holds the total.
+				rps = math.Max(*msg.rps, MinRPS)
+				advertised = *msg.rps
 			case rps < configuredRPS:
 				rps = math.Min(rps*1.05, configuredRPS)
 			}
@@ -899,12 +901,27 @@ func retryableStatus(code int) bool {
 	return code >= 500 || code == http.StatusTooManyRequests || code == http.StatusRequestTimeout
 }
 
+// ownSlot is when a queue's own pace counts its latest dispatch from: the
+// shared pace's slot, not now (see reserveSlot), but never earlier than one
+// own interval after the previous one. A slot carrying unused shared credit
+// would otherwise let a 1 rps queue under an idle 10 rps total dispatch
+// every 900 ms.
+func ownSlot(last, slot time.Time, interval time.Duration) time.Time {
+	if next := last.Add(interval); slot.Before(next) {
+		return next
+	}
+	return slot
+}
+
 func pacingSignals(header http.Header) jobDoneMsg {
 	msg := jobDoneMsg{}
 	if val := PacingHeader(header, "Rps"); val != "" {
 		var rps float64
 		fmt.Sscanf(val, "%f", &rps)
-		msg.rps = &rps
+		// A non-finite rate (Inf, NaN) is ignored, as if no header had come.
+		if !math.IsInf(rps, 0) && !math.IsNaN(rps) {
+			msg.rps = &rps
+		}
 	} else if rps := orca.Rps(header); rps != nil {
 		// No explicit Aqueduct directive on this response -- fall back to an
 		// ORCA endpoint-load-metrics header if the backend (e.g. vLLM with

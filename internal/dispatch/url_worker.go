@@ -181,7 +181,8 @@ func NewURLWorker(domain string, rps float64, maxConc int, pool *Pool, store sto
 	}
 	w.maxBacklog.Store(admission.MaxPendingPerUpstream())
 	w.shared = newSharedPace(w.budgetCeiling)
-	go w.enforceAggregateBudget()
+	w.shared.followAdvertised = w.pool == nil
+	go w.sampleLoop()
 	return w
 }
 
@@ -209,14 +210,12 @@ func (w *URLWorker) signalStop() {
 	})
 }
 
-// enforceAggregateBudget periodically checks whether the sum of every
-// active account queue's current rate exceeds this worker's actual
-// budget (static config, or live pool capacity), and if so, throttles
-// each queue proportionally. Without this, account-queue mode isolates
-// tenants from each other but doesn't bound them collectively — N
-// simultaneously active tenant queues could each independently believe
-// they own the full ceiling, multiplying real load on the target API by N.
-func (w *URLWorker) enforceAggregateBudget() {
+// sampleLoop samples each queue's drain rate every few seconds for memory
+// admission. The target's total rate is held by its shared pace, which
+// replaced the aggregate throttle that used to run here: that one scaled
+// every queue's own rate down alike, flattening the per-tenant rates the
+// target advertised.
+func (w *URLWorker) sampleLoop() {
 	defer close(w.done)
 
 	ticker := time.NewTicker(3 * time.Second)
@@ -224,49 +223,10 @@ func (w *URLWorker) enforceAggregateBudget() {
 	for {
 		select {
 		case now := <-ticker.C:
-			w.checkAndThrottle()
 			w.sampleDrain(now)
 		case <-w.stop:
 			return
 		}
-	}
-}
-
-// checkAndThrottle is the synchronous core of enforceAggregateBudget,
-// split out so it can be called directly and deterministically in tests
-// instead of waiting on the real ticker.
-func (w *URLWorker) checkAndThrottle() {
-	w.mu.Lock()
-	queues := make([]*AccountQueue, 0, len(w.queues))
-	for _, q := range w.queues {
-		if q.Active() {
-			queues = append(queues, q)
-		}
-	}
-	w.mu.Unlock()
-
-	if len(queues) < 2 {
-		// A single active queue (or none) can't exceed an aggregate
-		// budget by definition — nothing to throttle.
-		return
-	}
-
-	ceiling := w.budgetCeiling()
-	if ceiling <= 0 {
-		return
-	}
-
-	var total float64
-	for _, q := range queues {
-		total += q.RPS()
-	}
-	if total <= ceiling {
-		return
-	}
-
-	scale := ceiling / total
-	for _, q := range queues {
-		q.Throttle(math.Max(q.RPS()*scale, MinRPS))
 	}
 }
 
@@ -570,7 +530,7 @@ func (w *URLWorker) Stats() metrics.TargetStats {
 	// never allowed more than its ceiling, however many queues are active.
 	// Summing the queues' own rates read 126-210 for a target held to 70
 	// (issue #145).
-	switch ceiling := w.budgetCeiling(); {
+	switch ceiling := w.shared.total(time.Now()); {
 	case ceiling > 0:
 		stats.FlowRate = math.Min(stats.FlowRate, math.Max(ceiling, MinRPS))
 	case w.pool != nil:

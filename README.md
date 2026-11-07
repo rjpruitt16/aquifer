@@ -5,7 +5,7 @@
 A durable queue that paces traffic into a service at the rate it can take. Put it in front of your webhook handlers, a rate-limited third-party API, a GPU or your own backend: when a burst arrives faster than the target can handle, Aquifer holds the excess on disk instead of letting callers retry into it, and releases it at the rate you set for that target, slowing down whenever the target, or its load report, asks for less.
 
 - **Retry storm mitigation.** Callers wait in a durable queue instead of hammering a struggling service with retries, and the queue drains as capacity comes back.
-- **Fairness.** Every tenant gets its own queue and they take turns. When one tenant flooded the GPU, database, CI runners and sandbox the agents shared, the small tenants' p99 stayed at 106 s, against 308 s when every agent called them directly, where a third of their workflows failed outright. The flooding tenant waited longer instead.
+- **Fairness.** Every tenant gets its own queue and they take turns. When one tenant flooded the GPU, database, CI runners and sandbox the agents shared, the small tenants' p99 stayed at 106 s, against 308 s when every agent called them directly, where a third of their workflows failed outright. The flooding tenant waited longer instead. Turns are equal by default, but the target can make them as unfair as it needs, live, by advertising a higher rate to one tenant: an emergency can take nearly all of a target's capacity for as long as it lasts ([dynamic priority](docs/pages/pacing.md#dynamic-priority)).
 - **Delivery however the caller wants it:** results on the same connection (synchronous) or by durable webhook, and WebSocket sessions proxied with a transcript that replays anything missed after a reconnect.
 
 ![Traditional load balancing collapsing under a spike, round-robin flickering faster as instances die, versus Aquifer pacing that keeps the fleet stable while an autoscaler brings real capacity online](docs/images/fleet-degradation.gif)
@@ -53,7 +53,7 @@ EOF
 CONFIG_PATH=aquifer.yml aquifer
 ```
 
-`rps` caps the host's total; `max_concurrent` is per tenant, so N busy tenants can have N × 2 in flight. Hosts without an entry get 2 requests a second, one at a time per tenant. The target can lower its rate live with `X-Aquifer-Rps` and `X-Aquifer-Max-Concurrent` response headers.
+`rps` caps the host's total until the target advertises its own; `max_concurrent` is per tenant, so N busy tenants can have N × 2 in flight. Hosts without an entry get 2 requests a second, one at a time per tenant. The target can change its rate live with `X-Aquifer-Rps` and `X-Aquifer-Max-Concurrent` response headers.
 
 Send it a job and watch it go through the line:
 
