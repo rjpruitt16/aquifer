@@ -19,10 +19,6 @@ Aquifer reads both namespaces, preferring `X-Aqueduct-*` when both are present.
 
 By default each `(user_id, api_key)` pair gets its own independently paced queue at every target API, so one tenant's burst, or one tenant's broken endpoint retrying, can't slow down another: a failed attempt gives its concurrency slot back and waits out its backoff in that tenant's own queue.
 
-**The target sets its total and each tenant's share.** A target's queues together never go past its total: the highest `X-Aqueduct-Rps` it is currently advertising to any active tenant (one that dispatched in the last 3 seconds), or, if it advertises nothing, its configured rate. The configured rate is only a starting point, so a backend can run faster or slower than it on headers alone. A backend that stamps one number on every response gets that number in total, not per tenant. A pool's total is its live capacity, which its members advertise.
-
-When several tenants are backlogged, the total is split in proportion to the rate the target last sent each tenant's queue, so the target decides priority at runtime with no configuration and can change it on every response: advertise `600` to one tenant, `60` to a second and `6` to a third, and the total is 600/s, split 90%, 9% and 1%. An emergency tenant advertised `1000` next to ten tenants at `10` raises the total to 1000/s and takes 1000/1100 of it until the target stops advertising it. Tenants with equal rates, or that were sent none, take equal turns. A tenant that asks for less than its share keeps its own pace, and the rest goes to the others.
-
 Who decides, in order:
 
 1. **The target API.** Answering with `X-Aqueduct-Account-Queue: disabled` (or `false`) puts everyone sending to it in one shared queue, for example an API that needs one global order. `enabled` (or `true`) gives everyone their own. Aquifer remembers the choice per target API.
@@ -42,3 +38,21 @@ Use the pacing headers for intentional backpressure. A `5xx` response is treated
 **ORCA fallback for backends that can't speak Aqueduct directly.** Some backends already report load in a different, real open standard: ORCA (Open Request Cost Aggregation), the gRPC/Envoy ecosystem's convention for backends to report utilization. Aquifer sends `endpoint-load-metrics-format: text` on every dispatch (the request-side opt-in both verified backends require; there's no server startup flag for this), and a backend that understands it replies with an `endpoint-load-metrics` header carrying a KV-cache utilization fraction. If a response carries no `X-Aqueduct-Rps`/`X-Aquifer-Rps`, Aquifer reads this header as a fallback and paces down as utilization rises: full configured rate below 70%, 2 RPS at 70-90%, 0.5 RPS at 90-97%, 0.25 RPS above that, never dropping to zero, same pacing-down-gracefully philosophy as everywhere else. An explicit `X-Aqueduct-Rps` always wins if present; this only fires when the backend hasn't opted into speaking Aqueduct's own headers.
 
 Two backends verified directly against their own source, not assumed: **vLLM** (`vllm/entrypoints/serve/utils/orca_metrics.py`, metric name `kv_cache_usage_perc`, case-insensitive opt-in) and **Triton/TensorRT-LLM** (`src/orca_http.cc`, metric name `kv_cache_utilization`, case-sensitive lowercase-only opt-in; Aquifer sends lowercase specifically so both work). Aquifer tries both known metric names, so whichever backend you're running, this works without any configuration.
+
+## Dynamic priority
+
+Most queues that support priority read it from a static file: a tier per customer, or a list of user IDs that go first. That works until the important user changes faster than someone can edit the file. Aquifer has no priority setting. Every tenant takes equal turns until the target says otherwise, and the target says otherwise on any response, with the same `X-Aqueduct-Rps` header it already uses to set its pace.
+
+**The target sets its total.** A target's queues together never go past the highest `X-Aqueduct-Rps` it is currently advertising to any active tenant (one that dispatched in the last 3 seconds). The configured rate applies only while it advertises nothing, so a backend can run faster or slower than its config on headers alone. A backend that stamps one number on every response gets that number in total, not per tenant. A pool's total is its live capacity, which its members advertise.
+
+**It sets each tenant's share the same way.** When several tenants are backlogged, the total is split in proportion to the rate the target last sent each one. Advertise `600` to one tenant, `60` to a second and `6` to a third, and the total is 600/s, split 90%, 9% and 1%. Tenants with equal rates, or that were sent none, take equal turns. A tenant that asks for less than its share keeps its own pace, and the rest goes to the others.
+
+**That allows deliberately unfair processing when it matters.** Fair turns are the right default, but some moments aren't fair:
+
+- A flood warning goes out and one county's alert jobs have to reach phones before anything else does.
+- A security team is responding to a breach, and its log queries and key rotations can't wait behind routine scans.
+- A hospital's monitoring alerts arrive during a surge, and a patient's alert can't sit behind billing exports.
+
+In each case the backend already knows which tenant is in trouble, often before any human does. It advertises that tenant a much higher rate, say `1000` next to `10` for each of ten others, and from the next response on that tenant gets 1000/1100 of the target, about 91%, while everyone else slows down but keeps moving. When the emergency ends, the backend stops advertising the high rate, and within 3 seconds the total and the turns are back to normal. Nothing was configured, and nobody had to deploy anything.
+
+The rate a client submits never counts: only the target's responses can set pace or priority, so a tenant can't make itself the emergency.
