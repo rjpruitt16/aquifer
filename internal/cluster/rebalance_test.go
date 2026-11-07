@@ -4,9 +4,11 @@
 package cluster
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"testing"
+	"time"
 )
 
 // overloadedRouter makes node-a own n active users (all idle between jobs)
@@ -29,6 +31,7 @@ func overloadedRouter(t *testing.T, n, bUsers, cUsers int) (*Router, *fakeCluste
 	store.mu.Lock()
 	store.assignOverride = nil
 	store.mu.Unlock()
+	router.rebalanceGrace = 0 // these users count as unseen for long enough
 	return router, store
 }
 
@@ -38,13 +41,17 @@ func TestOverloadedNodeHandsIdleUsersBackToTheirPreferredNode(t *testing.T) {
 	router.TrackLocalJob("user-0")
 
 	router.syncState()
+	store.mu.Lock()
+	first := len(store.released)
+	store.mu.Unlock()
+	if first == 0 || first > rebalanceMaxPerPass {
+		t.Fatalf("first pass handed back %d users, want 1 to %d", first, rebalanceMaxPerPass)
+	}
+	router.syncState()
 
 	store.mu.Lock()
 	released := append([]string(nil), store.released...)
 	store.mu.Unlock()
-	if len(released) == 0 {
-		t.Fatal("a node with all 30 users of a 3-node cluster handed none back")
-	}
 	for _, key := range released {
 		if key == "user-0" {
 			t.Fatal("released a user with a job still running here")
@@ -74,5 +81,32 @@ func TestBalancedClusterMovesNobody(t *testing.T) {
 	defer store.mu.Unlock()
 	if len(store.released) != 0 {
 		t.Fatalf("a node at its fair share released %v", store.released)
+	}
+}
+
+// A user seen just now may be between its assignment and its job being
+// tracked; it isn't handed back until it has gone unseen for the grace.
+func TestJustSeenUsersAreNotHandedBack(t *testing.T) {
+	router, store := overloadedRouter(t, 30, 0, 0)
+	router.rebalanceGrace = time.Hour
+	router.syncState()
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.released) != 0 {
+		t.Fatalf("released %d users seen moments ago", len(store.released))
+	}
+}
+
+// A failing store stops the pass at the first error instead of spending a
+// timeout on every user while the heartbeat waits.
+func TestRebalanceStopsAtTheFirstStoreError(t *testing.T) {
+	router, store := overloadedRouter(t, 30, 0, 0)
+	store.mu.Lock()
+	store.releaseErr = errors.New("valkey: timeout")
+	store.mu.Unlock()
+	before := router.storeErrors.Load()
+	router.syncState()
+	if got := router.storeErrors.Load() - before; got != 1 {
+		t.Fatalf("%d store errors in one pass, want 1 (stop at the first)", got)
 	}
 }
