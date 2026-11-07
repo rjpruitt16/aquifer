@@ -75,7 +75,7 @@ type Manager struct {
 	draining   bool
 	// memory reports this process's memory in use and its limit, in MB (0:
 	// no limit), from the sample HTTP admission uses. Nil means no check.
-	memory func() (usedMB, limitMB int64)
+	memory atomic.Pointer[func() (usedMB, limitMB int64)]
 }
 
 // SetMemoryCheck makes new sessions wait while the process is over its
@@ -84,17 +84,23 @@ type Manager struct {
 // an operator who raised AQUIFER_WS_MAX_CLIENT_CONNECTIONS could have
 // sessions accepted until the process ran out of memory (issue #35).
 func (m *Manager) SetMemoryCheck(memory func() (usedMB, limitMB int64)) {
-	if m != nil {
-		m.memory = memory
+	if m == nil {
+		return
 	}
+	if memory == nil {
+		m.memory.Store(nil)
+		return
+	}
+	m.memory.Store(&memory)
 }
 
 // overMemory reports whether a new session would push past the memory limit.
 func (m *Manager) overMemory() (usedMB, limitMB int64, over bool) {
-	if m.memory == nil {
+	check := m.memory.Load()
+	if check == nil {
 		return 0, 0, false
 	}
-	usedMB, limitMB = m.memory()
+	usedMB, limitMB = (*check)()
 	return usedMB, limitMB, limitMB > 0 && usedMB > limitMB
 }
 
