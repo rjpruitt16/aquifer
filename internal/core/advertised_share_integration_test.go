@@ -19,23 +19,24 @@ import (
 )
 
 // TestAdvertisedRatesSetEachTenantsShare checks that the target, not
-// Aquifer, decides how its capacity is split between tenants, through
-// POST /jobs: three tenants stay backlogged against one target with a 60 rps
-// ceiling, and the target advertises wildly different rates to each
-// (X-Aqueduct-Rps 600, 60 and 6, so 90.0%, 9.0% and 0.9% of its total).
-// Halfway through it swaps the first and last, and the shares must follow
-// with no configuration change.
+// Aquifer's configuration, decides its total rate and how it is split
+// between tenants, through POST /jobs. The target is configured at only
+// 2 rps; three tenants stay backlogged, and the target advertises wildly
+// different rates to each (X-Aqueduct-Rps 60, 6 and 0.6). The total must
+// rise to the highest advertised, 60/s, split 90.0%, 9.0% and 0.9%. Halfway
+// through it swaps the first and last, and the shares must follow.
 func TestAdvertisedRatesSetEachTenantsShare(t *testing.T) {
 	if testing.Short() {
 		t.Skip("timing test (about 25 s); skipped with -short")
 	}
 	const (
-		ceiling = 60.0
-		phase   = 12.0 // seconds per phase
-		settle  = 2.0  // seconds at the start of each phase left out
+		configured = 2.0
+		top        = 60.0 // the highest rate advertised
+		phase      = 12.0 // seconds per phase
+		settle     = 2.0  // seconds at the start of each phase left out
 	)
-	advertise := map[string]float64{"vip": 600, "standard": 60, "low": 6}
-	swapped := map[string]float64{"vip": 6, "standard": 60, "low": 600}
+	advertise := map[string]float64{"vip": 60, "standard": 6, "low": 0.6}
+	swapped := map[string]float64{"vip": 0.6, "standard": 6, "low": 60}
 
 	var mu sync.Mutex
 	arrivals := map[string][]float64{} // tenant -> seconds since start
@@ -72,7 +73,7 @@ func TestAdvertisedRatesSetEachTenantsShare(t *testing.T) {
 	l8 := NewL8Registry(filepath.Join(dir, ".l8-key"), filepath.Join(dir, "l8-trust"))
 	cfg := &Config{
 		Defaults:  RateConfig{RPS: 2, MaxConcurrent: 1},
-		Upstreams: map[string]RateConfig{mustHost(t, upstream.URL): {RPS: ceiling, MaxConcurrent: 4}},
+		Upstreams: map[string]RateConfig{mustHost(t, upstream.URL): {RPS: configured, MaxConcurrent: 4}},
 	}
 	registry := NewRegistry(store, cfg, broker, l8, NoopMetricsAdapter{}, nil)
 	app := NewAquifer(store, registry, broker, l8, NewAdmissionController(AdmissionLimits{}, dbPath), nil)
@@ -92,7 +93,7 @@ func TestAdvertisedRatesSetEachTenantsShare(t *testing.T) {
 		}
 	}
 
-	// Every tenant offers far more than the ceiling (open loop), so all three
+	// Every tenant offers far more than the total (open loop), so all three
 	// stay backlogged and the split is decided only by the shared pace.
 	start = time.Now()
 	started.Store(true)
@@ -143,13 +144,13 @@ func TestAdvertisedRatesSetEachTenantsShare(t *testing.T) {
 		}
 		rate := float64(total) / (to - from)
 		t.Logf("phase %d: %.1f/s delivered, %v (advertised %v)", i+1, rate, got, rates)
-		if rate > ceiling*1.1 || rate < ceiling*0.85 {
-			t.Errorf("phase %d: target received %.1f/s; want about its %.0f rps ceiling", i+1, rate, ceiling)
+		if rate > top*1.1 || rate < top*0.85 {
+			t.Errorf("phase %d: target received %.1f/s; want about the %.0f rps it advertised", i+1, rate, top)
 		}
 		for tenant, r := range rates {
 			want := float64(total) * r / sum
 			if math.Abs(float64(got[tenant])-want) > math.Max(want*0.15, 4) {
-				t.Errorf("phase %d: %s got %d of %d, want about %.0f (advertised %.0f of %.0f)", i+1, tenant, got[tenant], total, want, r, sum)
+				t.Errorf("phase %d: %s got %d of %d, want about %.0f (advertised %.1f of %.1f)", i+1, tenant, got[tenant], total, want, r, sum)
 			}
 		}
 	}

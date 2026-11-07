@@ -390,10 +390,11 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 	dispatchTimer.Stop()
 	defer dispatchTimer.Stop()
 	q.currentRPS.Store(int64(rps * 100))
-	// advertised is the rate the target last asked this queue for, uncapped
-	// by configuredRPS. It is this queue's weight in the target's shared
-	// pace, so a target can give one tenant more of its total than another
-	// just by advertising it more. Cleared by a failure.
+	// advertised is the rate the target last asked this queue for. It is
+	// this queue's weight in the target's shared pace, so a target can give
+	// one tenant more of its total than another just by advertising it
+	// more, and it can raise the target's total (see sharedPace). Cleared by
+	// a failure.
 	advertised := 0.0
 
 	for {
@@ -431,7 +432,7 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 				dispatchTimer.Reset(retry.Jitter(interval - elapsed))
 				break
 			}
-			wait, slot := q.shared.reserveSlot(q, math.Max(rps, advertised), interval, time.Now())
+			wait, slot := q.shared.reserveSlot(q, math.Max(rps, advertised), advertised, interval, time.Now())
 			if wait > 0 {
 				dispatchTimer.Stop()
 				select {
@@ -566,7 +567,9 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 				rps = math.Max(next, MinRPS)
 				advertised = 0
 			case msg.rps != nil:
-				rps = math.Max(math.Min(*msg.rps, configuredRPS), MinRPS)
+				// Not capped by configuredRPS: the target's own number
+				// wins, and the shared pace holds the total.
+				rps = math.Max(*msg.rps, MinRPS)
 				advertised = *msg.rps
 			case rps < configuredRPS:
 				rps = math.Min(rps*1.05, configuredRPS)

@@ -11,8 +11,16 @@ import (
 
 // sharedPace holds a target API's total rate across all of its account
 // queues. Each queue still paces itself, but before it dispatches it must
-// also take the next slot here, so the target sees at most the configured
-// ceiling no matter how many tenants are active. Without it the ceiling was
+// also take the next slot here, so the target sees at most its total no
+// matter how many tenants are active.
+//
+// The total is set by the target at runtime: the highest X-Aqueduct-Rps it
+// is advertising to any queue that asked in the last activeWindow. Only when
+// it advertises nothing does the configured rate (or a pool's live
+// capacity, which its members advertise) apply. A target that stamps one
+// number on every response therefore gets that number in total, not that
+// number per tenant, and a target that advertises 1000 to one tenant raises
+// its total to 1000 for as long as it keeps doing so. Without it the ceiling was
 // enforced only by an aggregate throttle every few seconds, and each queue's
 // per-success recovery climbed back to the full per-queue rate in between
 // (issue #146).
@@ -39,6 +47,9 @@ type sharedPace struct {
 	last    time.Time
 	granted bool
 	rate    func() float64
+	// followAdvertised lets advertised rates set the total. Off for a pool,
+	// whose capacity already sums what its members advertise.
+	followAdvertised bool
 	// vtime is the pass of the most recent slot. A queue's pass is never
 	// below it when it asks, so idle time banks nothing.
 	vtime float64
@@ -55,7 +66,8 @@ type sharedPace struct {
 }
 
 type paceQueue struct {
-	pass    float64
+	pass       float64
+	advertised float64
 	waiting bool // turned away at since, and asking since
 	since   time.Time
 	asked   time.Time
@@ -68,16 +80,23 @@ type paceQueue struct {
 // own intervals, so this just bounds the map.
 const forgetQueue = time.Minute
 
+// activeWindow is how long a queue's advertised rate keeps counting toward
+// the total after it last asked for a slot.
+const activeWindow = 3 * time.Second
+
 func newSharedPace(rate func() float64) *sharedPace {
 	return &sharedPace{rate: rate, queues: make(map[any]*paceQueue)}
 }
 
-// reserve takes the next dispatch slot for who, whose weight is its
-// advertised (or own) rate and whose own pace allows one dispatch per own,
-// if one is free at now and it's who's turn, and returns 0. Otherwise it takes nothing and returns how long to wait before
-// asking again. A nil sharedPace, or a non-positive rate, never limits.
-func (s *sharedPace) reserve(who any, weight float64, own time.Duration, now time.Time) time.Duration {
-	wait, _ := s.reserveSlot(who, weight, own, now)
+// reserve takes the next dispatch slot for who if one is free at now and
+// it's who's turn, and returns 0. Otherwise it takes nothing and returns how
+// long to wait before asking again. weight is the queue's share when queues
+// contend: the rate the target advertised to it, or its own rate.
+// advertised is that advertised rate, or 0 if it sent none; own is the
+// queue's own interval between dispatches. A nil sharedPace, or a
+// non-positive total, never limits.
+func (s *sharedPace) reserve(who any, weight, advertised float64, own time.Duration, now time.Time) time.Duration {
+	wait, _ := s.reserveSlot(who, weight, advertised, own, now)
 	return wait
 }
 
@@ -87,11 +106,21 @@ func (s *sharedPace) reserve(who any, weight float64, own time.Duration, now tim
 // the timer jitter in every wait would add up, and a queue paced at the
 // ceiling would fall further behind the slot schedule each turn until it
 // missed its turns. With no limit the slot is now.
-func (s *sharedPace) reserveSlot(who any, weight float64, own time.Duration, now time.Time) (time.Duration, time.Time) {
+func (s *sharedPace) reserveSlot(who any, weight, advertised float64, own time.Duration, now time.Time) (time.Duration, time.Time) {
 	if s == nil {
 		return 0, now
 	}
-	r := s.rate()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	me, ok := s.queues[who]
+	if !ok {
+		me = &paceQueue{}
+		s.queues[who] = me
+	}
+	me.asked, me.advertised = now, advertised
+
+	r := s.totalLocked(now)
 	if r <= 0 {
 		return 0, now
 	}
@@ -100,9 +129,6 @@ func (s *sharedPace) reserveSlot(who any, weight float64, own time.Duration, now
 	r = math.Max(r, MinRPS)
 	interval := time.Duration(float64(time.Second) / r)
 	weight = math.Max(weight, MinRPS)
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	// A queue turned away asks again at least once per interval (its timer
 	// is set to the wait returned here); one that doesn't has stopped.
@@ -115,13 +141,7 @@ func (s *sharedPace) reserveSlot(who any, weight float64, own time.Duration, now
 		}
 	}
 
-	me, ok := s.queues[who]
-	if !ok {
-		me = &paceQueue{}
-		s.queues[who] = me
-	}
 	me.pass = math.Max(me.pass, s.vtime)
-	me.asked = now
 
 	wait := func() time.Duration {
 		if !me.waiting {
@@ -170,4 +190,30 @@ func (s *sharedPace) reserveSlot(who any, weight float64, own time.Duration, now
 	me.readyAt, me.until = start.Add(own), start.Add(own+hold)
 	s.last, s.granted = start, true
 	return 0, start
+}
+
+// total is the target's current total rate: see sharedPace. Non-positive
+// means unlimited.
+func (s *sharedPace) total(now time.Time) float64 {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.totalLocked(now)
+}
+
+func (s *sharedPace) totalLocked(now time.Time) float64 {
+	if s.followAdvertised {
+		top := 0.0
+		for _, q := range s.queues {
+			if q.advertised > top && now.Sub(q.asked) <= activeWindow {
+				top = q.advertised
+			}
+		}
+		if top > 0 {
+			return top
+		}
+	}
+	return s.rate()
 }

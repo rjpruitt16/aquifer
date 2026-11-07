@@ -181,6 +181,7 @@ func NewURLWorker(domain string, rps float64, maxConc int, pool *Pool, store sto
 	}
 	w.maxBacklog.Store(admission.MaxPendingPerUpstream())
 	w.shared = newSharedPace(w.budgetCeiling)
+	w.shared.followAdvertised = w.pool == nil
 	go w.sampleLoop()
 	return w
 }
@@ -529,7 +530,7 @@ func (w *URLWorker) Stats() metrics.TargetStats {
 	// never allowed more than its ceiling, however many queues are active.
 	// Summing the queues' own rates read 126-210 for a target held to 70
 	// (issue #145).
-	switch ceiling := w.budgetCeiling(); {
+	switch ceiling := w.shared.total(time.Now()); {
 	case ceiling > 0:
 		stats.FlowRate = math.Min(stats.FlowRate, math.Max(ceiling, MinRPS))
 	case w.pool != nil:

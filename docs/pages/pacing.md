@@ -9,7 +9,7 @@ The target API controls pace at runtime via response headers (`X-Aqueduct-Rps`, 
 
 | Header (preferred)          | Alias                        | Effect                                  |
 |------------------------------|-------------------------------|------------------------------------------|
-| `X-Aqueduct-Rps`            | `X-Aquifer-Rps`               | Reduce dispatch rate to this value      |
+| `X-Aqueduct-Rps`            | `X-Aquifer-Rps`               | Set this tenant's rate and share; the highest one advertised is the target's total |
 | `X-Aqueduct-Max-Concurrent` | `X-Aquifer-Max-Concurrent`    | Reduce max in-flight requests           |
 | `X-Aqueduct-Account-Queue`  | `X-Aquifer-Account-Queue`     | `enabled` / `disabled`: one queue per tenant, or one shared queue (has the last say) |
 | `X-Aqueduct-Slow-Start`     | `X-Aquifer-Slow-Start`        | `true`: new queues ramp up instead of firing at full rate immediately |
@@ -19,7 +19,9 @@ Aquifer reads both namespaces, preferring `X-Aqueduct-*` when both are present.
 
 By default each `(user_id, api_key)` pair gets its own independently paced queue at every target API, so one tenant's burst, or one tenant's broken endpoint retrying, can't slow down another: a failed attempt gives its concurrency slot back and waits out its backoff in that tenant's own queue.
 
-**Prioritizing tenants.** A target's queues together never go past its configured rate (or its pool's live capacity). When several tenants are backlogged, that total is split in proportion to the `X-Aqueduct-Rps` the target last sent each tenant's queue, so the target decides priority at runtime with no configuration: advertise `600` to one tenant, `60` to a second and `6` to a third, and under contention they get 90%, 9% and 1% of the total. The advertised number can be above the configured rate; it then sets that tenant's share, while no single queue or the total exceeds the configured rate. Tenants with equal rates, or that were sent none, take equal turns. A tenant that asks for less than its share keeps its own pace, and the rest goes to the others.
+**The target sets its total and each tenant's share.** A target's queues together never go past its total: the highest `X-Aqueduct-Rps` it is currently advertising to any active tenant (one that dispatched in the last 3 seconds), or, if it advertises nothing, its configured rate. The configured rate is only a starting point, so a backend can run faster or slower than it on headers alone. A backend that stamps one number on every response gets that number in total, not per tenant. A pool's total is its live capacity, which its members advertise.
+
+When several tenants are backlogged, the total is split in proportion to the rate the target last sent each tenant's queue, so the target decides priority at runtime with no configuration and can change it on every response: advertise `600` to one tenant, `60` to a second and `6` to a third, and the total is 600/s, split 90%, 9% and 1%. An emergency tenant advertised `1000` next to ten tenants at `10` raises the total to 1000/s and takes 1000/1100 of it until the target stops advertising it. Tenants with equal rates, or that were sent none, take equal turns. A tenant that asks for less than its share keeps its own pace, and the rest goes to the others.
 
 Who decides, in order:
 

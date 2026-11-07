@@ -23,7 +23,7 @@ The backend receives load context including:
 
 It can respond with:
 
-- `X-Aqueduct-Rps`: lower this queue's dispatch rate below its configured ceiling. Also this tenant's weight when tenants contend for the target's total: advertise a higher number (even above the ceiling) to the tenants that should get more.
+- `X-Aqueduct-Rps`: this tenant's dispatch rate and its share when tenants contend. The highest rate advertised to any active tenant is the target's total, above or below the configured rate; advertise more to the tenants that should get more.
 - `X-Aqueduct-Max-Concurrent`: lower this queue's in-flight limit.
 - `X-Aqueduct-Max-Backlog`: change the upstream's shared admission budget. Size it as `rate × seconds`: `rate` is the node's peak intake for that upstream across all tenants (not its dispatch rate), and the seconds cover the longest outage to ride out. Never lower it below the backlog already held.
 - `X-Aqueduct-Slow-Start: true`: make later new queues for the domain start at the floor and ramp.
@@ -35,7 +35,7 @@ Aquifer also reports admission/load state with `X-Aqueduct-Active-Queues`, `X-Aq
 
 Keep these two loops distinct:
 
-- Queued dispatch: a retryable failure halves that account queue's current RPS, down to 0.5 RPS. A successful response with `X-Aqueduct-Rps` sets the rate up to the configured ceiling; otherwise success recovers by 5%.
+- Queued dispatch: a retryable failure halves that account queue's current RPS, down to 0.5 RPS. A successful response with `X-Aqueduct-Rps` sets the rate, even above the configured rate; otherwise success recovers by 5% toward the configured rate.
 - Optional inbound pacing: Aquifer watches insert p95 latency and backlog growth. It cuts the advertised intake rate by 30% on congestion, grows 1.5x below the learned knee, and grows 5% near or above it when callers use the available rate.
 
 These are TCP-inspired feedback loops, not identical controllers. If a design requires strict additive increase, weighted decrease, or a different control interval, change and test that behavior explicitly.

@@ -4,6 +4,7 @@
 package dispatch
 
 import (
+	"fmt"
 	"math"
 	"math/rand/v2"
 	"testing"
@@ -17,14 +18,14 @@ func TestSharedPaceHandsOutOneSlotPerInterval(t *testing.T) {
 	// One interval of credit is carried so a late timer doesn't lose
 	// throughput, so two slots are free at once; the third must wait.
 	for i := 0; i < 2; i++ {
-		if wait := p.reserve("a", 10, 0, now); wait != 0 {
+		if wait := p.reserve("a", 10, 0, 0, now); wait != 0 {
 			t.Fatalf("reserve %d should get a slot, waited %v", i+1, wait)
 		}
 	}
-	if wait := p.reserve("a", 10, 0, now); wait <= 0 || wait > 100*time.Millisecond {
+	if wait := p.reserve("a", 10, 0, 0, now); wait <= 0 || wait > 100*time.Millisecond {
 		t.Fatalf("third reserve at the same instant should wait up to 100ms, got %v", wait)
 	}
-	if wait := p.reserve("a", 10, 0, now.Add(100*time.Millisecond)); wait != 0 {
+	if wait := p.reserve("a", 10, 0, 0, now.Add(100*time.Millisecond)); wait != 0 {
 		t.Fatalf("a reserve one interval later should get a slot, waited %v", wait)
 	}
 }
@@ -32,13 +33,13 @@ func TestSharedPaceHandsOutOneSlotPerInterval(t *testing.T) {
 func TestSharedPaceDoesNotBankIdleTime(t *testing.T) {
 	p := newSharedPace(func() float64 { return 10 })
 	now := time.Unix(1000, 0)
-	p.reserve("a", 10, 0, now)
+	p.reserve("a", 10, 0, 0, now)
 
 	// After a long idle stretch, at most one extra slot is available at once.
 	later := now.Add(10 * time.Second)
 	got := 0
 	for i := 0; i < 5; i++ {
-		if p.reserve("a", 10, 0, later) == 0 {
+		if p.reserve("a", 10, 0, 0, later) == 0 {
 			got++
 		}
 	}
@@ -49,12 +50,12 @@ func TestSharedPaceDoesNotBankIdleTime(t *testing.T) {
 
 func TestSharedPaceWithoutARateNeverLimits(t *testing.T) {
 	var nilPace *sharedPace
-	if wait := nilPace.reserve("a", 10, 0, time.Now()); wait != 0 {
+	if wait := nilPace.reserve("a", 10, 0, 0, time.Now()); wait != 0 {
 		t.Fatalf("nil pace limited: %v", wait)
 	}
 	p := newSharedPace(func() float64 { return 0 })
 	for i := 0; i < 3; i++ {
-		if wait := p.reserve("a", 10, 0, time.Now()); wait != 0 {
+		if wait := p.reserve("a", 10, 0, 0, time.Now()); wait != 0 {
 			t.Fatalf("zero-rate pace limited: %v", wait)
 		}
 	}
@@ -64,15 +65,15 @@ func TestSharedPaceUsesTheCurrentRate(t *testing.T) {
 	rate := 1.0 // one slot per second
 	p := newSharedPace(func() float64 { return rate })
 	now := time.Unix(1000, 0)
-	for p.reserve("a", 10, 0, now) == 0 {
+	for p.reserve("a", 10, 0, 0, now) == 0 {
 	}
-	if wait := p.reserve("a", 10, 0, now); wait < 500*time.Millisecond {
+	if wait := p.reserve("a", 10, 0, 0, now); wait < 500*time.Millisecond {
 		t.Fatalf("at 1/s the next slot should be about 1s away, got %v", wait)
 	}
 	// Capacity rises tenfold: the wait must shrink right away, not stay at
 	// the old one-second deadline.
 	rate = 10
-	if wait := p.reserve("a", 10, 0, now); wait > 100*time.Millisecond {
+	if wait := p.reserve("a", 10, 0, 0, now); wait > 100*time.Millisecond {
 		t.Fatalf("after the rate rose to 10/s the wait should be at most 100ms, got %v", wait)
 	}
 }
@@ -82,9 +83,9 @@ func TestSharedPaceFloorsTheRateAtMinRPS(t *testing.T) {
 	// the shared pace must still allow MinRPS so the pool can recover.
 	p := newSharedPace(func() float64 { return 0.001 })
 	now := time.Unix(1000, 0)
-	for p.reserve("a", 10, 0, now) == 0 {
+	for p.reserve("a", 10, 0, 0, now) == 0 {
 	}
-	if wait := p.reserve("a", 10, 0, now); wait > time.Duration(float64(time.Second)/MinRPS) {
+	if wait := p.reserve("a", 10, 0, 0, now); wait > time.Duration(float64(time.Second)/MinRPS) {
 		t.Fatalf("wait %v is longer than one MinRPS interval", wait)
 	}
 }
@@ -98,11 +99,11 @@ func TestSharedPaceTakesTurnsBetweenAFrequentAndAPatientQueue(t *testing.T) {
 	patientNext := now
 	got := map[string]int{}
 	for now.Before(end) {
-		if p.reserve("busy", 10, 0, now) == 0 {
+		if p.reserve("busy", 10, 0, 0, now) == 0 {
 			got["busy"]++
 		}
 		if !now.Before(patientNext) {
-			if wait := p.reserve("patient", 10, 0, now); wait == 0 {
+			if wait := p.reserve("patient", 10, 0, 0, now); wait == 0 {
 				got["patient"]++
 			} else {
 				patientNext = now.Add(wait)
@@ -130,7 +131,7 @@ func contend(p *sharedPace, weights map[string]float64, start time.Time, d time.
 			if now.Before(next[name]) {
 				continue
 			}
-			if wait := p.reserve(name, w, 0, now); wait == 0 {
+			if wait := p.reserve(name, w, 0, 0, now); wait == 0 {
 				got[name]++
 			} else {
 				next[name] = now.Add(wait)
@@ -182,7 +183,7 @@ func TestSharedPaceIdleQueueRejoinsWithoutBankedTurns(t *testing.T) {
 	p := newSharedPace(func() float64 { return 10 })
 	start := time.Unix(1000, 0)
 	// a runs alone for 10 s; b was seen once, long ago.
-	p.reserve("b", 10, 0, start)
+	p.reserve("b", 10, 0, 0, start)
 	contend(p, map[string]float64{"a": 10}, start, 10*time.Second)
 	// From here both contend with equal rates: b must not take a run of
 	// slots for the time it was idle.
@@ -203,7 +204,7 @@ func TestSharedPaceSlowQueueLeavesItsShareToOthers(t *testing.T) {
 	slowNext, busyNext := now, now
 	for ; now.Before(end); now = now.Add(time.Millisecond) {
 		if !now.Before(slowNext) {
-			if wait, slot := p.reserveSlot("slow", 1, time.Second, now); wait == 0 {
+			if wait, slot := p.reserveSlot("slow", 1, 0, time.Second, now); wait == 0 {
 				got["slow"]++
 				// Its own pace, 1/s, counted from its slot, and its timer
 				// fires 10% late.
@@ -213,7 +214,7 @@ func TestSharedPaceSlowQueueLeavesItsShareToOthers(t *testing.T) {
 			}
 		}
 		if !now.Before(busyNext) {
-			if wait := p.reserve("busy", 1, 0, now); wait == 0 {
+			if wait := p.reserve("busy", 1, 0, 0, now); wait == 0 {
 				got["busy"]++
 			} else {
 				busyNext = now.Add(wait)
@@ -245,7 +246,7 @@ func TestSharedPaceKeepsAQueuesTurnWhileItWaitsOutItsOwnPace(t *testing.T) {
 			}
 			// Like an account queue: its own pace counts from the slot it
 			// was given, and every timer fires up to 20% late.
-			wait, slot := p.reserveSlot(name, weights[name], own, now)
+			wait, slot := p.reserveSlot(name, weights[name], 0, own, now)
 			if wait == 0 {
 				got[name]++
 				wait = slot.Add(own).Sub(now)
@@ -262,5 +263,80 @@ func TestSharedPaceKeepsAQueuesTurnWhileItWaitsOutItsOwnPace(t *testing.T) {
 		if g := float64(got[name]); math.Abs(g-want) > math.Max(want*0.05, 5) {
 			t.Errorf("%s took %d slots, want about %.0f (%v)", name, got[name], want, got)
 		}
+	}
+}
+
+func TestSharedPaceTotalFollowsTheHighestAdvertisedRate(t *testing.T) {
+	p := newSharedPace(func() float64 { return 2 }) // configured
+	p.followAdvertised = true
+	now := time.Unix(1000, 0)
+	if got := p.total(now); got != 2 {
+		t.Fatalf("with nothing advertised the total is the configured rate, got %v", got)
+	}
+	p.reserve("vip", 1000, 1000, 0, now)
+	p.reserve("free", 10, 10, 0, now)
+	if got := p.total(now); got != 1000 {
+		t.Fatalf("total should be the highest advertised, 1000, got %v", got)
+	}
+	// The vip stops asking (its emergency is over); the free tenant keeps on.
+	later := now.Add(activeWindow + time.Second)
+	p.reserve("free", 10, 10, 0, later)
+	if got := p.total(later); got != 10 {
+		t.Fatalf("after the vip went quiet the total should fall to 10, got %v", got)
+	}
+	// Advertising lower than configured lowers the total too.
+	p.reserve("free", 1, 1, 0, later)
+	if got := p.total(later); got != 1 {
+		t.Fatalf("total should follow the target down to 1, got %v", got)
+	}
+}
+
+func TestSharedPacePoolTotalIsItsCapacity(t *testing.T) {
+	// A pool's capacity already sums what its members advertise.
+	p := newSharedPace(func() float64 { return 30 })
+	now := time.Unix(1000, 0)
+	p.reserve("a", 500, 500, 0, now)
+	if got := p.total(now); got != 30 {
+		t.Fatalf("pool total should stay at its capacity 30, got %v", got)
+	}
+}
+
+func TestSharedPaceEmergencyTenantTakesNearlyEverything(t *testing.T) {
+	// Ten tenants advertised 10 each would share a total of 10. An emergency
+	// tenant advertised 1000 arrives: the total rises to 1000 and it gets
+	// 1000/1100 of it, the other ten 10/1100 each.
+	p := newSharedPace(func() float64 { return 2 })
+	p.followAdvertised = true
+	weights := map[string]float64{"emergency": 1000}
+	for i := 0; i < 10; i++ {
+		weights[fmt.Sprintf("t%d", i)] = 10
+	}
+	got := map[string]int{}
+	next := map[string]time.Time{}
+	start := time.Unix(1000, 0)
+	for now := start; now.Before(start.Add(10 * time.Second)); now = now.Add(100 * time.Microsecond) {
+		for name, w := range weights {
+			if now.Before(next[name]) {
+				continue
+			}
+			if wait := p.reserve(name, w, w, 0, now); wait == 0 {
+				got[name]++
+			} else {
+				next[name] = now.Add(wait)
+			}
+		}
+	}
+	others := 0
+	for name, n := range got {
+		if name != "emergency" {
+			others += n
+		}
+	}
+	total := got["emergency"] + others
+	if total < 9500 || total > 10100 {
+		t.Fatalf("want about 10000 slots in 10s at the advertised 1000/s, got %d", total)
+	}
+	if share := float64(got["emergency"]) / float64(total); math.Abs(share-1000.0/1100) > 0.01 {
+		t.Fatalf("emergency got %.1f%%, want about 90.9%% (%v)", share*100, got)
 	}
 }

@@ -51,7 +51,7 @@ Run load generators and long benchmarks on always-on machines (Fly Machines or V
 
 ## Configure Feedback
 
-Set static Aquifer `CONFIG_PATH` values as hard ceilings. Let the backend lower the active pace at runtime with `X-Aqueduct-Rps`, `X-Aqueduct-Max-Concurrent`, and `X-Aqueduct-Max-Backlog`. Prefer `429` plus `Retry-After` or explicit pacing headers for healthy overload; reserve `5xx` for actual failures.
+Set static Aquifer `CONFIG_PATH` values as the starting pace for a backend that sends no headers. Let the backend set the active pace at runtime with `X-Aqueduct-Rps` (the highest advertised to an active tenant is the target's total; the rest set each tenant's share), `X-Aqueduct-Max-Concurrent`, and `X-Aqueduct-Max-Backlog`. Prefer `429` plus `Retry-After` or explicit pacing headers for healthy overload; reserve `5xx` for actual failures.
 
 Describe Aquifer as TCP-inspired feedback control. Verify the implementation before naming a specific control law: queued dispatch and optional inbound pacing use different increase/decrease rules, and neither should be presented as strict AIMD without code changes.
 
