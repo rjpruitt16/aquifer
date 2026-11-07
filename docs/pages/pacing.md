@@ -45,7 +45,7 @@ Most queues that support priority read it from a static file: a tier per custome
 
 **The target sets its total.** A target's queues together never go past the highest `X-Aqueduct-Rps` it is currently advertising to any active tenant (one that dispatched in the last 3 seconds). The configured rate applies only while it advertises nothing, so a backend can run faster or slower than its config on headers alone. A backend that stamps one number on every response gets that number in total, not per tenant. A pool's total is its live capacity, which its members advertise.
 
-**It sets each tenant's share the same way.** When several tenants are backlogged, the total is split in proportion to the rate the target last sent each one. Advertise `600` to one tenant, `60` to a second and `6` to a third, and the total is 600/s, split 90%, 9% and 1%. Tenants with equal rates, or that were sent none, take equal turns. A tenant that asks for less than its share keeps its own pace, and the rest goes to the others.
+**It sets each tenant's share the same way.** When several tenants are backlogged, the total is split in proportion to the rate the target last sent each one. Advertise `600` to one tenant, `60` to a second and `6` to a third, and the total is 600/s, split 90%, 9% and 1%. Tenants advertised the same rate take equal turns. A tenant that was sent no rate is weighted by its own current pace instead, which failures halve and slow start lowers, so with no headers at all, healthy tenants take equal turns and a failing one takes fewer. A tenant that asks for less than its share keeps its own pace, and the rest goes to the others.
 
 **That allows deliberately unfair processing when it matters.** Fair turns are the right default, but some moments aren't fair:
 

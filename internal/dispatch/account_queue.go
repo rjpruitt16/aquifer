@@ -432,7 +432,13 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 				dispatchTimer.Reset(retry.Jitter(interval - elapsed))
 				break
 			}
-			wait, slot := q.shared.reserveSlot(q, math.Max(rps, advertised), advertised, interval, time.Now())
+			// The weight is the rate the target advertised to this queue
+			// while it holds; only with none is it the queue's own pace.
+			weight := rps
+			if advertised > 0 {
+				weight = advertised
+			}
+			wait, slot := q.shared.reserveSlot(q, weight, advertised, interval, time.Now())
 			if wait > 0 {
 				dispatchTimer.Stop()
 				select {
@@ -468,8 +474,7 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 			queue = queue[1:]
 			q.reportDepth(len(queue))
 			inFlight++
-			// Counted from the shared pace's slot, not now: see reserveSlot.
-			lastRequestAt = slot
+			lastRequestAt = ownSlot(lastRequestAt, slot, interval)
 
 			q.metrics.JobDispatched(job.UserID, q.upstream)
 			observeJobWaited(q.metrics, job, q.upstream)
@@ -896,12 +901,27 @@ func retryableStatus(code int) bool {
 	return code >= 500 || code == http.StatusTooManyRequests || code == http.StatusRequestTimeout
 }
 
+// ownSlot is when a queue's own pace counts its latest dispatch from: the
+// shared pace's slot, not now (see reserveSlot), but never earlier than one
+// own interval after the previous one. A slot carrying unused shared credit
+// would otherwise let a 1 rps queue under an idle 10 rps total dispatch
+// every 900 ms.
+func ownSlot(last, slot time.Time, interval time.Duration) time.Time {
+	if next := last.Add(interval); slot.Before(next) {
+		return next
+	}
+	return slot
+}
+
 func pacingSignals(header http.Header) jobDoneMsg {
 	msg := jobDoneMsg{}
 	if val := PacingHeader(header, "Rps"); val != "" {
 		var rps float64
 		fmt.Sscanf(val, "%f", &rps)
-		msg.rps = &rps
+		// A non-finite rate (Inf, NaN) is ignored, as if no header had come.
+		if !math.IsInf(rps, 0) && !math.IsNaN(rps) {
+			msg.rps = &rps
+		}
 	} else if rps := orca.Rps(header); rps != nil {
 		// No explicit Aqueduct directive on this response -- fall back to an
 		// ORCA endpoint-load-metrics header if the backend (e.g. vLLM with

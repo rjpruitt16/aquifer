@@ -63,16 +63,29 @@ type sharedPace struct {
 	// interval of credit gives back. A queue that stops asking altogether is
 	// forgotten after forgetQueue.
 	queues map[any]*paceQueue
+	// contenders is the subset of queues whose window hasn't closed, the
+	// only ones a reservation looks at: with thousands of recently drained
+	// queues, scanning all of them under the lock on every reservation would
+	// cost real CPU. Idle queues are swept out of queues at most once a
+	// second.
+	contenders map[any]*paceQueue
+	swept      time.Time
+	// top is the highest rate advertised to a queue active in the last
+	// activeWindow, and topWho that queue; kept up to date as queues ask, and
+	// recomputed only when that queue lowers its rate or goes quiet.
+	top    float64
+	topWho any
 }
 
 type paceQueue struct {
 	pass       float64
+	stride     float64 // 1/weight at the queue's last slot
 	advertised float64
-	waiting bool // turned away at since, and asking since
-	since   time.Time
-	asked   time.Time
-	readyAt time.Time
-	until   time.Time
+	waiting    bool // turned away at since, and asking since
+	since      time.Time
+	asked      time.Time
+	readyAt    time.Time
+	until      time.Time
 }
 
 // forgetQueue is how long a queue that stopped asking keeps its pass. Its
@@ -85,7 +98,17 @@ const forgetQueue = time.Minute
 const activeWindow = 3 * time.Second
 
 func newSharedPace(rate func() float64) *sharedPace {
-	return &sharedPace{rate: rate, queues: make(map[any]*paceQueue)}
+	return &sharedPace{rate: rate, queues: make(map[any]*paceQueue), contenders: make(map[any]*paceQueue)}
+}
+
+// finiteRate is r if it is a usable rate, otherwise 0: a target answering
+// X-Aqueduct-Rps: +Inf must not get a zero stride (every slot) or an
+// unlimited total.
+func finiteRate(r float64) float64 {
+	if math.IsNaN(r) || math.IsInf(r, 0) || r <= 0 {
+		return 0
+	}
+	return r
 }
 
 // reserve takes the next dispatch slot for who if one is free at now and
@@ -113,12 +136,17 @@ func (s *sharedPace) reserveSlot(who any, weight, advertised float64, own time.D
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	s.sweepLocked(now)
 	me, ok := s.queues[who]
 	if !ok {
 		me = &paceQueue{}
 		s.queues[who] = me
 	}
-	me.asked, me.advertised = now, advertised
+	if now.After(me.until) {
+		me.waiting = false
+	}
+	me.asked, me.advertised = now, finiteRate(advertised)
+	s.noteAdvertisedLocked(who, me, now)
 
 	r := s.totalLocked(now)
 	if r <= 0 {
@@ -128,19 +156,22 @@ func (s *sharedPace) reserveSlot(who any, weight, advertised float64, own time.D
 	// collapsed must still get enough dispatches to recover.
 	r = math.Max(r, MinRPS)
 	interval := time.Duration(float64(time.Second) / r)
-	weight = math.Max(weight, MinRPS)
+	weight = math.Max(finiteRate(weight), MinRPS)
 
 	// A queue turned away asks again at least once per interval (its timer
 	// is set to the wait returned here); one that doesn't has stopped.
 	stale := 2*interval + 100*time.Millisecond
-	for k, q := range s.queues {
-		if now.Sub(q.asked) > forgetQueue {
-			delete(s.queues, k)
-		} else if now.After(q.until) {
-			q.waiting = false
-		}
-	}
 
+	// The step this queue's last slot added to its pass was for its weight
+	// then. If the target has since changed its rate, redo that step at the
+	// new weight: a tenant promoted from 0.5 to 600 would otherwise wait out
+	// a 2-unit step, about 1,200 slots of a queue at 600, before its first
+	// turn at the new rate.
+	stride := 1 / weight
+	if me.stride > 0 && me.stride != stride {
+		me.pass += stride - me.stride
+		me.stride = stride
+	}
 	me.pass = math.Max(me.pass, s.vtime)
 
 	wait := func() time.Duration {
@@ -148,6 +179,7 @@ func (s *sharedPace) reserveSlot(who any, weight, advertised float64, own time.D
 			me.waiting, me.since = true, now
 		}
 		me.readyAt, me.until = now, now.Add(stale)
+		s.contenders[who] = me
 		if s.granted {
 			if next := s.last.Add(interval); now.Before(next) {
 				return next.Sub(now)
@@ -170,8 +202,13 @@ func (s *sharedPace) reserveSlot(who any, weight, advertised float64, own time.D
 			start = next
 		}
 	}
-	for k, q := range s.queues {
-		if k == who || now.After(q.until) || now.Before(q.readyAt) {
+	for k, q := range s.contenders {
+		if now.After(q.until) {
+			q.waiting = false
+			delete(s.contenders, k)
+			continue
+		}
+		if k == who || now.Before(q.readyAt) {
 			continue
 		}
 		// A contender's pass may have fallen behind vtime while it waited
@@ -182,12 +219,14 @@ func (s *sharedPace) reserveSlot(who any, weight, advertised float64, own time.D
 		}
 	}
 	s.vtime = me.pass
-	me.pass += 1 / weight
+	me.pass += stride
+	me.stride = stride
 	// It stays in line for its next turn, around when its own pace lets it
 	// ask again.
 	hold := min(own/4+2*time.Millisecond, interval)
 	me.waiting, me.since = false, now
 	me.readyAt, me.until = start.Add(own), start.Add(own+hold)
+	s.contenders[who] = me
 	s.last, s.granted = start, true
 	return 0, start
 }
@@ -205,15 +244,49 @@ func (s *sharedPace) total(now time.Time) float64 {
 
 func (s *sharedPace) totalLocked(now time.Time) float64 {
 	if s.followAdvertised {
-		top := 0.0
-		for _, q := range s.queues {
-			if q.advertised > top && now.Sub(q.asked) <= activeWindow {
-				top = q.advertised
+		if s.topWho != nil {
+			if q, ok := s.queues[s.topWho]; !ok || now.Sub(q.asked) > activeWindow {
+				s.recomputeTopLocked(now)
 			}
 		}
-		if top > 0 {
-			return top
+		if s.top > 0 {
+			return s.top
 		}
 	}
 	return s.rate()
+}
+
+// noteAdvertisedLocked keeps top current after who asked advertising
+// me.advertised.
+func (s *sharedPace) noteAdvertisedLocked(who any, me *paceQueue, now time.Time) {
+	switch {
+	case me.advertised > 0 && me.advertised >= s.top:
+		s.top, s.topWho = me.advertised, who
+	case s.topWho == who:
+		// The top queue lowered its rate or stopped advertising.
+		s.recomputeTopLocked(now)
+	}
+}
+
+func (s *sharedPace) recomputeTopLocked(now time.Time) {
+	s.top, s.topWho = 0, nil
+	for k, q := range s.queues {
+		if q.advertised > s.top && now.Sub(q.asked) <= activeWindow {
+			s.top, s.topWho = q.advertised, k
+		}
+	}
+}
+
+// sweepLocked forgets queues that stopped asking, at most once a second.
+func (s *sharedPace) sweepLocked(now time.Time) {
+	if now.Sub(s.swept) < time.Second {
+		return
+	}
+	s.swept = now
+	for k, q := range s.queues {
+		if now.Sub(q.asked) > forgetQueue {
+			delete(s.queues, k)
+			delete(s.contenders, k)
+		}
+	}
 }

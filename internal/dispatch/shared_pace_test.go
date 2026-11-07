@@ -161,8 +161,8 @@ func TestSharedPaceSplitsSlotsByAdvertisedRate(t *testing.T) {
 func TestSharedPaceEqualRatesGetEqualTurns(t *testing.T) {
 	p := newSharedPace(func() float64 { return 20 })
 	got := contend(p, map[string]float64{"a": 10, "b": 10, "c": 10, "d": 10}, time.Unix(1000, 0), 50*time.Second)
-	for name, n := range got {
-		if n < 240 || n > 260 {
+	for _, name := range []string{"a", "b", "c", "d"} {
+		if n := got[name]; n < 240 || n > 260 {
 			t.Errorf("%s took %d slots, want about 250 (%v)", name, n, got)
 		}
 	}
@@ -338,5 +338,70 @@ func TestSharedPaceEmergencyTenantTakesNearlyEverything(t *testing.T) {
 	}
 	if share := float64(got["emergency"]) / float64(total); math.Abs(share-1000.0/1100) > 0.01 {
 		t.Fatalf("emergency got %.1f%%, want about 90.9%% (%v)", share*100, got)
+	}
+}
+
+func TestSharedPacePromotedQueueGetsItsNewShareAtOnce(t *testing.T) {
+	// low has just taken a slot at weight 0.5 (a 2-unit step) when the
+	// target promotes it to 600, next to a queue already at 600. It must
+	// get about half the slots from then on, not wait out the old step.
+	p := newSharedPace(func() float64 { return 60 })
+	start := time.Unix(1000, 0)
+	contend(p, map[string]float64{"low": 0.5, "busy": 600}, start, 2*time.Second)
+	got := contend(p, map[string]float64{"low": 600, "busy": 600}, start.Add(2*time.Second), time.Second)
+	if got["low"] < 25 {
+		t.Fatalf("promoted queue took %d of about 60 slots in its first second, want about half (%v)", got["low"], got)
+	}
+}
+
+func TestSharedPaceIgnoresNonFiniteRates(t *testing.T) {
+	p := newSharedPace(func() float64 { return 20 })
+	p.followAdvertised = true
+	now := time.Unix(1000, 0)
+	p.reserve("inf", math.Inf(1), math.Inf(1), 0, now)
+	p.reserve("nan", math.NaN(), math.NaN(), 0, now)
+	if got := p.total(now); got != 20 {
+		t.Fatalf("non-finite rates must not set the total, got %v", got)
+	}
+	got := contend(p, map[string]float64{"inf": math.Inf(1), "ok": 20}, now, 10*time.Second)
+	if got["ok"] < 80 {
+		t.Fatalf("a queue advertising +Inf must not starve others: %v", got)
+	}
+}
+
+func TestSharedPaceTotalDropsWhenTheTopQueueLowersItsRate(t *testing.T) {
+	p := newSharedPace(func() float64 { return 2 })
+	p.followAdvertised = true
+	now := time.Unix(1000, 0)
+	p.reserve("emergency", 1000, 1000, 0, now)
+	p.reserve("other", 10, 10, 0, now)
+	if got := p.total(now); got != 1000 {
+		t.Fatalf("total %v, want 1000", got)
+	}
+	// The emergency ends: the target advertises it 10 like everyone else.
+	p.reserve("emergency", 10, 10, 0, now.Add(time.Millisecond))
+	if got := p.total(now.Add(time.Millisecond)); got != 10 {
+		t.Fatalf("total %v, want 10 as soon as the top queue lowers its rate", got)
+	}
+}
+
+func TestOwnSlotNeverRunsAQueueFasterThanItsOwnRate(t *testing.T) {
+	// A 1 rps queue under an idle 10 rps total: every slot it gets carries
+	// 100 ms of shared credit. Its own pace must still average 1/s.
+	p := newSharedPace(func() float64 { return 10 })
+	now := time.Unix(1000, 0)
+	var last time.Time
+	n := 0
+	for end := now.Add(20 * time.Second); now.Before(end); now = now.Add(time.Millisecond) {
+		if now.Sub(last) < time.Second {
+			continue
+		}
+		if wait, slot := p.reserveSlot("slow", 1, 0, time.Second, now); wait == 0 {
+			last = ownSlot(last, slot, time.Second)
+			n++
+		}
+	}
+	if n > 21 {
+		t.Fatalf("a 1 rps queue dispatched %d times in 20 s", n)
 	}
 }
