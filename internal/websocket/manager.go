@@ -5,7 +5,9 @@ package websocket
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"math"
 	"net/http"
@@ -71,6 +73,35 @@ type Manager struct {
 	sessionsMu sync.Mutex
 	sessions   map[*webSocketSession]struct{}
 	draining   bool
+	// memory reports this process's memory in use and its limit, in MB (0:
+	// no limit), from the sample HTTP admission uses. Nil means no check.
+	memory atomic.Pointer[func() (usedMB, limitMB int64)]
+}
+
+// SetMemoryCheck makes new sessions wait while the process is over its
+// memory limit (AQUIFER_MEMORY_LIMIT_MB), as new HTTP jobs already do. Open
+// sessions are not affected. Before, handshakes only counted connections, so
+// an operator who raised AQUIFER_WS_MAX_CLIENT_CONNECTIONS could have
+// sessions accepted until the process ran out of memory (issue #35).
+func (m *Manager) SetMemoryCheck(memory func() (usedMB, limitMB int64)) {
+	if m == nil {
+		return
+	}
+	if memory == nil {
+		m.memory.Store(nil)
+		return
+	}
+	m.memory.Store(&memory)
+}
+
+// overMemory reports whether a new session would push past the memory limit.
+func (m *Manager) overMemory() (usedMB, limitMB int64, over bool) {
+	check := m.memory.Load()
+	if check == nil {
+		return 0, 0, false
+	}
+	usedMB, limitMB = (*check)()
+	return usedMB, limitMB, limitMB > 0 && usedMB > limitMB
 }
 
 func NewManager(cfg Config, store StreamStore) *Manager {
@@ -141,6 +172,20 @@ func (m *Manager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	upstreamURL := r.Header.Get(webSocketUpstreamURLHeader)
 	if err := validateWebSocketUpstreamURL(upstreamURL); err != nil {
 		httpx.JSONError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if usedMB, limitMB, over := m.overMemory(); over {
+		// Same answer HTTP admission gives a job refused for memory.
+		w.Header().Set("Retry-After", "1")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error":        fmt.Sprintf("memory %dMB exceeds limit %dMB; try again shortly", usedMB, limitMB),
+			"limit_reason": "memory",
+			"limit":        limitMB,
+			"current":      usedMB,
+		})
 		return
 	}
 

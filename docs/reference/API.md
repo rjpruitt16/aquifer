@@ -370,6 +370,8 @@ Each live session uses two file descriptors on the Aquifer host: the client sock
 
 Sessions don't hold Valkey connections of their own. Every recorded backend event is also published on the session's notify channel, and each Aquifer instance follows its live sessions through `AQUIFER_WS_READER_SHARDS` shared pub/sub connections (default 8). A session reads its stream only when notified, so an idle session costs Aquifer and Valkey nothing. Correctness doesn't depend on notifications arriving: whenever a subscription is confirmed (including after a reconnect), the session re-reads from its own cursor.
 
+New sessions are also refused while the process is over `AQUIFER_MEMORY_LIMIT_MB`: `429` with `Retry-After` and `limit_reason: "memory"`, the same answer an HTTP job gets. Open sessions are not affected.
+
 Connection ceilings are local to one Aquifer process. `AQUIFER_WS_MAX_CLIENT_CONNECTIONS=1000` means that instance accepts at most 1,000 clients; it is not a fleet-wide semaphore. Ten identical instances can therefore admit up to 10,000 clients when the gateway distributes them.
 
 The target API can lower this instance's ceiling on connections to it, or its opening rate, during a successful handshake:

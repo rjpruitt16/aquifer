@@ -173,6 +173,7 @@ func NewRuntime(opts RuntimeOptions) *Runtime {
 				}
 			}
 			webSocketManager = NewWebSocketManager(*webSocketCfg, streamStore)
+			webSocketManager.SetMemoryCheck(admission.Memory)
 			app.SetWebSocketManager(webSocketManager)
 		}
 	}
