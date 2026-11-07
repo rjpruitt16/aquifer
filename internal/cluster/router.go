@@ -6,6 +6,7 @@ package cluster
 import (
 	"context"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"sort"
@@ -85,14 +86,17 @@ type clusterScopeActivity struct {
 }
 
 type Router struct {
-	self        Member
-	provider    string
-	pruneTTL    time.Duration
-	idleTTL     time.Duration
-	timeout     time.Duration
-	heartbeat   time.Duration
-	instanceTTL time.Duration
-	stateStore  StateStore
+	self     Member
+	provider string
+	pruneTTL time.Duration
+	idleTTL  time.Duration
+	// rebalanceGrace is how long a user must go unseen before rebalance may
+	// hand it back: one heartbeat.
+	rebalanceGrace time.Duration
+	timeout        time.Duration
+	heartbeat      time.Duration
+	instanceTTL    time.Duration
+	stateStore     StateStore
 
 	mu          sync.Mutex
 	members     map[string]Member
@@ -220,20 +224,21 @@ func NewRouter(cfg Config) *Router {
 	}
 
 	router := &Router{
-		self:        cfg.Self,
-		provider:    cfg.Provider,
-		pruneTTL:    cfg.PruneTTL,
-		idleTTL:     cfg.AssignmentIdle,
-		timeout:     cfg.RequestTimeout,
-		heartbeat:   cfg.HeartbeatInterval,
-		instanceTTL: cfg.InstanceTTL,
-		stateStore:  store,
-		members:     members,
-		prunedUntil: make(map[string]time.Time),
-		localScopes: make(map[string]*clusterScopeActivity),
-		nodeState:   string(StateActive),
-		stop:        make(chan struct{}),
-		done:        make(chan struct{}),
+		self:           cfg.Self,
+		provider:       cfg.Provider,
+		pruneTTL:       cfg.PruneTTL,
+		idleTTL:        cfg.AssignmentIdle,
+		rebalanceGrace: cfg.HeartbeatInterval,
+		timeout:        cfg.RequestTimeout,
+		heartbeat:      cfg.HeartbeatInterval,
+		instanceTTL:    cfg.InstanceTTL,
+		stateStore:     store,
+		members:        members,
+		prunedUntil:    make(map[string]time.Time),
+		localScopes:    make(map[string]*clusterScopeActivity),
+		nodeState:      string(StateActive),
+		stop:           make(chan struct{}),
+		done:           make(chan struct{}),
 	}
 	if store != nil {
 		router.syncState()
@@ -491,6 +496,129 @@ func (r *Router) syncState() {
 	updated[r.self.ID] = self
 	r.members = updated
 	r.mu.Unlock()
+
+	r.rebalance()
+}
+
+// rebalanceRatio is how far above the cluster's fair share of active users a
+// node may get before it hands users back to their preferred nodes.
+const rebalanceRatio = 1.5
+
+// rebalanceMaxPerPass caps the users one sync pass hands back, so a slow
+// store can't hold the sync (and the heartbeat after it) for long.
+const rebalanceMaxPerPass = 10
+
+// handOffCandidateLocked reports whether a user may be handed back: no work
+// here, still active (so the release lowers this node's count), and not
+// seen within grace.
+func (r *Router) handOffCandidateLocked(activity *clusterScopeActivity, now time.Time, grace time.Duration) bool {
+	if activity == nil || activity.outstanding != 0 {
+		return false
+	}
+	idleFor := now.Sub(activity.lastSeen)
+	return idleFor >= grace && idleFor < r.idleTTL
+}
+
+// rebalance hands users back to their rendezvous-preferred node when this
+// node holds more than rebalanceRatio times its fair share. An assignment is
+// renewed on every request, so after a node failure or drain, users that
+// moved stayed on the node they moved to as long as their traffic was steady
+// (issue #86: one node owned 50 users while two others had 18 and 21).
+//
+// Only users with no local work are released, so a handoff can't run a job
+// twice; their next request is assigned afresh and the assignment script
+// tries the preferred node first. The script is shared with Canalis, so this
+// stays out of it and reuses the same Release an idle user gets.
+func (r *Router) rebalance() {
+	now := time.Now()
+	grace := r.rebalanceGrace
+	r.mu.Lock()
+	r.expirePrunedLocked(now)
+	active, total := 0, 0
+	for _, member := range r.members {
+		if member.State == string(StateDraining) || member.State == string(StateOffline) || now.Before(r.prunedUntil[member.ID]) {
+			continue
+		}
+		active++
+		total += member.ActiveUsers
+	}
+	mine := r.activeScopeCountLocked(now)
+	draining := r.nodeState == string(StateDraining) || r.nodeState == string(StateOffline)
+	// Candidates: users still counted as active here (so a release lowers
+	// this node's count), with no work here, and not seen for a grace
+	// period. A request is assigned before its job is tracked; a user seen
+	// just now may be between the two, and releasing it then would split
+	// its jobs across two nodes.
+	var idle []string
+	for key, activity := range r.localScopes {
+		if r.handOffCandidateLocked(activity, now, grace) {
+			idle = append(idle, key)
+		}
+	}
+	r.mu.Unlock()
+
+	if draining || active < 2 || total == 0 {
+		return
+	}
+	fair := float64(total) / float64(active)
+	if float64(mine) <= rebalanceRatio*fair {
+		return
+	}
+	excess := mine - int(math.Ceil(fair))
+	// Users handed to each node this pass, so one under-loaded node isn't
+	// sent more than its fair share at once.
+	handed := map[string]int{}
+	sort.Strings(idle)
+	released := 0
+	for _, key := range idle {
+		if excess <= 0 || released >= rebalanceMaxPerPass {
+			break
+		}
+		ranked := r.rankedOwners(key, nil)
+		if len(ranked) == 0 || ranked[0].ID == r.self.ID {
+			continue
+		}
+		preferred := ranked[0]
+		capacity := preferred.Capacity
+		if capacity <= 0 {
+			capacity = defaultClusterMaxActiveUsers
+		}
+		load := preferred.ActiveUsers + handed[preferred.ID]
+		if float64(load) >= fair || load >= capacity {
+			continue
+		}
+
+		scopeLock := r.scopeLock(key)
+		scopeLock.Lock()
+		r.mu.Lock()
+		stillIdle := r.handOffCandidateLocked(r.localScopes[key], time.Now(), grace)
+		r.mu.Unlock()
+		if !stillIdle {
+			scopeLock.Unlock()
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
+		err := r.stateStore.Release(ctx, key, r.self.ID)
+		cancel()
+		if err != nil {
+			// The store is struggling: stop here rather than spend a timeout
+			// per user while the next heartbeat waits.
+			r.storeErrors.Add(1)
+			scopeLock.Unlock()
+			break
+		}
+		r.mu.Lock()
+		delete(r.localScopes, key)
+		r.mu.Unlock()
+		scopeLock.Unlock()
+
+		handed[preferred.ID]++
+		excess--
+		released++
+	}
+	if released > 0 {
+		log.Printf("cluster: handed %d users back to their preferred nodes (this node had %d active, fair share %.1f)", released, mine, fair)
+	}
 }
 
 func (r *Router) publishHeartbeat(now time.Time) Member {
