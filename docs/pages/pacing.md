@@ -19,6 +19,8 @@ Aquifer reads both namespaces, preferring `X-Aqueduct-*` when both are present.
 
 By default each `(user_id, api_key)` pair gets its own independently paced queue at every target API, so one tenant's burst, or one tenant's broken endpoint retrying, can't slow down another: a failed attempt gives its concurrency slot back and waits out its backoff in that tenant's own queue.
 
+**Prioritizing tenants.** A target's queues together never go past its configured rate (or its pool's live capacity). When several tenants are backlogged, that total is split in proportion to the `X-Aqueduct-Rps` the target last sent each tenant's queue, so the target decides priority at runtime with no configuration: advertise `600` to one tenant, `60` to a second and `6` to a third, and under contention they get 90%, 9% and 1% of the total. The advertised number can be above the configured rate; it then sets that tenant's share, while no single queue or the total exceeds the configured rate. Tenants with equal rates, or that were sent none, take equal turns. A tenant that asks for less than its share keeps its own pace, and the rest goes to the others.
+
 Who decides, in order:
 
 1. **The target API.** Answering with `X-Aqueduct-Account-Queue: disabled` (or `false`) puts everyone sending to it in one shared queue, for example an API that needs one global order. `enabled` (or `true`) gives everyone their own. Aquifer remembers the choice per target API.

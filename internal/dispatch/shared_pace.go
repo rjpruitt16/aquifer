@@ -13,14 +13,23 @@ import (
 // queues. Each queue still paces itself, but before it dispatches it must
 // also take the next slot here, so the target sees at most the configured
 // ceiling no matter how many tenants are active. Without it the ceiling was
-// enforced only by enforceAggregateBudget every few seconds, and each queue's
+// enforced only by an aggregate throttle every few seconds, and each queue's
 // per-success recovery climbed back to the full per-queue rate in between
 // (issue #146).
 //
-// Slots go to queues in the order they started waiting, not to whichever
-// asks first: a queue that wakes often (a steady stream of new jobs) would
-// otherwise take nearly every slot from one with a static backlog that only
-// wakes on its timer.
+// When queues contend, slots are shared in proportion to each queue's
+// weight: the rate the target last advertised for that queue
+// (X-Aqueduct-Rps), or its own pace when it advertised nothing. That keeps
+// the target in charge of priority: advertising 20 to one tenant and 10 to
+// another gives the first two slots for every one of the second's, while the
+// total stays at the ceiling. Equal weights get equal turns.
+//
+// This is stride scheduling. Every queue has a pass; taking a slot adds
+// 1/weight to it, and a free slot goes to the contending queue with the
+// lowest pass, ties to the one that has waited longest. A queue that wakes
+// often (a steady stream of new jobs) therefore can't take slots from one
+// with a static backlog that only wakes on its timer, and a queue that was
+// idle rejoins at the current pass instead of with banked credit.
 type sharedPace struct {
 	mu sync.Mutex
 	// last is when the most recent slot started. The next slot is computed
@@ -30,61 +39,102 @@ type sharedPace struct {
 	last    time.Time
 	granted bool
 	rate    func() float64
-	// waiting maps each queue that was turned away to when it first asked
-	// and when it last asked. A queue that stops asking (it went idle, or
-	// stopped) is dropped after staleWaiter.
-	waiting map[any]waiter
+	// vtime is the pass of the most recent slot. A queue's pass is never
+	// below it when it asks, so idle time banks nothing.
+	vtime float64
+	// queues holds every queue that asked recently: its pass, and the window
+	// in which it contends for slots ([readyAt, until]). A queue turned away
+	// contends until it stops asking. A queue that took a slot contends again
+	// from when its own pace lets it ask, for about its timer's jitter: a
+	// backlogged queue keeps its turn while it waits out its own interval,
+	// instead of the slot going to whoever asks just before its timer fires.
+	// That hold is at most one interval, which the slot schedule's one
+	// interval of credit gives back. A queue that stops asking altogether is
+	// forgotten after forgetQueue.
+	queues map[any]*paceQueue
 }
 
-type waiter struct{ since, asked time.Time }
+type paceQueue struct {
+	pass    float64
+	waiting bool // turned away at since, and asking since
+	since   time.Time
+	asked   time.Time
+	readyAt time.Time
+	until   time.Time
+}
+
+// forgetQueue is how long a queue that stopped asking keeps its pass. Its
+// pass only matters while it is above vtime, which lasts about one of its
+// own intervals, so this just bounds the map.
+const forgetQueue = time.Minute
 
 func newSharedPace(rate func() float64) *sharedPace {
-	return &sharedPace{rate: rate, waiting: make(map[any]waiter)}
+	return &sharedPace{rate: rate, queues: make(map[any]*paceQueue)}
 }
 
-// reserve takes the next dispatch slot for who if one is free at now and
-// it's who's turn, and returns 0. Otherwise it takes nothing and returns how
-// long to wait before asking again. A nil sharedPace, or a non-positive rate,
-// never limits.
-func (s *sharedPace) reserve(who any, now time.Time) time.Duration {
+// reserve takes the next dispatch slot for who, whose weight is its
+// advertised (or own) rate and whose own pace allows one dispatch per own,
+// if one is free at now and it's who's turn, and returns 0. Otherwise it takes nothing and returns how long to wait before
+// asking again. A nil sharedPace, or a non-positive rate, never limits.
+func (s *sharedPace) reserve(who any, weight float64, own time.Duration, now time.Time) time.Duration {
+	wait, _ := s.reserveSlot(who, weight, own, now)
+	return wait
+}
+
+// reserveSlot is reserve that also returns, when it grants a slot, the time
+// the slot was scheduled for, which is at most one interval before now. A
+// queue counts its own pace from it rather than from now: counted from now,
+// the timer jitter in every wait would add up, and a queue paced at the
+// ceiling would fall further behind the slot schedule each turn until it
+// missed its turns. With no limit the slot is now.
+func (s *sharedPace) reserveSlot(who any, weight float64, own time.Duration, now time.Time) (time.Duration, time.Time) {
 	if s == nil {
-		return 0
+		return 0, now
 	}
 	r := s.rate()
 	if r <= 0 {
-		return 0
+		return 0, now
 	}
 	// Same floor each queue already has: a pool whose members' reputations
 	// collapsed must still get enough dispatches to recover.
 	r = math.Max(r, MinRPS)
 	interval := time.Duration(float64(time.Second) / r)
+	weight = math.Max(weight, MinRPS)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Forget queues that stopped asking. A waiting queue asks again at least
-	// once per interval (its timer is set to the wait returned here).
+	// A queue turned away asks again at least once per interval (its timer
+	// is set to the wait returned here); one that doesn't has stopped.
 	stale := 2*interval + 100*time.Millisecond
-	for k, w := range s.waiting {
-		if now.Sub(w.asked) > stale {
-			delete(s.waiting, k)
+	for k, q := range s.queues {
+		if now.Sub(q.asked) > forgetQueue {
+			delete(s.queues, k)
+		} else if now.After(q.until) {
+			q.waiting = false
 		}
 	}
 
+	me, ok := s.queues[who]
+	if !ok {
+		me = &paceQueue{}
+		s.queues[who] = me
+	}
+	me.pass = math.Max(me.pass, s.vtime)
+	me.asked = now
+
 	wait := func() time.Duration {
-		w, ok := s.waiting[who]
-		if !ok {
-			w.since = now
+		if !me.waiting {
+			me.waiting, me.since = true, now
 		}
-		w.asked = now
-		s.waiting[who] = w
+		me.readyAt, me.until = now, now.Add(stale)
 		if s.granted {
 			if next := s.last.Add(interval); now.Before(next) {
 				return next.Sub(now)
 			}
 		}
-		// The slot is free but belongs to a queue that has waited longer; ask
-		// again shortly, after it has had the chance to take it.
+		// The slot is free but belongs to a queue whose turn comes first;
+		// ask again shortly, after it has had the chance to take it.
 		return min(interval, 5*time.Millisecond)
 	}
 
@@ -94,19 +144,30 @@ func (s *sharedPace) reserve(who any, now time.Time) time.Duration {
 	if s.granted {
 		next := s.last.Add(interval)
 		if now.Before(next) {
-			return wait()
+			return wait(), time.Time{}
 		}
 		if next.After(start) {
 			start = next
 		}
 	}
-	mine, waitingNow := s.waiting[who]
-	for k, w := range s.waiting {
-		if k != who && (!waitingNow || w.since.Before(mine.since)) {
-			return wait()
+	for k, q := range s.queues {
+		if k == who || now.After(q.until) || now.Before(q.readyAt) {
+			continue
+		}
+		// A contender's pass may have fallen behind vtime while it waited
+		// for its timer; it rejoins at vtime, like anyone else.
+		pass := math.Max(q.pass, s.vtime)
+		if pass < me.pass || (pass == me.pass && (!me.waiting || q.since.Before(me.since))) {
+			return wait(), time.Time{}
 		}
 	}
-	delete(s.waiting, who)
+	s.vtime = me.pass
+	me.pass += 1 / weight
+	// It stays in line for its next turn, around when its own pace lets it
+	// ask again.
+	hold := min(own/4+2*time.Millisecond, interval)
+	me.waiting, me.since = false, now
+	me.readyAt, me.until = start.Add(own), start.Add(own+hold)
 	s.last, s.granted = start, true
-	return 0
+	return 0, start
 }
