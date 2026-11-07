@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/rjpruitt16/aquifer/internal/admission"
+	"github.com/rjpruitt16/aquifer/internal/dispatch"
 	"github.com/rjpruitt16/aquifer/internal/jobs"
 	"github.com/rjpruitt16/aquifer/internal/region"
 	"github.com/rjpruitt16/aquifer/l8"
@@ -282,8 +283,18 @@ func (a *Aquifer) prepareJob(req JobRequest) (job *Job, duplicate *EnqueueResult
 	}
 	if a.admission != nil {
 		if decision := a.admission.Check(); !decision.Allowed {
-			a.store.DeleteJob(job.ID)
-			return nil, nil, release, &AdmissionRejectedError{Decision: decision}
+			// Over the memory limit but under the hard limit: refuse only
+			// jobs for a target whose backlog isn't draining, so one dead
+			// target can't shut intake for every other (issue #87).
+			if limit := dispatch.StuckBacklogLimit(); decision.Soft && limit > 0 && !a.registry.TargetBacklogStuck(job, limit) {
+				a.admission.Admitted()
+			} else {
+				if decision.Soft {
+					a.admission.Refused(decision)
+				}
+				a.store.DeleteJob(job.ID)
+				return nil, nil, release, &AdmissionRejectedError{Decision: decision}
+			}
 		}
 	}
 

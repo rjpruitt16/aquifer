@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"log"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -120,6 +121,8 @@ func (s *SQLite) migrate() {
 		// have an empty webhook_url. Preserve their identity across migration.
 		s.db.Exec(`UPDATE jobs SET webhook_delivery = 1 WHERE webhook_url = ''`)
 	}
+	// Restart recovery reads each queue's pending jobs a page at a time.
+	s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_jobs_queue_page ON jobs(queue_key, created_at, id)`)
 	// Jobs are no longer marked in_flight; rows left that way by older
 	// versions are just unfinished work.
 	s.db.Exec(`UPDATE jobs SET status = 'queued' WHERE status = 'in_flight'`)
@@ -280,6 +283,54 @@ func (s *SQLite) GetJob(jobID string) *jobs.Job {
 		FROM jobs WHERE id = ? AND expires_at > ?
 	`, jobID, time.Now().UnixMilli())
 	return scanJob(row)
+}
+
+func (s *SQLite) PendingQueueKeys() (map[string]int, error) {
+	rows, err := s.db.Query(`
+		SELECT queue_key, COUNT(*) FROM jobs
+		WHERE status IN ('queued', 'in_flight') AND expires_at > ?
+		GROUP BY queue_key
+	`, time.Now().UnixMilli())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	counts := map[string]int{}
+	for rows.Next() {
+		var key string
+		var n int
+		if err := rows.Scan(&key, &n); err != nil {
+			return nil, err
+		}
+		counts[key] = n
+	}
+	return counts, rows.Err()
+}
+
+func (s *SQLite) QueuedPage(queueKey string, after jobs.PageCursor, createdBefore int64, limit int) ([]*jobs.Job, error) {
+	if createdBefore <= 0 {
+		createdBefore = math.MaxInt64
+	}
+	rows, err := s.db.Query(`
+		SELECT id, user_id, url, method, body, headers, webhook_url, webhook_delivery, status, created_at, execute_before, idempotent_key_hash, max_retries, attempts, webhook_max_retries
+		FROM jobs
+		WHERE queue_key = ? AND status IN ('queued', 'in_flight') AND expires_at > ?
+		  AND (created_at, id) > (?, ?) AND created_at < ?
+		ORDER BY created_at, id
+		LIMIT ?
+	`, queueKey, time.Now().UnixMilli(), after.CreatedAt, after.ID, createdBefore, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var found []*jobs.Job
+	for rows.Next() {
+		if j := scanJob(rows); j != nil {
+			j.Status = jobs.StatusQueued
+			found = append(found, j)
+		}
+	}
+	return found, rows.Err()
 }
 
 func (s *SQLite) GetQueuedJobs() []*jobs.Job {
