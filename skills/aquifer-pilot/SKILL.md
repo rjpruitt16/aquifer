@@ -128,14 +128,14 @@ Partitioning matters for the pacing math. **Pacing is per node.** On each node, 
 
 > highest advertised rate × number of nodes
 
-A node that hasn't been sent a rate (at startup, or after a failure cleared it) uses its configured rate instead, and a pool uses its members' live capacity, so include those in the estimate.
+A node that hasn't been sent a rate (at startup, or after a failure cleared it) uses its configured rate instead, so include that in the estimate. Pools are different: a pool's total is its members' registered capacity on each node, so with several nodes, register each member on each node with its share of capacity, not all of it.
 
 Account for that in the AIMD:
-- **Count the nodes.** Tell them apart by `X-Aqueduct-Node-Id`, which every request carries; count the distinct ids seen in the last few seconds. Each node needs its own `AQUIFER_NODE_ID`, and only trusted senders' ids should count.
+- **Count the nodes.** Tell them apart by `X-Aqueduct-Node-Id`, which every request carries; count the distinct ids seen in the last few seconds. Each node needs a distinct id (`AQUIFER_NODE_ID`, else `AQUIFER_CLUSTER_SELF_ID`, else `FLY_MACHINE_ID`, else the host name), and only trusted senders' ids should count. If the backend runs several replicas sharing one budget, count across all of them (a shared store), not per replica.
 - **Divide.** Scale every advertised rate so the top one is `budget ÷ nodes`. Don't divide by queues: that shrinks each node's total too.
 - **Scale the step.** An additive step of +5 rps on the top rate lands on every node at once. With 4 nodes, that's up to +20 rps at the backend, arriving as each node gets its next response. Size the increase for the total, cut on the total, and wait to see a step land before taking the next.
 
-A feedback loop on the backend's own saturation signal corrects itself either way, because it measures the real total. But dividing first means fewer overshoots.
+A feedback loop on the backend's own saturation signal corrects itself either way, because it measures the real total. But dividing first means fewer overshoots. It doesn't remove them: each queue picks up a new rate on its own next response, so a node joining, or an idle one returning after its id left the window, can push the total over budget for a while. Where the budget must never be exceeded, put a limiter in front of the backend as well.
 
 ### The control loop
 
