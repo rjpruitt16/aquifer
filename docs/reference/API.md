@@ -751,6 +751,6 @@ Every dispatch carries these, with `X-Aquifer-*` aliases:
 | `X-Aqueduct-Upstream-Backlog` | Jobs on this node waiting for this target API  |
 | `X-Aqueduct-Node-Id`      | This node's id: count the distinct ids to know how many Aquifer nodes are sending to you |
 
-Pacing is per node and per queue: a rate you advertise applies to each queue that received it, and nodes don't coordinate. So when several nodes send to you, divide your budget by the total of their active queues. `X-Aqueduct-Node-Id` tells the nodes apart. It's `AQUIFER_NODE_ID`, else `AQUIFER_CLUSTER_SELF_ID`, else `FLY_MACHINE_ID`, else the host name.
+Pacing is per node, and nodes don't coordinate: on each node, a target's queues together send at most the highest rate you're advertising to any of them ([Dynamic priority](../pages/pacing.md#dynamic-priority)). So when several nodes send to you, divide your budget by the number of nodes, not by their queues ([More than one node](../pages/pacing.md#more-than-one-node)). `X-Aqueduct-Node-Id` tells the nodes apart. It's `AQUIFER_NODE_ID`, else `AQUIFER_CLUSTER_SELF_ID`, else `FLY_MACHINE_ID`, else the host name.
 
 Traditional load balancers and autoscalers rely on failure to start scaling — capacity only responds once something's already struggling. Aquifer treats resources as fluid, not fixed: it paces down as machines show strain and back up as capacity comes online, using the same signals it already reports on every response.

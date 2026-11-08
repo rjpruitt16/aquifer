@@ -124,14 +124,14 @@ Aquifer scales by partitioning, not by sharing state:
 - **Drain mode:** a node takes one tenant's burst at a time.
 - **Canalis:** a gateway in front of many nodes.
 
-Partitioning matters for the pacing math. **Pacing is per node and per queue.** A rate the backend advertises applies to each queue that received it. A node keeps the total across its own queues only within its configured budget, and nodes don't coordinate with each other. So the backend sees up to:
+Partitioning matters for the pacing math. **Pacing is per node.** On each node, a target's queues together send at most the highest rate the backend is advertising to any of them; the rates set each queue's share of that. Nodes don't coordinate with each other. So the backend sees up to:
 
-> advertised rate × active queues per node × number of nodes
+> highest advertised rate × number of nodes
 
 Account for that in the AIMD:
-- **Count the senders.** Read `X-Aqueduct-Active-Queues` per node. Tell nodes apart by `X-Aqueduct-Node-Id`, which every request carries. Add them up.
-- **Divide.** Advertise each queue `budget ÷ total active queues`, not the whole budget.
-- **Scale the step.** An additive step of +5 rps lands on every queue at once. With 20 queues across 4 nodes, that's +100 rps at the backend. Size the increase for the total, and cut on the total.
+- **Count the nodes.** Tell them apart by `X-Aqueduct-Node-Id`, which every request carries; count the distinct ids seen in the last few seconds.
+- **Divide.** Scale every advertised rate so the top one is `budget ÷ nodes`. Don't divide by queues: that shrinks each node's total too.
+- **Scale the step.** An additive step of +5 rps on the top rate lands on every node at once. With 4 nodes, that's +20 rps at the backend. Size the increase for the total, and cut on the total.
 
 A feedback loop on the backend's own saturation signal corrects itself either way, because it measures the real total. But dividing first means fewer overshoots.
 
