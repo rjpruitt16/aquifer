@@ -57,6 +57,10 @@ In each case the backend already knows which tenant is in trouble, often before 
 
 ### More than one node
 
-Nodes don't coordinate, so each one applies the rates it's sent on its own: three nodes each advertised `20` send up to 60/s in total. To hold the whole cluster to a budget, the target divides it by the number of nodes sending to it, counting the distinct `X-Aqueduct-Node-Id` values it has seen in the last few seconds, and scales every rate it advertises by that share: a budget of 20/s across three nodes means advertising each node's top tenant `6.7`, with the others in proportion. When a node comes online the count goes up and every node slows down on its next response; when one crashes its id stops arriving, and the rest speed back up. The split is even, so a node with little work leaves part of its share unused.
+Nodes don't coordinate, so each one applies the rates it's sent on its own: three nodes each advertised `20` send up to 60/s in total. To hold the whole cluster to a budget, the target divides it by the number of nodes sending to it, counting the distinct `X-Aqueduct-Node-Id` values it has seen in the last few seconds, and scales every rate it advertises by that share: a budget of 20/s across three nodes means advertising each node's top tenant `6.7`, with the others in proportion. When a node comes online the count goes up and every node slows down on its next response; when one crashes its id stops arriving, and the rest speed back up. The split is even, so a node with little work leaves part of its share unused. Three things keep the count honest:
+
+- Each node needs its own `AQUIFER_NODE_ID` (by default the Fly machine id or host name). Nodes sharing an id count as one and each send the whole budget.
+- Count ids only from Aquifer nodes you trust, over a private network or authenticated requests; otherwise a caller could forge ids and push your real nodes' rates down.
+- A new rate reaches each queue on its next response, and a node that hasn't been sent one runs at its configured rate. So the total can briefly overshoot after a node joins or restarts; set configured rates to the per-node share, and put a limiter in front of the target if the budget must never be exceeded.
 
 The rate a client submits never counts: only the target's responses can set pace or priority, so a tenant can't make itself the emergency.
