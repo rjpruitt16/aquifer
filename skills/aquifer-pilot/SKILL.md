@@ -128,7 +128,7 @@ Partitioning matters for the pacing math. **Pacing is per node.** On each node, 
 
 > highest advertised rate × number of nodes
 
-A node that hasn't been sent a rate (at startup, or after a failure cleared it) uses its configured rate instead, so include that in the estimate. Pools are different: a pool's total is its members' registered capacity on each node, so with several nodes, register each member on each node with its share of capacity, not all of it.
+A node that hasn't been sent a rate (at startup, or after a failure cleared it) uses its configured rate instead, and no queue goes below 0.5 rps however low the advertised rate, so include both in the estimate. Pools are different: a pool's total is its members' registered capacity on each node, so with several nodes, register each member on each node with its share of capacity, not all of it.
 
 Account for that in the AIMD:
 - **Count the nodes.** Tell them apart by `X-Aqueduct-Node-Id`, which every request carries; count the distinct ids seen in the last few seconds. Each node needs a distinct id (`AQUIFER_NODE_ID`, else `AQUIFER_CLUSTER_SELF_ID`, else `FLY_MACHINE_ID`, else the host name), and only trusted senders' ids should count. If the backend runs several replicas sharing one budget, count across all of them (a shared store), not per replica.
