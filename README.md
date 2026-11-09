@@ -4,6 +4,8 @@
 
 A durable queue that paces traffic into a service at the rate it can take. Put it in front of your webhook handlers, a rate-limited third-party API, a GPU or your own backend: when a burst arrives faster than the target can handle, Aquifer holds the excess on disk instead of letting callers retry into it, and releases it at the rate you set for that target, slowing down whenever the target, or its load report, asks for less.
 
+Use cases include API protection, webhook ingestion, coordinating agents and multigenerational search, where each lineage of an evolutionary or tree search gets its own queue so one can't starve the rest ([use cases](docs/pages/use-cases.md)).
+
 - **Retry storm mitigation.** Callers wait in a durable queue instead of hammering a struggling service with retries, and the queue drains as capacity comes back.
 - **Fairness.** Every tenant gets its own queue and they take turns. When one tenant flooded the GPU, database, CI runners and sandbox the agents shared, the small tenants' p99 stayed at 106 s, against 308 s when every agent called them directly, where a third of their workflows failed outright. The flooding tenant waited longer instead. Turns are equal by default, but the target can make them as unfair as it needs, live, by advertising a higher rate to one tenant: an emergency can take nearly all of a target's capacity for as long as it lasts ([dynamic priority](docs/pages/pacing.md#dynamic-priority)).
 - **Delivery however the caller wants it:** results on the same connection (synchronous) or by durable webhook, and WebSocket sessions proxied with a transcript that replays anything missed after a reconnect.
