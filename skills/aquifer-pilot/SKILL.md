@@ -124,16 +124,19 @@ Aquifer scales by partitioning, not by sharing state:
 - **Drain mode:** a node takes one tenant's burst at a time.
 - **Canalis:** a gateway in front of many nodes.
 
-Partitioning matters for the pacing math. **Pacing is per node and per queue.** A rate the backend advertises applies to each queue that received it. A node keeps the total across its own queues only within its configured budget, and nodes don't coordinate with each other. So the backend sees up to:
+Partitioning matters for the pacing math. **Pacing is per node.** On each node, a target's queues together send at most the highest rate the backend is advertising to any of them; the rates set each queue's share of that. Nodes don't coordinate with each other. So the backend sees up to:
 
-> advertised rate × active queues per node × number of nodes
+> highest advertised rate × number of nodes
+
+A node that hasn't been sent a rate (at startup, or after a failure cleared it) uses its configured rate instead, and no queue goes below 0.5 rps however low the advertised rate, so include both in the estimate. Pools are different: a pool's total is its members' registered capacity on each node, so with several nodes, register each member on each node with its share of capacity, not all of it.
 
 Account for that in the AIMD:
-- **Count the senders.** Read `X-Aqueduct-Active-Queues` per node. Tell nodes apart by `X-Aqueduct-Node-Id`, which every request carries. Add them up.
-- **Divide.** Advertise each queue `budget ÷ total active queues`, not the whole budget.
-- **Scale the step.** An additive step of +5 rps lands on every queue at once. With 20 queues across 4 nodes, that's +100 rps at the backend. Size the increase for the total, and cut on the total.
+- **Count the nodes.** Tell them apart by `X-Aqueduct-Node-Id`, which every request carries; count the distinct ids seen in the last few seconds. Each node needs a distinct id (`AQUIFER_NODE_ID`, else `AQUIFER_CLUSTER_SELF_ID`, else `FLY_MACHINE_ID`, else the host name), and only trusted senders' ids should count. If the backend runs several replicas sharing one budget, count across all of them (a shared store), not per replica.
+- **Divide.** Scale every advertised rate so the top one is `budget ÷ nodes`. Don't divide by queues: that shrinks each node's total too.
+- **Scale the step.** An additive step of +5 rps on the top rate lands on every node at once. With 4 nodes, that's up to +20 rps at the backend, arriving as each node gets its next response. Size the increase for the total, cut on the total, and wait to see a step land before taking the next.
+- **Stamp every success.** A retryable failure (`429`, 5xx) halves that queue's rate and clears the rate advertised to it, and with requests in flight an older response can arrive after a cut and carry the old rate. Send the current rate on every successful response, so each queue converges on it.
 
-A feedback loop on the backend's own saturation signal corrects itself either way, because it measures the real total. But dividing first means fewer overshoots.
+A feedback loop on the backend's own saturation signal corrects itself either way, because it measures the real total. But dividing first means fewer overshoots. It doesn't remove them: each queue picks up a new rate on its own next response, so a node joining, or an idle one returning after its id left the window, can push the total over budget for a while. Where the budget must never be exceeded, put a limiter in front of the backend as well.
 
 ### The control loop
 
