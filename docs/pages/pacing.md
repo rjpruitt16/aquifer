@@ -55,6 +55,10 @@ Most queues that support priority read it from a static file: a tier per custome
 
 In each case the backend already knows which tenant is in trouble, often before any human does. It advertises that tenant a much higher rate, say `1000` next to `10` for each of ten others, and from the next response on that tenant gets 1000/1100 of the target, about 91%, while everyone else slows down but keeps moving. When the emergency ends, the backend advertises that tenant its normal rate again: from its next response the turns are back to normal, and the total falls to the highest rate still advertised. Send the lower rate rather than dropping the header, because an advertised rate stays in force until the target sends a new one or a failure clears it; a response without the header keeps it. A tenant that goes idle stops counting toward the total after 3 seconds. Nothing was configured, and nobody had to deploy anything.
 
+**A real recovery, done by hand.** On May 20, 2026, Railway was recovering a backed-up build queue after a cloud outage. To keep paid builds moving, they paused free, trial and hobby builds, resumed them, and repeated that four times over about ten hours, while a hobby customer called it unfair ([status page](https://status.railway.com/incident/KVZ1Z8GY)). With Aquifer, the build service would advertise a high rate to paid workspaces and a low one to the rest, raising it as the backlog drained until every workspace was back to equal turns, with no switches to flip and no one watching.
+
+The rate a client submits never counts: only the target's responses can set pace or priority, so a tenant can't make itself the emergency.
+
 ### More than one node
 
 Nodes don't coordinate, so each one applies the rates it's sent on its own: three nodes each advertised `20` send up to 60/s in total. To hold the whole cluster to a budget, the target divides it by the number of nodes sending to it, counting the distinct `X-Aqueduct-Node-Id` values it has seen in the last few seconds, and scales every rate it advertises by that share: a budget of 20/s across three nodes means advertising each node's top tenant `6.7`, with the others in proportion. When a node comes online the count goes up and every node slows down on its next response; when one crashes its id stops arriving, and the rest speed back up. The split is even, so a node with little work leaves part of its share unused. Three things keep the count honest:
@@ -62,5 +66,3 @@ Nodes don't coordinate, so each one applies the rates it's sent on its own: thre
 - Each node needs its own `AQUIFER_NODE_ID` (by default the Fly machine id or host name). Nodes sharing an id count as one and each send the whole budget.
 - Count ids only from Aquifer nodes you trust, over a private network or authenticated requests; otherwise a caller could forge ids and push your real nodes' rates down.
 - A new rate reaches each queue on its next response, and a node that hasn't been sent one runs at its configured rate. So the total can briefly overshoot after a node joins or restarts; set configured rates to the per-node share, and put a limiter in front of the target if the budget must never be exceeded.
-
-The rate a client submits never counts: only the target's responses can set pace or priority, so a tenant can't make itself the emergency.
