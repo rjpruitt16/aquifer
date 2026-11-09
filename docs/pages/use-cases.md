@@ -36,8 +36,14 @@ clients  →  trusted gateway  →  GET /websocket on Aquifer  →  WebSocket ba
 ```
 Aquifer can persist an ordered WebSocket transcript in Valkey, replay missed backend events after a client reconnects, and pace new or replacement target API connections. Authentication remains the gateway's job. See [`GET /websocket`](../reference/API.md#get-websocket) for the protocol and limits.
 
+**Multigenerational search — keep every lineage alive**
+```
+search coordinator  →  POST /jobs to Aquifer (user_id = lineage)  →  model API / evaluator
+```
+Evolutionary and tree searches (program search, prompt or agent optimization, red-teaming) fan out a generation of model and evaluator calls, keep the winners, and fan out again. Use the lineage or subtree as `user_id`: a lineage that suddenly spawns ten times the children gets the same turns as the rest instead of starving them, the model API's `429`s pace the whole search instead of setting off a retry storm, and a crashed coordinator resumes from the persisted queue instead of losing the generation. Put a reference in the job (a lineage and generation id, or a prompt-cache key) and build the full context in the worker; request bodies are capped at 1MB and stored results at 64KB by default (`AQUIFER_MAX_BODY_BYTES`, `AQUIFER_RESULT_MAX_BYTES`). Not benchmarked yet.
+
 **Sleep through partial outages.** On Fly.io, set `AQUIFER_FLY_REGIONS` and that same overload signal drives real cross-region redirect: other regions Aquifer is deployed to get tried live, over Fly's private network, before this instance ever falls back to its own local queue, nearest-first by measured latency, deterministic enough that two callers racing the same job converge on the same region instead of each chasing their own nearest option. One region degrading routes around itself instead of paging you at 3am. If every known region is down too, that's a real fleet-wide problem, and Aquifer says so with a `429` and a long `Retry-After` rather than quietly queueing it somewhere and hoping. See [`POST /proxy`](../reference/API.md#post-proxy)'s "Cross-region redirect" section for the full mechanics, including the one honestly-documented tradeoff it doesn't try to hide.
 
-In all six, the target API can lower the dispatch pace via response headers. See [Dynamic Pacing](pacing.md) for how the ceiling, backoff, and recovery actually work.
+In all of these, the target API can lower the dispatch pace via response headers. See [Dynamic Pacing](pacing.md) for how the ceiling, backoff, and recovery actually work.
 
 Long-term protocol goal: if more services emit `X-Aqueduct-*`, agents can respond to capacity signals instead of independently guessing retry and concurrency behavior. Aquifer works today without ecosystem adoption; broader protocol adoption is the longer-term goal.
