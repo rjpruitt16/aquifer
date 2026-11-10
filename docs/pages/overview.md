@@ -12,6 +12,8 @@ Results come back however suits the caller: synchronously on the same connection
 
 You can run it with both: Envoy in front as the gateway, Aquifer behind it holding the work, and Hookdeck delivering its webhooks into Aquifer.
 
+**See it move.** [Aquifer in Motion](../interactive/aquifer-in-motion.html) is an interactive page: take a machine offline and watch a circuit breaker and Aquifer handle the same traffic, change the pace from the backend with a header, then replay the Envoy benchmark runs.
+
 **Not going to read all this?** Point your coding agent at the [Aquifer pilot skill](../../skills/aquifer-pilot/SKILL.md). It evaluates Aquifer against your own workload in a shadow run on a branch, then shows you the numbers.
 
 **Increase your rate limit without DDoSing your backend.**

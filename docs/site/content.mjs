@@ -2,7 +2,7 @@
 // astro.config.mjs before every build and dev server, and again in dev when a
 // source file changes; `npm run content` runs it alone. It writes
 // src/content/docs/ for the pages, and public/ for the images, a plain .md
-// copy of every page, llms.txt (an index for agents) and llms-full.txt (every
+// copy of every page, the standalone pages in docs/interactive, llms.txt (an index for agents) and llms-full.txt (every
 // page in one file). Links are rewritten so they work in each place: between
 // pages on the site, between .md copies for agents, and to GitHub for any
 // other file in the repository.
@@ -42,6 +42,7 @@ function forSite(resolved, anchor) {
 	const p = bySrc.get(resolved);
 	if (p) return pageUrl(p) + anchor;
 	if (resolved.startsWith('docs/images/')) return `${base}/images/${resolved.slice('docs/images/'.length)}`;
+	if (resolved.startsWith('docs/interactive/')) return `${base}/interactive/${resolved.slice('docs/interactive/'.length)}${anchor}`;
 	return `${repo}/blob/main/${resolved}${anchor}`;
 }
 
@@ -49,6 +50,7 @@ function forAgents(resolved, anchor) {
 	const p = bySrc.get(resolved);
 	if (p) return `${site}${base}/${mdName(p)}${anchor}`;
 	if (resolved.startsWith('docs/images/')) return `${site}${base}/images/${resolved.slice('docs/images/'.length)}`;
+	if (resolved.startsWith('docs/interactive/')) return `${site}${base}/interactive/${resolved.slice('docs/interactive/'.length)}${anchor}`;
 	return `${repo}/blob/main/${resolved}${anchor}`;
 }
 
@@ -63,6 +65,8 @@ export function assemble() {
 	mkdirSync(pub, { recursive: true });
 	rmSync(join(pub, 'images'), { recursive: true, force: true });
 	cpSync(join(root, 'docs/images'), join(pub, 'images'), { recursive: true });
+	rmSync(join(pub, 'interactive'), { recursive: true, force: true });
+	cpSync(join(root, 'docs/interactive'), join(pub, 'interactive'), { recursive: true });
 
 	const full = [];
 	for (const p of pages) {
