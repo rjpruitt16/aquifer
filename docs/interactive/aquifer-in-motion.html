@@ -628,7 +628,7 @@ function drawTime(hover){
   const j=idx(Math.min(P,END-1));
   $('readout').innerHTML='At '+mmss(P)+': Aquifer <span class="num">'+runs.aquifer.sm[j].toFixed(1)+'</span> completed per second, Envoy <span class="num">'+runs.envoy.sm[j].toFixed(1)+'</span>. Drag the chart to move through the run.';
 }
-function setP(p,fromUser){P=Math.max(0,Math.min(END,p));$('scrub').value=Math.round(P);$('clock').textContent=mmss(P)+' / '+mmss(END);$('now').textContent=nowText(P);
+function setP(p,fromUser){P=Math.max(0,Math.min(END,p));$('scrub').value=Math.round(P);$('scrub').setAttribute('aria-valuetext',mmss(P)+' of '+mmss(END));$('clock').textContent=mmss(P)+' / '+mmss(END);$('now').textContent=nowText(P);
   if(fromUser){playing=false;runs.envoy.dots=[];runs.aquifer.dots=[];}
   $('play').textContent=playing?'Pause':(P>=END?'Replay the run':'Play');}
 $('play').onclick=()=>{if(playing){playing=false;}else{if(P>=END){P=0;}playing=true;}setP(P);};
