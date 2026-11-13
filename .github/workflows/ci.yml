@@ -17,8 +17,13 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Unit tests with race detection
-        run: go test -race ./...
+      # Timing/throughput tests use testing.Short to opt out of instrumentation.
+      # Run the complete suite normally, then race-check the short suite.
+      - name: Full test suite
+        run: go test -p 1 ./...
+
+      - name: Short suite with race detection
+        run: go test -race -short ./...
 
       - name: Build
         run: |
