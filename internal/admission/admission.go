@@ -27,9 +27,8 @@ const maxRetryAfterSeconds = 60
 // can't be measured, sized for the 1GB volume this project was first
 // benchmarked on. defaultMaxBodyBytes wasn't itself load-tested — it's a
 // conservative, standard API-payload ceiling, not a benchmark-derived
-// number. Memory is deliberately left disabled by default (see
-// LoadLimits) since a safe ceiling depends on the deployment's own
-// memory budget, not just its disk.
+// number. Memory defaults to 70% of the detected container or machine
+// budget (see LoadLimits), and remains unbounded if neither is readable.
 const (
 	defaultMaxBodyBytes = 1 * 1024 * 1024
 	defaultDBMaxBytes   = 800 * 1024 * 1024

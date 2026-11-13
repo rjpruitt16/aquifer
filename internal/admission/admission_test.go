@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-func TestLoadAdmissionLimitsDefaultsOnForSizeChecksOffForMemory(t *testing.T) {
+func TestLoadAdmissionLimitsDefaultsFollowAvailableResources(t *testing.T) {
 	for _, key := range []string{"AQUIFER_MEMORY_LIMIT_MB", "AQUIFER_MAX_BODY_BYTES", "AQUIFER_DB_MAX_BYTES", "AQUIFER_RETRY_AFTER_SECONDS"} {
 		old, had := os.LookupEnv(key)
 		os.Unsetenv(key)
@@ -23,8 +23,8 @@ func TestLoadAdmissionLimitsDefaultsOnForSizeChecksOffForMemory(t *testing.T) {
 
 	limits := LoadLimits()
 
-	if limits.MemoryLimitMB != 0 {
-		t.Fatalf("expected memory limit to stay disabled by default, got %d", limits.MemoryLimitMB)
+	if want := deriveMemoryLimitMB(memoryLimitSources); limits.MemoryLimitMB != want {
+		t.Fatalf("expected memory limit derived from available resources: got %d, want %d", limits.MemoryLimitMB, want)
 	}
 	if limits.MaxBodyBytes != defaultMaxBodyBytes {
 		t.Fatalf("expected default max body bytes %d, got %d", defaultMaxBodyBytes, limits.MaxBodyBytes)

@@ -34,6 +34,8 @@ type Store interface {
 	// streamed (and so may get no webhook) can still fetch it later.
 	PutResult(jobID string, result jobs.Result)
 	GetResult(jobID string) (jobs.Result, bool)
+	// Finish atomically stores terminal status, expiry, and optional result.
+	Finish(jobID string, status jobs.Status, result *jobs.Result) error
 	Counts() Counts
 	GetJob(jobID string) *jobs.Job
 	GetQueuedJobs() []*jobs.Job

@@ -6,6 +6,7 @@ package storage
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"math"
 	"sync"
@@ -192,6 +193,36 @@ func (s *SQLite) DeleteJob(jobID string) {
 // restart while it waits out its backoff recovers it with its attempt count.
 func (s *SQLite) RecordRetry(jobID string, attempts int) {
 	s.db.Exec(`UPDATE jobs SET attempts = ?, status = 'queued' WHERE id = ?`, attempts, jobID)
+}
+
+// Finish updates the terminal state and response with one atomic statement.
+func (s *SQLite) Finish(jobID string, status jobs.Status, result *jobs.Result) error {
+	if status != jobs.StatusCompleted && status != jobs.StatusFailed {
+		return fmt.Errorf("invalid terminal status: %s", status)
+	}
+	raw := ""
+	if result != nil {
+		data, err := json.Marshal(result)
+		if err != nil {
+			return err
+		}
+		raw = string(data)
+	}
+	res, err := s.db.Exec(`UPDATE jobs SET status = ?, expires_at = ?, result = ? WHERE id = ?`, string(status), time.Now().Add(ttlForStatus(status)).UnixMilli(), raw, jobID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	if !s.skipDrainEvents.Load() {
+		s.recordDrainEvent(jobID, status)
+	}
+	return nil
 }
 
 func (s *SQLite) PutResult(jobID string, result jobs.Result) {
