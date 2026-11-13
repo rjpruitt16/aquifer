@@ -492,7 +492,7 @@ func (q *AccountQueue) run(configuredRPS float64, configuredMaxConc int, slowSta
 				defer func() {
 					if r := recover(); r != nil {
 						log.Printf("[AccountQueue] panic executing job %s: %v", j.ID, r)
-						q.store.UpdateStatus(j.ID, jobs.StatusFailed)
+						SaveLocalResult(q.store, j, jobs.StatusFailed, 0, "", "")
 						q.metrics.JobFailed(j.UserID, q.upstream, "internal panic")
 						ObserveJobFinished(q.metrics, j, q.upstream, "failed", 0)
 						if !j.IsWebhookDelivery() && j.WebhookURL != "" {
@@ -785,7 +785,6 @@ func execute(ctx context.Context, job *jobs.Job, dispatchURL, upstream string, s
 			pool.RecordSuccess(member.ID)
 		}
 		body, _ = io.ReadAll(resp.Body)
-		store.UpdateStatus(job.ID, jobs.StatusCompleted)
 		SaveLocalResult(store, job, jobs.StatusCompleted, resp.StatusCode, resp.Header.Get("Content-Type"), string(body))
 		resultKey := recordJobResult(job, resultRecorder, jobs.StatusCompleted, resp.StatusCode, resp.Header.Get("Content-Type"), string(body))
 		streamed := publishTerminal(broker, job.ID, SSEEvent{
@@ -867,7 +866,6 @@ func publishTerminal(broker *Broker, jobID string, event SSEEvent) bool {
 }
 
 func failJob(job *jobs.Job, upstream, reason string, responseStatus int, body []byte, store storage.Store, broker *Broker, metrics MetricsAdapter, enqueueWebhook WebhookEnqueuer, resultRecorder storage.ResultRecorder) {
-	store.UpdateStatus(job.ID, jobs.StatusFailed)
 	SaveLocalResult(store, job, jobs.StatusFailed, responseStatus, "", string(body))
 	resultKey := recordJobResult(job, resultRecorder, jobs.StatusFailed, responseStatus, "", string(body))
 	streamed := publishTerminal(broker, job.ID, SSEEvent{
@@ -994,7 +992,6 @@ func failExpiredJob(job *jobs.Job, lastReason, upstream string, store storage.St
 // reported, and its webhook is handed off from its own goroutine, since it
 // may route back to the queue doing the failing.
 func failQueuedJob(job *jobs.Job, reason, outcome, upstream string, store storage.Store, broker *Broker, metrics MetricsAdapter, enqueueWebhook WebhookEnqueuer, resultRecorder storage.ResultRecorder) {
-	store.UpdateStatus(job.ID, jobs.StatusFailed)
 	SaveLocalResult(store, job, jobs.StatusFailed, 0, "", "")
 	resultKey := recordJobResult(job, resultRecorder, jobs.StatusFailed, 0, "", "")
 	broker.Publish(job.ID, SSEEvent{Event: "failed", Data: map[string]any{
@@ -1013,23 +1010,23 @@ func failQueuedJob(job *jobs.Job, reason, outcome, upstream string, store storag
 
 const defaultLocalResultMaxBytes = 64 * 1024
 
-// SaveLocalResult keeps the terminal response with the job (bounded by
-// AQUIFER_RESULT_MAX_BYTES) so GET /jobs/{id} can return it.
+// SaveLocalResult commits terminal status and the bounded response together.
+// A persistence failure must not discard an actual target response or trigger
+// an immediate repeat of its side effects. Continue delivery, log the failure,
+// and leave the persisted job recoverable under the usual retry semantics.
 func SaveLocalResult(store storage.Store, job *jobs.Job, status jobs.Status, responseStatus int, contentType, body string) {
-	if job.IsWebhookDelivery() {
-		return
+	var result *jobs.Result
+	if !job.IsWebhookDelivery() {
+		truncated, wasTruncated := storage.TruncateStringBytes(body, env.Int64("AQUIFER_RESULT_MAX_BYTES", defaultLocalResultMaxBytes))
+		result = &jobs.Result{
+			JobID: job.ID, Status: status, ResponseStatus: responseStatus,
+			ContentType: contentType, Body: truncated, BodyTruncated: wasTruncated,
+			RecordedAt: time.Now().UnixMilli(), Source: "aquifer",
+		}
 	}
-	truncated, wasTruncated := storage.TruncateStringBytes(body, env.Int64("AQUIFER_RESULT_MAX_BYTES", defaultLocalResultMaxBytes))
-	store.PutResult(job.ID, jobs.Result{
-		JobID:          job.ID,
-		Status:         status,
-		ResponseStatus: responseStatus,
-		ContentType:    contentType,
-		Body:           truncated,
-		BodyTruncated:  wasTruncated,
-		RecordedAt:     time.Now().UnixMilli(),
-		Source:         "aquifer",
-	})
+	if err := store.Finish(job.ID, status, result); err != nil {
+		log.Printf("[dispatch] persist terminal result for job %s (%s): %v; delivering outcome without persisted completion", job.ID, status, err)
+	}
 }
 
 func recordJobResult(job *jobs.Job, recorder storage.ResultRecorder, status jobs.Status, responseStatus int, contentType string, body string) string {

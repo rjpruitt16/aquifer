@@ -590,6 +590,57 @@ func (s *Pebble) DeleteJob(jobID string) {
 	s.countStatus(rec.Job.Status, -1)
 }
 
+// Finish commits the response and terminal status in the same WAL batch.
+func (s *Pebble) Finish(jobID string, status jobs.Status, result *jobs.Result) error {
+	lock := s.jobLock(jobID)
+	lock.Lock()
+	defer lock.Unlock()
+	if status != jobs.StatusCompleted && status != jobs.StatusFailed {
+		return fmt.Errorf("invalid terminal status: %s", status)
+	}
+	val, closer, err := s.db.Get(jobKey(jobID))
+	if err != nil {
+		return err
+	}
+	var rec pebbleRecord
+	err = json.Unmarshal(val, &rec)
+	closer.Close()
+	if err != nil {
+		return err
+	}
+	previousStatus, previousExpiry := rec.Job.Status, rec.ExpiresAt
+	rec.Job.Status, rec.Result = status, result
+	rec.ExpiresAt = time.Now().Add(ttlForStatus(status)).UnixMilli()
+	data, err := json.Marshal(&rec)
+	if err != nil {
+		return err
+	}
+	batch := s.db.NewBatch()
+	defer batch.Close()
+	if err = batch.Set(jobKey(jobID), data, nil); err != nil {
+		return err
+	}
+	if rec.QueueKey != "" {
+		if err = batch.Delete(queueIndexKey(rec.QueueKey, rec.Job.CreatedAt, jobID), nil); err != nil {
+			return err
+		}
+	}
+	if err = batch.Delete(expKey(previousExpiry, jobID), nil); err != nil {
+		return err
+	}
+	if err = batch.Set(expKey(rec.ExpiresAt, jobID), nil, nil); err != nil {
+		return err
+	}
+	if err = batch.Commit(s.syncOpts); err != nil {
+		return err
+	}
+	s.moveStatus(previousStatus, status)
+	if !s.skipDrainEvents.Load() {
+		s.recordDrainEvent(&rec, status)
+	}
+	return nil
+}
+
 func (s *Pebble) PutResult(jobID string, result jobs.Result) {
 	lock := s.jobLock(jobID)
 	lock.Lock()
